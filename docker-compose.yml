@@ -1,0 +1,65 @@
+x-bot-common: &bot-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  env_file:
+    - .env                                   # SCP'd to VPS manually, never committed to git
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+
+  # TurtleQuant — digital option pricing on longer-dated Polymarket crypto markets
+  # Calibration passed (5yr BTC+ETH): Brier=0.178/0.199, RMSE=0.044/0.043
+  turtlequant-bot:
+    <<: *bot-common
+    container_name: turtlequant-bot
+    command:
+      - "uv"
+      - "run"
+      - "python"
+      - "scripts/turtlequant_bot.py"
+      - "--paper"
+      - "--asset"
+      - "btc,eth"
+    volumes:
+      - /opt/turtlequant/state:/app/state
+      - /opt/turtlequant/data:/app/data
+    environment:
+      PAPER_TRADE: "true"
+      ASSET: "btc,eth"
+      ENTRY_THRESHOLD: "0.05"
+      KELLY_FRACTION: "0.25"
+      STARTING_NAV: "100.0"
+      STATE_DIR: "/app/state"
+      LOG_FILE: "/app/state/turtlequant-bot.log"
+
+  # SlowQuant — Merton jump-diffusion on short-dated BTC/ETH price threshold markets
+  # Calibration (3yr, 2026-03-10):
+  #   ETH: Brier=0.1749 (PASS), RMSE=0.0348 (PASS)
+  #   BTC: Brier=0.1497 (PASS), RMSE=0.0502 (marginal — accepted)
+  slowquant-bot:
+    <<: *bot-common
+    container_name: slowquant-bot
+    command:
+      - "uv"
+      - "run"
+      - "python"
+      - "scripts/slowquant_bot.py"
+      - "--paper"
+      - "--asset"
+      - "btc,eth"
+    volumes:
+      - /opt/turtlequant/state/slowquant:/app/state
+      - /opt/turtlequant/data:/app/data
+    environment:
+      PAPER_TRADE: "true"
+      ASSET: "btc,eth"
+      STARTING_NAV: "100.0"
+      KELLY_FRACTION: "0.25"
+      N_SIMS: "50000"
+      STATE_DIR: "/app/state"
