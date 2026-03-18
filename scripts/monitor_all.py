@@ -319,7 +319,7 @@ class StrategyCard(Static):
         yield Label("", id=f"cb-{self._state.meta.key}")
 
     def on_mount(self) -> None:
-        self._render()
+        self._update_labels()
 
     def on_click(self, _event: events.Click) -> None:
         self.post_message(self.Selected(self._index))
@@ -330,9 +330,9 @@ class StrategyCard(Static):
             self.add_class("selected")
         else:
             self.remove_class("selected")
-        self._render()
+        self._update_labels()
 
-    def _render(self) -> None:
+    def _update_labels(self) -> None:
         s = self._state
         m = s.meta
 
