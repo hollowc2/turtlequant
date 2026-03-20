@@ -382,6 +382,11 @@ class SlowQuantRunner:
             model_prob=opp.mc_prob,
         )
         self.pos_mgr.open_position(pos)
+        # Paper fills are instant at the quoted price — confirm immediately.
+        # In live mode, confirm_fill() must be called by the order reconciliation
+        # loop once the exchange confirms the actual fill price.
+        if self.paper:
+            self.pos_mgr.confirm_fill(pos.market_id, opp.market.yes_price)
         self._append_history(
             {
                 "event": "open",
@@ -409,6 +414,9 @@ class SlowQuantRunner:
     def _check_exits(self, spots: dict[str, float], regime: RegimeState) -> None:  # noqa: ARG002
         """Reprice open positions and close those triggering exit conditions."""
         for pos in list(self.pos_mgr.all_positions()):
+            if not pos.fill_confirmed:
+                logger.debug("[PENDING] Skipping exit check — fill not confirmed for %s", pos.market_id[:16])
+                continue
             try:
                 now = datetime.now(UTC)
 
@@ -468,8 +476,12 @@ class SlowQuantRunner:
                     n_sims=min(self.n_sims, 20_000),
                 )
 
-                # Proxy market price with entry price; scanner refreshes on next scan
-                current_market_price = pos.entry_price
+                # Fetch live market price; fall back to MC prob then entry price
+                current_market_price = (
+                    self.scanner.fetch_market_price(pos.market_id)
+                    or current_mc_prob
+                    or pos.entry_price
+                )
 
                 exit_flag, reason = should_exit(pos, current_mc_prob, current_market_price, hours_left)
 
