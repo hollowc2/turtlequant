@@ -59,10 +59,11 @@ _ASSET_PAT = r"(BTC|Bitcoin|ETH|Ethereum|SOL|Solana|XRP|Ripple)"
 # Strike: $75,000 or $75k or 75000
 _STRIKE_PAT = r"\$?([\d,]+(?:\.\d+)?)\s*[kK]?"
 
-# Date phrase: "March 30", "March 30, 2025", "2025-03-30", "end of March"
+# Date phrase: "March 30", "March 30, 2025", "2025-03-30", "end of March", "March 16-22"
 _DATE_PAT = (
     r"("
     r"\d{4}-\d{2}-\d{2}"  # ISO date
+    r"|[A-Za-z]+ \d{1,2}-\d{1,2}(?:,? \d{4})?"  # "March 16-22" date range — end date used as expiry
     r"|[A-Za-z]+ \d{1,2}(?:,? \d{4})?"  # "March 30" or "March 30, 2025"
     r"|(?:end of |the end of )[A-Za-z]+"  # "end of March"
     r"|Q[1-4] \d{4}"  # "Q1 2025"
@@ -71,9 +72,9 @@ _DATE_PAT = (
     r")"
 )
 
-# European patterns: "above", "over", "exceed", "at or above", "higher than"
+# European patterns: "above", "over", "exceed", "at or above", "higher than", "greater than"
 _EUROPEAN_RE = re.compile(
-    rf"Will\s+{_ASSET_PAT}\s+(?:be\s+)?(?:at\s+or\s+)?(?:above|over|exceed|higher\s+than)\s+{_STRIKE_PAT}"
+    rf"Will\s+(?:the\s+price\s+of\s+)?{_ASSET_PAT}\s+(?:be\s+)?(?:at\s+or\s+)?(?:above|over|exceed|higher\s+than|greater\s+than)\s+{_STRIKE_PAT}"
     rf".*?(?:on|at|by)\s+{_DATE_PAT}",
     re.IGNORECASE | re.DOTALL,
 )
@@ -81,7 +82,7 @@ _EUROPEAN_RE = re.compile(
 # Barrier UP patterns: "reach", "hit", "touch", "cross", "break above"
 _BARRIER_RE = re.compile(
     rf"Will\s+{_ASSET_PAT}\s+(?:ever\s+)?(?:reach|hit|touch|cross|break(?:\s+above)?)\s+{_STRIKE_PAT}"
-    rf".*?(?:before|by|in)\s+{_DATE_PAT}",
+    rf".*?(?:(?:before|by|in)\s+)?{_DATE_PAT}",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -89,7 +90,7 @@ _BARRIER_RE = re.compile(
 # These are PUT barriers (P(min S_t < K)) — stored as OptionType.BARRIER_DOWN
 _BARRIER_DOWN_RE = re.compile(
     rf"Will\s+{_ASSET_PAT}\s+(?:ever\s+)?(?:dip|fall|drop|sink|crash|decline)\s+(?:to|below|under)\s+{_STRIKE_PAT}"
-    rf".*?(?:before|by|in|on)\s+{_DATE_PAT}",
+    rf".*?(?:(?:before|by|in|on)\s+)?{_DATE_PAT}",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -257,6 +258,12 @@ def _parse_date(raw: str) -> datetime | None:
         return None
 
     raw = raw.strip()
+
+    # Handle "March 16-22" date ranges → use the end date as expiry
+    range_match = re.match(r"([A-Za-z]+)\s+\d{1,2}-(\d{1,2})(?:,?\s*(\d{4}))?", raw)
+    if range_match:
+        month, end_day, year = range_match.group(1), range_match.group(2), range_match.group(3)
+        raw = f"{month} {end_day}" + (f", {year}" if year else "")
 
     # Handle "end of March" → last day of that month
     end_of = re.match(r"(?:end of |the end of )([A-Za-z]+)", raw, re.IGNORECASE)
