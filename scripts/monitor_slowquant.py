@@ -10,7 +10,7 @@ Usage:
     uv run --script scripts/monitor_slowquant.py
     uv run --script scripts/monitor_slowquant.py --live
     uv run --script scripts/monitor_slowquant.py --live --interval 10
-    uv run --script scripts/monitor_slowquant.py --state-dir /opt/polymarket/state/slowquant
+    uv run --script scripts/monitor_slowquant.py --state-dir /opt/turtlequant/state/slowquant
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from rich.panel import Panel  # type: ignore[import-untyped]
 from rich.table import Table  # type: ignore[import-untyped]
 from rich.text import Text  # type: ignore[import-untyped]
 
-_DEFAULT_STATE_DIR = Path(os.getenv("STATE_DIR", "/opt/polymarket/state/slowquant"))
+_DEFAULT_STATE_DIR = Path(os.getenv("STATE_DIR", "/opt/turtlequant/state/slowquant"))
 PAPER_TRADE = os.getenv("PAPER_TRADE", "true").lower() == "true"
 
 

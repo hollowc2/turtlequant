@@ -11,7 +11,7 @@ Usage:
     uv run --script scripts/monitor_turtlequant.py
     uv run --script scripts/monitor_turtlequant.py --live
     uv run --script scripts/monitor_turtlequant.py --live --interval 15
-    uv run --script scripts/monitor_turtlequant.py --state-dir /opt/polymarket/state/turtlequant
+    uv run --script scripts/monitor_turtlequant.py --state-dir /opt/turtlequant/state
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from rich.text import Text  # type: ignore[import-untyped]
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-_DEFAULT_STATE_DIR = Path(os.getenv("STATE_DIR", "/opt/polymarket/state/turtlequant"))
+_DEFAULT_STATE_DIR = Path(os.getenv("STATE_DIR", "/opt/turtlequant/state"))
 PAPER_TRADE = os.getenv("PAPER_TRADE", "true").lower() == "true"
 
 
