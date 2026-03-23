@@ -26,6 +26,10 @@ DEFAULT_MAX_PER_EXPIRY_PCT = 0.15
 DEFAULT_MAX_TOTAL_EXPOSURE_PCT = 0.40
 DEFAULT_KELLY_FRACTION = 0.25
 
+# Conservative flat taker fee applied to both entry and exit contract premium.
+# Polymarket charges 30 bps on all crypto markets as of March 2026.
+TAKER_FEE_RATE = 0.003
+
 # Default state directory (overridden by --state-dir CLI arg or env)
 DEFAULT_STATE_DIR = Path("state/turtlequant")
 DEFAULT_POSITIONS_FILE = DEFAULT_STATE_DIR / "turtlequant-positions.json"
@@ -165,16 +169,21 @@ class PositionManager:
         pnl = 0.0
         if pos:
             tokens = pos.size_usd / pos.entry_price if pos.entry_price > 0 else 0.0
-            pnl = (exit_price - pos.entry_price) * tokens
+            gross_pnl = (exit_price - pos.entry_price) * tokens
+            entry_fee = pos.size_usd * TAKER_FEE_RATE
+            exit_fee = tokens * exit_price * TAKER_FEE_RATE
+            pnl = gross_pnl - entry_fee - exit_fee
             self.current_nav += pnl
             self.total_pnl += pnl
             logger.info(
-                "Closing position: %s %s K=%.0f — reason=%s exit=%.4f pnl=%+.4f nav=%.2f",
+                "Closing position: %s %s K=%.0f — reason=%s exit=%.4f gross=%+.4f fees=%.4f pnl=%+.4f nav=%.2f",
                 pos.asset.upper(),
                 pos.option_type,
                 pos.strike,
                 reason,
                 exit_price,
+                gross_pnl,
+                entry_fee + exit_fee,
                 pnl,
                 self.current_nav,
             )
