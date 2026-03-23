@@ -142,7 +142,7 @@ class StrategyState:
         self.opens = [e for e in self.history if e.get("event") == "open"]
         self.closes = [e for e in self.history if e.get("event") == "close"]
         self.wins = [e for e in self.closes if e.get("pnl", 0) > 0]
-        self.losses = [e for e in self.closes if e.get("pnl", 0) < 0]
+        self.losses = [e for e in self.closes if e.get("pnl", 0) <= 0]
 
     # ── Derived metrics ───────────────────────────────────────────────────────
 
