@@ -48,12 +48,24 @@ from turtlequant.slowquant.strategy_loop import SlowQuantRunner
 # Logging
 # ---------------------------------------------------------------------------
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger("slowquant_bot")
+def _setup_logging() -> logging.Logger:
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
+    # Also log to LOG_FILE if set (for monitor tail)
+    log_file = os.getenv("LOG_FILE", "")
+    if log_file:
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(log_file)
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+    return logging.getLogger("slowquant_bot")
+
+
+logger = _setup_logging()
 
 # ---------------------------------------------------------------------------
 # Constants

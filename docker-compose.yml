@@ -34,7 +34,7 @@ services:
       ASSET: "btc,eth"
       ENTRY_THRESHOLD: "0.05"
       KELLY_FRACTION: "0.25"
-      STARTING_NAV: "100.0"
+      STARTING_NAV: "1000.0"
       STATE_DIR: "/app/state"
       LOG_FILE: "/app/state/turtlequant-bot.log"
 
@@ -59,7 +59,8 @@ services:
     environment:
       PAPER_TRADE: "true"
       ASSET: "btc,eth"
-      STARTING_NAV: "100.0"
+      STARTING_NAV: "1000.0"
       KELLY_FRACTION: "0.25"
       N_SIMS: "50000"
       STATE_DIR: "/app/state"
+      LOG_FILE: "/app/state/slowquant-bot.log"
