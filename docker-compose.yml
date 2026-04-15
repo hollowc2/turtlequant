@@ -64,3 +64,26 @@ services:
       N_SIMS: "50000"
       STATE_DIR: "/app/state"
       LOG_FILE: "/app/state/slowquant-bot.log"
+
+  # Prometheus metrics exporter — reads JSON state files for both strategies
+  turtlequant-grafana-exporter:
+    image: python:3.12-slim
+    container_name: turtlequant-grafana-exporter
+    command: >
+      sh -c "pip install prometheus_client -q &&
+             python /app/scripts/grafana_exporter.py"
+    volumes:
+      - /opt/turtlequant/state:/opt/turtlequant/state:ro
+      - .:/app
+    ports:
+      - "127.0.0.1:8004:8004"
+    networks:
+      - monitoring_net
+    restart: unless-stopped
+    environment:
+      EXPORTER_PORT: "8004"
+      STATE_DIR: "/opt/turtlequant/state"
+
+networks:
+  monitoring_net:
+    external: true
