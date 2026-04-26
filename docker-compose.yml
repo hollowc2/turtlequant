@@ -33,7 +33,7 @@ services:
       PAPER_TRADE: "true"
       ASSET: "btc,eth"
       ENTRY_THRESHOLD: "0.05"
-      KELLY_FRACTION: "0.25"
+      KELLY_FRACTION: "0.50"
       STARTING_NAV: "1000.0"
       STATE_DIR: "/app/state"
       LOG_FILE: "/app/state/turtlequant-bot.log"
