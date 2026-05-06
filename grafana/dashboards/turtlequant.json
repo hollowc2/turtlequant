@@ -7,7 +7,7 @@
     "polymarket"
   ],
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "time": {
     "from": "now-24h",
@@ -450,7 +450,7 @@
         "x": 0,
         "y": 4,
         "w": 24,
-        "h": 8
+        "h": 7
       },
       "datasource": {
         "type": "prometheus",
@@ -506,15 +506,910 @@
       ]
     },
     {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Drawdown Under Equity Curve",
+      "description": "Current and maximum realized drawdown derived from closed-trade equity peaks. Shown as negative values so drawdowns sit below zero.",
+      "gridPos": {
+        "x": 0,
+        "y": 11,
+        "w": 24,
+        "h": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 25,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "-1 * turtlequant_current_drawdown_pct{strategy=\"$strategy\"}",
+          "instant": false,
+          "range": true,
+          "legendFormat": "Current drawdown",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "-1 * turtlequant_max_drawdown_pct{strategy=\"$strategy\"}",
+          "instant": false,
+          "range": true,
+          "legendFormat": "Max drawdown",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "stat",
+      "title": "Current DD",
+      "description": "Current realized drawdown from peak NAV",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.05
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_current_drawdown_pct{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "stat",
+      "title": "Max DD",
+      "description": "Maximum realized drawdown from peak NAV",
+      "gridPos": {
+        "x": 4,
+        "y": 16,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 0.2
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_max_drawdown_pct{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "stat",
+      "title": "Longest DD",
+      "description": "Longest time spent below a realized-equity peak",
+      "gridPos": {
+        "x": 8,
+        "y": 16,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 604800
+              },
+              {
+                "color": "red",
+                "value": 2592000
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_longest_drawdown_duration_sec{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "stat",
+      "title": "Recovery Time",
+      "description": "Recovery duration for the max drawdown; 0 means no recovered drawdown yet",
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 604800
+              },
+              {
+                "color": "red",
+                "value": 2592000
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_max_drawdown_recovery_sec{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Profit Factor",
+      "description": "Gross winners divided by absolute gross losers",
+      "gridPos": {
+        "x": 16,
+        "y": 16,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 1.5
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_profit_factor{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "Expectancy",
+      "description": "Expected realized P&L per closed trade",
+      "gridPos": {
+        "x": 20,
+        "y": 16,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 0.5
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_expectancy_usd{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "Avg Win",
+      "description": "Average winning closed trade",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_avg_win_usd{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "stat",
+      "title": "Avg Loss",
+      "description": "Average losing closed trade",
+      "gridPos": {
+        "x": 4,
+        "y": 20,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_avg_loss_usd{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "type": "stat",
+      "title": "Best Trade",
+      "description": "Best closed-trade P&L",
+      "gridPos": {
+        "x": 8,
+        "y": 20,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_best_trade_pnl_usd{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "type": "stat",
+      "title": "Worst Trade",
+      "description": "Worst closed-trade P&L",
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 0.01
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_worst_trade_pnl_usd{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "type": "stat",
+      "title": "Median Trade",
+      "description": "Median closed-trade P&L",
+      "gridPos": {
+        "x": 16,
+        "y": 20,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 0.01
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_median_trade_pnl_usd{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "stat",
+      "title": "Concentration",
+      "description": "Largest open position as a fraction of NAV",
+      "gridPos": {
+        "x": 20,
+        "y": 20,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 0.2
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_largest_position_pct_nav{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "id": 8,
       "type": "table",
       "title": "Active Positions",
       "description": "Currently open positions with entry details",
       "gridPos": {
         "x": 0,
-        "y": 12,
+        "y": 24,
         "w": 24,
-        "h": 9
+        "h": 8
       },
       "datasource": {
         "type": "prometheus",
@@ -732,13 +1627,244 @@
       ]
     },
     {
+      "id": 29,
+      "type": "barchart",
+      "title": "PnL by Asset",
+      "description": "Realized closed-trade P&L split by asset",
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "orientation": "auto",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0,
+        "showValue": "auto",
+        "stacking": "none",
+        "groupWidth": 0.7,
+        "barWidth": 0.97,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 80
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 0.01
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_closed_pnl_by_asset_usd{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "{{asset}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "barchart",
+      "title": "PnL by Weekday",
+      "description": "Realized closed-trade P&L split by close weekday",
+      "gridPos": {
+        "x": 8,
+        "y": 32,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "orientation": "auto",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0,
+        "showValue": "auto",
+        "stacking": "none",
+        "groupWidth": 0.7,
+        "barWidth": 0.97,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 80
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 0.01
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_closed_pnl_by_weekday_usd{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "{{weekday}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "barchart",
+      "title": "Open Exposure by Asset",
+      "description": "Current deployed capital split by asset",
+      "gridPos": {
+        "x": 16,
+        "y": 32,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "orientation": "auto",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0,
+        "showValue": "auto",
+        "stacking": "none",
+        "groupWidth": 0.7,
+        "barWidth": 0.97,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 80
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 0.01
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_open_exposure_by_asset_usd{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "{{asset}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "id": 9,
       "type": "piechart",
       "title": "Exit Reasons",
       "description": "Breakdown of why positions were closed",
       "gridPos": {
         "x": 0,
-        "y": 21,
+        "y": 40,
         "w": 8,
         "h": 8
       },
@@ -793,13 +1919,149 @@
       ]
     },
     {
+      "id": 32,
+      "type": "stat",
+      "title": "Data Freshness",
+      "description": "Age of the positions state file sample",
+      "gridPos": {
+        "x": 8,
+        "y": 40,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 300
+              },
+              {
+                "color": "red",
+                "value": 900
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_state_file_age_sec{strategy=\"$strategy\", file=\"positions\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 33,
+      "type": "stat",
+      "title": "Exporter Health",
+      "description": "1 means positions and history files were readable on scrape",
+      "gridPos": {
+        "x": 12,
+        "y": 40,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_exporter_scrape_success{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "id": 10,
       "type": "stat",
       "title": "Avg Edge at Entry",
       "description": "Mean edge (model prob - market price) across all opened trades",
       "gridPos": {
-        "x": 8,
-        "y": 21,
+        "x": 16,
+        "y": 40,
         "w": 4,
         "h": 4
       },
@@ -864,8 +2126,8 @@
       "title": "Total Exposure",
       "description": "Sum of all open position sizes in USD",
       "gridPos": {
-        "x": 12,
-        "y": 21,
+        "x": 20,
+        "y": 40,
         "w": 4,
         "h": 4
       },
@@ -926,8 +2188,8 @@
       "title": "Last Trade Age",
       "description": "Time since the last position was closed",
       "gridPos": {
-        "x": 16,
-        "y": 21,
+        "x": 8,
+        "y": 44,
         "w": 4,
         "h": 4
       },
@@ -996,8 +2258,8 @@
       "title": "Winning Trades",
       "description": "Count of closed trades with positive P&L",
       "gridPos": {
-        "x": 20,
-        "y": 21,
+        "x": 12,
+        "y": 44,
         "w": 4,
         "h": 4
       },
@@ -1059,7 +2321,7 @@
       "description": "Most recent closed positions with P&L and exit reason",
       "gridPos": {
         "x": 0,
-        "y": 29,
+        "y": 48,
         "w": 24,
         "h": 10
       },
@@ -1182,6 +2444,191 @@
           "legendFormat": "",
           "refId": "A",
           "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 34,
+      "type": "table",
+      "title": "Recent Holding Periods",
+      "description": "Holding duration for recent closed trades.",
+      "gridPos": {
+        "x": 0,
+        "y": 58,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [],
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Holding (h)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "h"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value": "Holding (h)",
+              "market_id": "Market ID",
+              "asset": "Asset",
+              "reason": "Exit Reason",
+              "strategy": "",
+              "Time": ""
+            },
+            "excludeByName": {
+              "strategy": true,
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "idx": true
+            },
+            "indexByName": {
+              "Asset": 0,
+              "Exit Reason": 1,
+              "Holding (h)": 2,
+              "Market ID": 3
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_closed_position_holding_hours{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "A",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 35,
+      "type": "timeseries",
+      "title": "Operational Health Timeline",
+      "description": "State-file freshness and exporter scrape success over the selected time range.",
+      "gridPos": {
+        "x": 12,
+        "y": 58,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_state_file_age_sec{strategy=\"$strategy\", file=\"positions\"}",
+          "instant": false,
+          "range": true,
+          "legendFormat": "positions file age",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_state_file_age_sec{strategy=\"$strategy\", file=\"history\"}",
+          "instant": false,
+          "range": true,
+          "legendFormat": "history file age",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "300 * (1 - turtlequant_exporter_scrape_success{strategy=\"$strategy\"})",
+          "instant": false,
+          "range": true,
+          "legendFormat": "scrape failure marker",
+          "refId": "C"
         }
       ]
     }

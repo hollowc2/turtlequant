@@ -37,6 +37,7 @@ import argparse
 import json
 import logging
 import os
+import statistics
 import time
 from datetime import datetime, timezone
 from http.server import HTTPServer
@@ -81,6 +82,86 @@ def _parse_ts(ts_str: str) -> float | None:
         return None
 
 
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _file_age_sec(path: str) -> float | None:
+    try:
+        return max(0.0, time.time() - os.path.getmtime(path))
+    except OSError:
+        return None
+
+
+def _equity_points(close_events: list[dict], nav: float | None, total_pnl: float | None) -> list[tuple[float, float]]:
+    """Build a realized-equity series from close events."""
+    start_nav = (float(nav) - float(total_pnl)) if nav is not None and total_pnl is not None else 1000.0
+    points: list[tuple[float, float]] = []
+    equity = start_nav
+    for event in close_events:
+        ts = _parse_ts(event.get("ts"))
+        if ts is None:
+            continue
+        if not points:
+            points.append((ts - 1.0, equity))
+        equity += _safe_float(event.get("pnl"))
+        points.append((ts, equity))
+    return points or [(time.time(), start_nav)]
+
+
+def _drawdown_stats(points: list[tuple[float, float]]) -> dict[str, float]:
+    peak = points[0][1]
+    peak_ts = points[0][0]
+    current_dd_usd = 0.0
+    current_dd_pct = 0.0
+    max_dd_usd = 0.0
+    max_dd_pct = 0.0
+    longest_dd = 0.0
+    max_recovery = 0.0
+    dd_start_ts: float | None = None
+    max_dd_peak_ts: float | None = None
+    max_dd_recovered = False
+
+    for ts, equity in points:
+        if equity >= peak:
+            if dd_start_ts is not None:
+                longest_dd = max(longest_dd, ts - dd_start_ts)
+                if max_dd_peak_ts is not None and not max_dd_recovered:
+                    max_recovery = ts - max_dd_peak_ts
+                    max_dd_recovered = True
+                dd_start_ts = None
+            peak = equity
+            peak_ts = ts
+            continue
+
+        if dd_start_ts is None:
+            dd_start_ts = peak_ts
+        dd_usd = peak - equity
+        dd_pct = dd_usd / peak if peak > 0 else 0.0
+        current_dd_usd = dd_usd
+        current_dd_pct = dd_pct
+        if dd_usd > max_dd_usd:
+            max_dd_usd = dd_usd
+            max_dd_pct = dd_pct
+            max_dd_peak_ts = peak_ts
+            max_dd_recovered = False
+
+    if dd_start_ts is not None:
+        longest_dd = max(longest_dd, points[-1][0] - dd_start_ts)
+
+    return {
+        "current_usd": current_dd_usd,
+        "current_pct": current_dd_pct,
+        "max_usd": max_dd_usd,
+        "max_pct": max_dd_pct,
+        "longest_sec": longest_dd,
+        "max_recovery_sec": max_recovery,
+    }
+
+
 class TurtleQuantCollector:
     def __init__(self, state_dir: str):
         self.state_dir = state_dir
@@ -107,6 +188,46 @@ class TurtleQuantCollector:
             "Sum of open position sizes in USD",
             labels=["strategy"],
         )
+        exposure_by_asset_g = GaugeMetricFamily(
+            "turtlequant_open_exposure_by_asset_usd",
+            "Sum of open position sizes in USD by asset",
+            labels=["strategy", "asset"],
+        )
+        largest_position_pct_nav_g = GaugeMetricFamily(
+            "turtlequant_largest_position_pct_nav",
+            "Largest open position as a fraction of NAV",
+            labels=["strategy"],
+        )
+        current_drawdown_usd_g = GaugeMetricFamily(
+            "turtlequant_current_drawdown_usd",
+            "Current realized drawdown in USD",
+            labels=["strategy"],
+        )
+        current_drawdown_pct_g = GaugeMetricFamily(
+            "turtlequant_current_drawdown_pct",
+            "Current realized drawdown as a fraction of peak NAV",
+            labels=["strategy"],
+        )
+        max_drawdown_usd_g = GaugeMetricFamily(
+            "turtlequant_max_drawdown_usd",
+            "Maximum realized drawdown in USD",
+            labels=["strategy"],
+        )
+        max_drawdown_pct_g = GaugeMetricFamily(
+            "turtlequant_max_drawdown_pct",
+            "Maximum realized drawdown as a fraction of peak NAV",
+            labels=["strategy"],
+        )
+        longest_drawdown_g = GaugeMetricFamily(
+            "turtlequant_longest_drawdown_duration_sec",
+            "Longest realized drawdown duration in seconds",
+            labels=["strategy"],
+        )
+        max_drawdown_recovery_g = GaugeMetricFamily(
+            "turtlequant_max_drawdown_recovery_sec",
+            "Recovery time from the maximum realized drawdown in seconds; 0 if unrecovered or no drawdown",
+            labels=["strategy"],
+        )
 
         # --- Trade statistics ---
         closed_trades_g = GaugeMetricFamily(
@@ -128,6 +249,51 @@ class TurtleQuantCollector:
             "turtlequant_avg_pnl_per_trade_usd",
             "Mean P&L per closed trade in USD",
             labels=["strategy"],
+        )
+        profit_factor_g = GaugeMetricFamily(
+            "turtlequant_profit_factor",
+            "Gross winning P&L divided by absolute gross losing P&L",
+            labels=["strategy"],
+        )
+        avg_win_g = GaugeMetricFamily(
+            "turtlequant_avg_win_usd",
+            "Mean P&L of winning closed trades in USD",
+            labels=["strategy"],
+        )
+        avg_loss_g = GaugeMetricFamily(
+            "turtlequant_avg_loss_usd",
+            "Mean P&L of losing closed trades in USD",
+            labels=["strategy"],
+        )
+        expectancy_g = GaugeMetricFamily(
+            "turtlequant_expectancy_usd",
+            "Expected P&L per trade in USD",
+            labels=["strategy"],
+        )
+        best_trade_g = GaugeMetricFamily(
+            "turtlequant_best_trade_pnl_usd",
+            "Best closed-trade P&L in USD",
+            labels=["strategy"],
+        )
+        worst_trade_g = GaugeMetricFamily(
+            "turtlequant_worst_trade_pnl_usd",
+            "Worst closed-trade P&L in USD",
+            labels=["strategy"],
+        )
+        median_trade_g = GaugeMetricFamily(
+            "turtlequant_median_trade_pnl_usd",
+            "Median closed-trade P&L in USD",
+            labels=["strategy"],
+        )
+        pnl_by_asset_g = GaugeMetricFamily(
+            "turtlequant_closed_pnl_by_asset_usd",
+            "Realized closed-trade P&L by asset in USD",
+            labels=["strategy", "asset"],
+        )
+        pnl_by_weekday_g = GaugeMetricFamily(
+            "turtlequant_closed_pnl_by_weekday_usd",
+            "Realized closed-trade P&L by weekday in USD",
+            labels=["strategy", "weekday"],
         )
         avg_edge_g = GaugeMetricFamily(
             "turtlequant_avg_edge_at_entry",
@@ -173,28 +339,54 @@ class TurtleQuantCollector:
         closed_pnl_g = GaugeMetricFamily(
             "turtlequant_closed_position_pnl_usd",
             "P&L of recent closed trade in USD",
-            labels=["strategy", "idx", "asset", "reason"],
+            labels=["strategy", "idx", "market_id", "asset", "reason"],
+        )
+        closed_hold_g = GaugeMetricFamily(
+            "turtlequant_closed_position_holding_hours",
+            "Holding period for recent closed trade in hours",
+            labels=["strategy", "idx", "market_id", "asset", "reason"],
+        )
+        state_file_age_g = GaugeMetricFamily(
+            "turtlequant_state_file_age_sec",
+            "Age of bot state files in seconds",
+            labels=["strategy", "file"],
+        )
+        scrape_success_g = GaugeMetricFamily(
+            "turtlequant_exporter_scrape_success",
+            "1 when both positions and history files were readable; 0 otherwise",
+            labels=["strategy"],
         )
 
         for strategy, (pos_file, hist_file) in STRATEGIES.items():
             pos_path = os.path.join(self.state_dir, pos_file)
             hist_path = os.path.join(self.state_dir, hist_file)
+            nav: float | None = None
+            total_pnl: float | None = None
+            positions: list[dict] = []
 
             # ---- Positions file ----
             pos_data = _load_json(pos_path)
             if isinstance(pos_data, dict):
-                nav = pos_data.get("nav")
-                total_pnl = pos_data.get("total_pnl")
+                nav = _safe_float(pos_data.get("nav"))
+                total_pnl = _safe_float(pos_data.get("total_pnl"))
                 positions = pos_data.get("positions") or []
 
                 if nav is not None:
-                    nav_g.add_metric([strategy], float(nav))
+                    nav_g.add_metric([strategy], nav)
                 if total_pnl is not None:
-                    total_pnl_g.add_metric([strategy], float(total_pnl))
+                    total_pnl_g.add_metric([strategy], total_pnl)
 
                 open_pos_g.add_metric([strategy], float(len(positions)))
                 exposure = sum(p.get("size_usd", 0.0) for p in positions)
                 exposure_g.add_metric([strategy], float(exposure))
+                by_asset: dict[str, float] = {}
+                for pos in positions:
+                    asset = str(pos.get("asset", "unknown"))
+                    by_asset[asset] = by_asset.get(asset, 0.0) + _safe_float(pos.get("size_usd"))
+                for asset, value in by_asset.items():
+                    exposure_by_asset_g.add_metric([strategy, asset], value)
+                largest = max((_safe_float(p.get("size_usd")) for p in positions), default=0.0)
+                largest_position_pct_nav_g.add_metric([strategy], largest / nav if nav and nav > 0 else 0.0)
 
                 now = time.time()
                 for pos in positions:
@@ -219,23 +411,56 @@ class TurtleQuantCollector:
                     if opened_at is not None:
                         age_hours = (now - opened_at) / 3600.0
                         pos_age_g.add_metric(pos_labels, age_hours)
+            pos_age = _file_age_sec(pos_path)
+            if pos_age is not None:
+                state_file_age_g.add_metric([strategy, "positions"], pos_age)
 
             # ---- History file ----
             hist_data = _load_json(hist_path)
             if isinstance(hist_data, list):
                 close_events = [e for e in hist_data if e.get("event") == "close"]
                 open_events = [e for e in hist_data if e.get("event") == "open"]
+                opens_by_market = {str(e.get("market_id", "")): e for e in open_events}
+                hist_age = _file_age_sec(hist_path)
+                if hist_age is not None:
+                    state_file_age_g.add_metric([strategy, "history"], hist_age)
+                scrape_success_g.add_metric([strategy], 1.0 if isinstance(pos_data, dict) else 0.0)
+
+                equity_points = _equity_points(close_events, nav, total_pnl)
+                drawdown = _drawdown_stats(equity_points)
+                current_drawdown_usd_g.add_metric([strategy], drawdown["current_usd"])
+                current_drawdown_pct_g.add_metric([strategy], drawdown["current_pct"])
+                max_drawdown_usd_g.add_metric([strategy], drawdown["max_usd"])
+                max_drawdown_pct_g.add_metric([strategy], drawdown["max_pct"])
+                longest_drawdown_g.add_metric([strategy], drawdown["longest_sec"])
+                max_drawdown_recovery_g.add_metric([strategy], drawdown["max_recovery_sec"])
 
                 # Trade statistics
                 n_closed = len(close_events)
                 closed_trades_g.add_metric([strategy], float(n_closed))
 
                 if n_closed > 0:
-                    pnls = [e.get("pnl", 0.0) for e in close_events]
+                    pnls = [_safe_float(e.get("pnl")) for e in close_events]
                     wins = sum(1 for p in pnls if p > 0)
+                    winning_pnls = [p for p in pnls if p > 0]
+                    losing_pnls = [p for p in pnls if p < 0]
                     winning_trades_g.add_metric([strategy], float(wins))
                     win_rate_g.add_metric([strategy], wins / n_closed)
                     avg_pnl_g.add_metric([strategy], sum(pnls) / n_closed)
+                    expectancy_g.add_metric([strategy], sum(pnls) / n_closed)
+                    best_trade_g.add_metric([strategy], max(pnls))
+                    worst_trade_g.add_metric([strategy], min(pnls))
+                    median_trade_g.add_metric([strategy], statistics.median(pnls))
+                    if winning_pnls:
+                        avg_win_g.add_metric([strategy], sum(winning_pnls) / len(winning_pnls))
+                    if losing_pnls:
+                        avg_loss_g.add_metric([strategy], sum(losing_pnls) / len(losing_pnls))
+                    gross_wins = sum(winning_pnls)
+                    gross_losses = abs(sum(losing_pnls))
+                    if gross_losses > 0:
+                        profit_factor_g.add_metric([strategy], gross_wins / gross_losses)
+                    elif gross_wins > 0:
+                        profit_factor_g.add_metric([strategy], gross_wins)
 
                     # Last trade age
                     last_ts = _parse_ts(close_events[-1].get("ts"))
@@ -250,28 +475,69 @@ class TurtleQuantCollector:
                     for reason, count in reason_counts.items():
                         exit_reason_g.add_metric([strategy, reason], float(count))
 
+                    pnl_by_asset: dict[str, float] = {}
+                    pnl_by_weekday: dict[str, float] = {}
+                    for e in close_events:
+                        pnl = _safe_float(e.get("pnl"))
+                        asset = str(e.get("asset", "unknown"))
+                        pnl_by_asset[asset] = pnl_by_asset.get(asset, 0.0) + pnl
+                        ts = _parse_ts(e.get("ts"))
+                        if ts is not None:
+                            weekday = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%a")
+                            pnl_by_weekday[weekday] = pnl_by_weekday.get(weekday, 0.0) + pnl
+                    for asset, pnl in pnl_by_asset.items():
+                        pnl_by_asset_g.add_metric([strategy, asset], pnl)
+                    for weekday, pnl in pnl_by_weekday.items():
+                        pnl_by_weekday_g.add_metric([strategy, weekday], pnl)
+
                 # Avg edge at entry
                 edges = [e.get("edge") for e in open_events if e.get("edge") is not None]
                 if edges:
-                    avg_edge_g.add_metric([strategy], sum(edges) / len(edges))
+                    numeric_edges = [_safe_float(e) for e in edges]
+                    avg_edge_g.add_metric([strategy], sum(numeric_edges) / len(numeric_edges))
 
                 # Recent closed trades (last 20)
                 # Use sequential idx as the unique label so the same market traded
                 # multiple times doesn't produce duplicate label sets.
                 for idx, e in enumerate(close_events[-20:]):
+                    market_id = str(e.get("market_id", ""))
                     asset = str(e.get("asset", ""))
                     reason = str(e.get("reason", "unknown"))
-                    pnl = e.get("pnl", 0.0)
-                    closed_pnl_g.add_metric([strategy, str(idx), asset, reason], float(pnl))
+                    labels = [strategy, str(idx), market_id, asset, reason]
+                    pnl = _safe_float(e.get("pnl"))
+                    closed_pnl_g.add_metric(labels, pnl)
+                    opened_ts = _parse_ts(opens_by_market.get(market_id, {}).get("ts"))
+                    closed_ts = _parse_ts(e.get("ts"))
+                    if opened_ts is not None and closed_ts is not None and closed_ts >= opened_ts:
+                        closed_hold_g.add_metric(labels, (closed_ts - opened_ts) / 3600.0)
+            else:
+                scrape_success_g.add_metric([strategy], 0.0)
 
         yield nav_g
         yield total_pnl_g
         yield open_pos_g
         yield exposure_g
+        yield exposure_by_asset_g
+        yield largest_position_pct_nav_g
+        yield current_drawdown_usd_g
+        yield current_drawdown_pct_g
+        yield max_drawdown_usd_g
+        yield max_drawdown_pct_g
+        yield longest_drawdown_g
+        yield max_drawdown_recovery_g
         yield closed_trades_g
         yield winning_trades_g
         yield win_rate_g
         yield avg_pnl_g
+        yield profit_factor_g
+        yield avg_win_g
+        yield avg_loss_g
+        yield expectancy_g
+        yield best_trade_g
+        yield worst_trade_g
+        yield median_trade_g
+        yield pnl_by_asset_g
+        yield pnl_by_weekday_g
         yield avg_edge_g
         yield last_trade_age_g
         yield exit_reason_g
@@ -280,6 +546,9 @@ class TurtleQuantCollector:
         yield pos_age_g
         yield pos_model_prob_g
         yield closed_pnl_g
+        yield closed_hold_g
+        yield state_file_age_g
+        yield scrape_success_g
 
 
 def main():
