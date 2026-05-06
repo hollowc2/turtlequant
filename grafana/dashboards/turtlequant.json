@@ -1,6 +1,6 @@
 {
   "uid": "turtlequant-monitor",
-  "title": "TurtleQuant Strategy Monitor",
+  "title": "Polymarket - TurtleQuant",
   "tags": [
     "turtlequant",
     "trading",
@@ -21,7 +21,7 @@
         "name": "strategy",
         "label": "Strategy",
         "type": "custom",
-        "query": "TurtleQuant : turtlequant,SlowQuant : slowquant",
+        "query": "TurtleQuant : turtlequant",
         "multi": false,
         "includeAll": false,
         "current": {
@@ -34,11 +34,6 @@
             "text": "TurtleQuant",
             "value": "turtlequant",
             "selected": true
-          },
-          {
-            "text": "SlowQuant",
-            "value": "slowquant",
-            "selected": false
           }
         ],
         "hide": 0

@@ -2,7 +2,7 @@
 # /// script
 # dependencies = ["textual>=0.70", "rich>=13.0"]
 # ///
-"""QuantDash — unified Textual TUI monitor for all TurtleQuant family strategies.
+"""QuantDash — unified Textual TUI monitor for TurtleQuant.
 
 Two-pane layout:
   Top  — one card per strategy with heavy metrics; click or arrow keys to select
@@ -74,21 +74,7 @@ def build_registry(state_root: Path) -> list[StrategyMeta]:
             color="cyan",
             max_per_market_pct=0.10,
             max_total_exposure_pct=0.40,
-        ),
-        StrategyMeta(
-            name="SlowQuant",
-            key="slowquant",
-            state_dir=state_root / "slowquant",
-            positions_file="slowquant-positions.json",
-            history_file="slowquant-history.json",
-            log_file="slowquant-bot.log",
-            model_label="MC Prob",
-            has_regime=True,
-            has_bs_mc=True,
-            color="magenta",
-            max_per_market_pct=0.015,
-            max_total_exposure_pct=0.20,
-        ),
+        )
     ]
 
 

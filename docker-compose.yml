@@ -38,34 +38,7 @@ services:
       STATE_DIR: "/app/state"
       LOG_FILE: "/app/state/turtlequant-bot.log"
 
-  # SlowQuant — Merton jump-diffusion on short-dated BTC/ETH price threshold markets
-  # Calibration (3yr, 2026-03-10):
-  #   ETH: Brier=0.1749 (PASS), RMSE=0.0348 (PASS)
-  #   BTC: Brier=0.1497 (PASS), RMSE=0.0502 (marginal — accepted)
-  slowquant-bot:
-    <<: *bot-common
-    container_name: slowquant-bot
-    command:
-      - "uv"
-      - "run"
-      - "python"
-      - "scripts/slowquant_bot.py"
-      - "--paper"
-      - "--asset"
-      - "btc,eth"
-    volumes:
-      - /opt/turtlequant/state/slowquant:/app/state
-      - /opt/turtlequant/data:/app/data
-    environment:
-      PAPER_TRADE: "true"
-      ASSET: "btc,eth"
-      STARTING_NAV: "1000.0"
-      KELLY_FRACTION: "0.25"
-      N_SIMS: "50000"
-      STATE_DIR: "/app/state"
-      LOG_FILE: "/app/state/slowquant-bot.log"
-
-  # Prometheus metrics exporter — reads JSON state files for both strategies
+  # Prometheus metrics exporter — reads TurtleQuant JSON state files
   turtlequant-grafana-exporter:
     image: python:3.12-slim
     container_name: turtlequant-grafana-exporter

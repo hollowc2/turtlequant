@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prometheus exporter for TurtleQuant and SlowQuant trading bots.
+"""Prometheus exporter for the TurtleQuant trading bot.
 
 Reads JSON state files from STATE_DIR and exposes per-strategy metrics:
 
@@ -27,7 +27,7 @@ Per active position (labeled strategy, market_id, asset, option_type):
 Recent closed trades — last 20 (labeled strategy, market_id, asset, reason):
   turtlequant_closed_position_pnl_usd
 
-Labels: strategy ("turtlequant" | "slowquant")
+Labels: strategy ("turtlequant")
 
 Usage:
     python grafana_exporter.py [--state-dir DIR] [--port PORT]
@@ -55,10 +55,6 @@ STRATEGIES = {
     "turtlequant": (
         "turtlequant-positions.json",
         "turtlequant-history.json",
-    ),
-    "slowquant": (
-        "slowquant/slowquant-positions.json",
-        "slowquant/slowquant-history.json",
     ),
 }
 

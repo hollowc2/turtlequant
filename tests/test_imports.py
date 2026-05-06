@@ -16,18 +16,3 @@ def test_turtlequant_core_imports():
     assert VolSurface is not None
     assert callable(compute_probability)
     assert callable(parse_market)
-
-
-def test_slowquant_imports():
-    from turtlequant.slowquant import (
-        JumpParams,
-        RegimeState,
-        SlowQuantRunner,
-        calibrate_jump_params,
-        get_regime,
-        score_opportunity,
-    )
-    assert SlowQuantRunner is not None
-    assert callable(calibrate_jump_params)
-    assert callable(get_regime)
-    assert callable(score_opportunity)
