@@ -358,16 +358,25 @@ def main() -> None:
                     sigma = vs.get_iv(spot, pos.strike, pos.expiry)
                     model_prob = compute_probability(params, spot, sigma)
 
-                    # Fetch current YES price from scanner (rough: use gamma API)
-                    # For simplicity, we can't easily get yes_price here without
-                    # refetching the specific market. Use stored entry price as proxy.
-                    # A future enhancement would cache the latest scanner prices.
-                    yes_price = pos.entry_price  # proxy — scanner will refresh on next scan
+                    yes_price = scanner.fetch_market_price(pos.market_id)
+                    if yes_price is None:
+                        yes_price = pos.last_yes_price if pos.last_yes_price > 0 else pos.entry_price
+                    else:
+                        pos_mgr.record_market_data(
+                            pos.market_id,
+                            yes_price=yes_price,
+                            observed_at=datetime.now(UTC),
+                        )
 
-                    if pos_mgr.should_exit(pos.market_id, model_prob, yes_price):
+                    decision = pos_mgr.exit_decision(pos.market_id, model_prob, yes_price, now=datetime.now(UTC))
+                    if decision.should_exit:
                         if not args.dry_run:
                             paper_sell(pos.market_id, pos.yes_token_id, pos.size_usd, yes_price, paper_mode)
-                        _pos, pnl = pos_mgr.close_position(pos.market_id, exit_price=yes_price, reason="edge_reversed")
+                        _pos, pnl = pos_mgr.close_position(
+                            pos.market_id,
+                            exit_price=yes_price,
+                            reason=decision.reason or "edge_reversed",
+                        )
                         recently_closed[pos.market_id] = datetime.now(UTC)
                         append_history(
                             state_dir,
@@ -376,22 +385,27 @@ def main() -> None:
                                 "market_id": pos.market_id,
                                 "asset": pos.asset,
                                 "strike": pos.strike,
-                                "reason": "edge_reversed",
+                                "reason": decision.reason or "edge_reversed",
                                 "model_prob": model_prob,
                                 "yes_price": yes_price,
+                                "current_edge": decision.current_edge,
+                                "entry_edge": decision.entry_edge,
+                                "hours_to_expiry": decision.hours_to_expiry,
                                 "pnl": pnl,
                                 "ts": datetime.now(UTC).isoformat(),
                             },
                         )
                     else:
                         logger.info(
-                            "[HOLD] %s K=%.0f exp=%s model_p=%.4f entry_p=%.4f edge=%.4f",
+                            "[HOLD] %s K=%.0f exp=%s model_p=%.4f mkt_p=%.4f edge=%.4f entry_edge=%.4f ttl=%.1fh",
                             pos.asset.upper(),
                             pos.strike,
                             pos.expiry_iso[:10],
                             model_prob,
-                            pos.entry_price,
-                            model_prob - pos.entry_price,
+                            yes_price,
+                            decision.current_edge,
+                            decision.entry_edge,
+                            decision.hours_to_expiry or 0.0,
                         )
                 except Exception as exc:
                     logger.warning("Reprice failed for %s: %s", pos.market_id[:16], exc)
@@ -432,6 +446,14 @@ def main() -> None:
                     yes_price = market.yes_price
                     edge = model_prob - yes_price
 
+                    if pos_mgr.has_position(market.market_id):
+                        pos_mgr.record_market_data(
+                            market.market_id,
+                            yes_token_id=market.yes_token_id,
+                            yes_price=yes_price,
+                            observed_at=datetime.now(UTC),
+                        )
+
                     logger.debug(
                         "%s K=%.0f exp=%s model_p=%.4f mkt_p=%.4f edge=%+.4f σ=%.3f",
                         params.asset.upper(),
@@ -445,13 +467,17 @@ def main() -> None:
 
                     # ── Check exit for existing positions ─────────────────
                     if pos_mgr.has_position(market.market_id):
-                        if pos_mgr.should_exit(market.market_id, model_prob, yes_price):
+                        decision = pos_mgr.exit_decision(market.market_id, model_prob, yes_price, now=datetime.now(UTC))
+                        if decision.should_exit:
                             if not args.dry_run:
                                 pos = pos_mgr.get_position(market.market_id)
                                 if pos:
-                                    paper_sell(market.market_id, pos.yes_token_id, pos.size_usd, yes_price, paper_mode)
+                                    token_id = pos.yes_token_id or market.yes_token_id
+                                    paper_sell(market.market_id, token_id, pos.size_usd, yes_price, paper_mode)
                             _pos, pnl = pos_mgr.close_position(
-                                market.market_id, exit_price=yes_price, reason="edge_reversed"
+                                market.market_id,
+                                exit_price=yes_price,
+                                reason=decision.reason or "edge_reversed",
                             )
                             recently_closed[market.market_id] = datetime.now(UTC)
                             append_history(
@@ -461,9 +487,12 @@ def main() -> None:
                                     "market_id": market.market_id,
                                     "asset": params.asset,
                                     "strike": params.strike,
-                                    "reason": "edge_reversed",
+                                    "reason": decision.reason or "edge_reversed",
                                     "model_prob": model_prob,
                                     "yes_price": yes_price,
+                                    "current_edge": decision.current_edge,
+                                    "entry_edge": decision.entry_edge,
+                                    "hours_to_expiry": decision.hours_to_expiry,
                                     "pnl": pnl,
                                     "ts": datetime.now(UTC).isoformat(),
                                 },
@@ -529,6 +558,7 @@ def main() -> None:
                         model_prob=model_prob,
                     )
                     pos_mgr.open_position(pos)
+                    pos_mgr.confirm_fill(market.market_id, yes_price, yes_token_id=market.yes_token_id)
                     append_history(
                         state_dir,
                         {
@@ -544,6 +574,8 @@ def main() -> None:
                             "edge": edge,
                             "size_usd": size_usd,
                             "sigma": sigma,
+                            "yes_token_id": market.yes_token_id,
+                            "fill_confirmed": True,
                             "ts": datetime.now(UTC).isoformat(),
                         },
                     )

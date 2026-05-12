@@ -3,8 +3,6 @@ x-bot-common: &bot-common
     context: .
     dockerfile: Dockerfile
   restart: unless-stopped
-  env_file:
-    - .env                                   # SCP'd to VPS manually, never committed to git
   logging:
     driver: "json-file"
     options:
@@ -33,10 +31,12 @@ services:
       PAPER_TRADE: "true"
       ASSET: "btc,eth"
       ENTRY_THRESHOLD: "0.05"
-      KELLY_FRACTION: "0.50"
+      KELLY_FRACTION: "0.25"
       STARTING_NAV: "1000.0"
       STATE_DIR: "/app/state"
       LOG_FILE: "/app/state/turtlequant-bot.log"
+      DERIBIT_CLIENT_ID: "${DERIBIT_CLIENT_ID:-}"
+      DERIBIT_CLIENT_SECRET: "${DERIBIT_CLIENT_SECRET:-}"
 
   # Prometheus metrics exporter — reads TurtleQuant JSON state files
   turtlequant-grafana-exporter:

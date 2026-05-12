@@ -7,7 +7,10 @@ NAV limits:
   - Max per expiry:     15% NAV  (correlated risk control)
   - Max total exposure: 40% NAV
 
-Exit trigger: close when model_prob < yes_price (edge reversed, not just shrunk).
+Exit triggers:
+  - edge reversed: model_prob < yes_price
+  - edge decayed: current edge falls below 40% of entry edge
+  - time cleanup: <= 6h to expiry and edge <= 5%
 """
 
 from __future__ import annotations
@@ -52,10 +55,23 @@ class Position:
     edge_at_entry: float
     opened_at: str  # ISO 8601 UTC
     fill_confirmed: bool = False  # True once the order is confirmed filled
+    last_yes_price: float = 0.0  # last observed market YES price
+    last_yes_price_at: str = ""  # ISO 8601 UTC for last observed market price
 
     @property
     def expiry(self) -> datetime:
         return datetime.fromisoformat(self.expiry_iso)
+
+
+@dataclass(frozen=True)
+class ExitDecision:
+    """Result of evaluating whether an open position should be closed."""
+
+    should_exit: bool
+    reason: str | None = None
+    current_edge: float = 0.0
+    entry_edge: float = 0.0
+    hours_to_expiry: float | None = None
 
 
 @dataclass
@@ -156,6 +172,35 @@ class PositionManager:
         )
         self._save()
 
+    def record_market_data(
+        self,
+        market_id: str,
+        *,
+        yes_token_id: str | None = None,
+        yes_price: float | None = None,
+        observed_at: datetime | None = None,
+    ) -> bool:
+        """Persist the latest market snapshot for an open position.
+
+        This keeps the last observed real quote available even if the market
+        later falls out of the active scan set.
+        """
+        pos = self._positions.get(market_id)
+        if not pos:
+            return False
+
+        changed = False
+        if yes_token_id and yes_token_id != pos.yes_token_id:
+            pos.yes_token_id = yes_token_id
+            changed = True
+        if yes_price is not None and yes_price > 0:
+            pos.last_yes_price = yes_price
+            pos.last_yes_price_at = (observed_at or datetime.now(UTC)).isoformat()
+            changed = True
+        if changed:
+            self._save()
+        return changed
+
     def close_position(
         self, market_id: str, exit_price: float, reason: str = "edge_reversed"
     ) -> tuple[Position | None, float]:
@@ -190,21 +235,48 @@ class PositionManager:
             self._save()
         return pos, pnl
 
-    def confirm_fill(self, market_id: str, fill_price: float) -> None:
+    def confirm_fill(self, market_id: str, fill_price: float, yes_token_id: str | None = None) -> None:
         pos = self._positions.get(market_id)
         if pos:
             pos.entry_price = fill_price
             pos.fill_confirmed = True
+            pos.last_yes_price = fill_price
+            pos.last_yes_price_at = datetime.now(UTC).isoformat()
+            if yes_token_id:
+                pos.yes_token_id = yes_token_id
             self._save()
 
     def update_nav(self, new_nav: float) -> None:
         self.current_nav = new_nav
 
+    def exit_decision(
+        self,
+        market_id: str,
+        model_prob: float,
+        yes_price: float,
+        now: datetime | None = None,
+    ) -> ExitDecision:
+        """Evaluate all exit triggers for an open position."""
+        pos = self.get_position(market_id)
+        if pos is None:
+            return ExitDecision(False)
+
+        current_edge = model_prob - yes_price
+        entry_edge = pos.edge_at_entry
+        now = now or datetime.now(UTC)
+        hours_to_expiry = max((pos.expiry - now).total_seconds() / 3600.0, 0.0)
+
+        if current_edge <= 0:
+            return ExitDecision(True, "edge_reversed", current_edge, entry_edge, hours_to_expiry)
+        if entry_edge > 0 and current_edge <= 0.4 * entry_edge:
+            return ExitDecision(True, "edge_decayed", current_edge, entry_edge, hours_to_expiry)
+        if hours_to_expiry <= 6.0 and current_edge <= 0.05:
+            return ExitDecision(True, "time_cleanup", current_edge, entry_edge, hours_to_expiry)
+        return ExitDecision(False, None, current_edge, entry_edge, hours_to_expiry)
+
     def should_exit(self, market_id: str, model_prob: float, yes_price: float) -> bool:
-        """Returns True if edge has reversed (model_prob < yes_price)."""
-        if not self.has_position(market_id):
-            return False
-        return model_prob < yes_price
+        """Compatibility wrapper for older callers."""
+        return self.exit_decision(market_id, model_prob, yes_price).should_exit
 
     # ------------------------------------------------------------------
     # Persistence
@@ -222,6 +294,10 @@ class PositionManager:
             self.total_pnl = data.get("total_pnl", 0.0)
             for pos_data in data.get("positions", []):
                 pos = Position(**pos_data)
+                if pos.last_yes_price <= 0:
+                    pos.last_yes_price = pos.entry_price
+                if not pos.last_yes_price_at:
+                    pos.last_yes_price_at = pos.opened_at
                 self._positions[pos.market_id] = pos
             logger.info("Loaded %d open positions from %s", len(self._positions), self.positions_file)
         except Exception as exc:
@@ -254,6 +330,7 @@ def make_position(
     model_prob: float,
 ) -> Position:
     """Factory helper to build a Position from trade decision data."""
+    opened_at = datetime.now(UTC).isoformat()
     return Position(
         market_id=market_id,
         question=question,
@@ -266,5 +343,7 @@ def make_position(
         size_usd=size_usd,
         model_prob_at_entry=model_prob,
         edge_at_entry=model_prob - yes_price,
-        opened_at=datetime.now(UTC).isoformat(),
+        opened_at=opened_at,
+        last_yes_price=yes_price,
+        last_yes_price_at=opened_at,
     )

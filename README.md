@@ -48,7 +48,7 @@ P(barrier) = N(d₊) + (K/S₀)^(2μ/σ²) × N(d₋)   [reflection principle]
 ```
 edge = model_probability − yes_token_price
 ```
-Enter when `edge > threshold`. Size via fractional Kelly (25%) capped by per-market, per-expiry, and total NAV limits.
+Enter when `edge > threshold`. Size via fractional Kelly (25% default in code and compose) capped by per-market, per-expiry, and total NAV limits.
 
 | Entry edge | ≥5% |
 | Per-market NAV | 10% |
@@ -58,8 +58,10 @@ Enter when `edge > threshold`. Size via fractional Kelly (25%) capped by per-mar
 ### 6. Position Management & Exit
 State persists to JSON across restarts. Positions close on three triggers:
 - **Edge reversed** — model prob < market price
-- **Edge decayed** — current edge < 40% of entry edge
-- **Time cleanup** — < 6h remaining and edge < 5%
+- **Edge decayed** — current edge drops below 40% of entry edge
+- **Time cleanup** — <= 6h remaining and edge <= 5%
+
+The bot also persists the last observed YES quote per open position so exits do not fall back to entry price if a market drops out of the active scan set.
 
 ---
 
