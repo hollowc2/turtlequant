@@ -6,6 +6,7 @@ filters before handing them to the parser/probability engine.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -151,9 +152,10 @@ class MarketScanner:
             if resolution_time is None:
                 return None
 
-            # Tokens — Gamma returns a list of clob_token_ids or outcomes
-            tokens = raw.get("clobTokenIds") or []
-            outcomes = raw.get("outcomes") or []
+            # Tokens — Gamma may return list fields or JSON-encoded lists
+            # depending on the endpoint.
+            tokens = _coerce_list(raw.get("clobTokenIds") or raw.get("clob_token_ids"))
+            outcomes = _coerce_list(raw.get("outcomes"))
             yes_token_id = ""
             no_token_id = ""
 
@@ -257,3 +259,16 @@ def _parse_iso(s: str) -> datetime | None:
         return dt.astimezone(UTC)
     except Exception:
         return None
+
+
+def _coerce_list(value: object) -> list:
+    """Normalize Gamma list fields that sometimes arrive as JSON strings."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
