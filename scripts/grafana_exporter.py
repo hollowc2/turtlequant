@@ -59,6 +59,11 @@ STRATEGIES = {
     ),
 }
 
+# Keep this aligned with turtlequant.position_manager.TAKER_FEE_RATE. The
+# exporter uses it only to normalize legacy history rows that recorded flat
+# closes as zero before fee-adjusted P&L was persisted.
+TAKER_FEE_RATE = 0.003
+
 
 def _load_json(path: str) -> object:
     try:
@@ -89,6 +94,46 @@ def _safe_float(value: object, default: float = 0.0) -> float:
         return default
 
 
+def _effective_close_events(history_events: list[dict]) -> list[dict]:
+    """Return close events with fee-adjusted P&L for legacy zero-P&L rows."""
+    open_queues: dict[str, list[dict]] = {}
+    closes: list[dict] = []
+
+    for event in history_events:
+        market_id = str(event.get("market_id", ""))
+        if event.get("event") == "open":
+            open_queues.setdefault(market_id, []).append(event)
+            continue
+        if event.get("event") != "close":
+            continue
+
+        close_event = dict(event)
+        recorded_pnl = _safe_float(close_event.get("pnl"))
+        matching_open = None
+        queue = open_queues.get(market_id)
+        if queue:
+            matching_open = queue.pop(0)
+            close_event["_opened_ts"] = matching_open.get("ts")
+
+        if matching_open is not None and recorded_pnl == 0.0:
+            entry_price = _safe_float(matching_open.get("yes_price"))
+            exit_price = _safe_float(close_event.get("yes_price", close_event.get("exit_price")))
+            size_usd = _safe_float(matching_open.get("size_usd"))
+            if entry_price > 0 and exit_price >= 0 and size_usd > 0:
+                tokens = size_usd / entry_price
+                entry_fee = size_usd * TAKER_FEE_RATE
+                exit_fee = tokens * exit_price * TAKER_FEE_RATE
+                close_event["_effective_pnl"] = (exit_price - entry_price) * tokens - entry_fee - exit_fee
+            else:
+                close_event["_effective_pnl"] = recorded_pnl
+        else:
+            close_event["_effective_pnl"] = recorded_pnl
+
+        closes.append(close_event)
+
+    return closes
+
+
 def _file_age_sec(path: str) -> float | None:
     try:
         return max(0.0, time.time() - os.path.getmtime(path))
@@ -107,7 +152,7 @@ def _equity_points(close_events: list[dict], nav: float | None, total_pnl: float
             continue
         if not points:
             points.append((ts - 1.0, equity))
-        equity += _safe_float(event.get("pnl"))
+        equity += _safe_float(event.get("_effective_pnl", event.get("pnl")))
         points.append((ts, equity))
     return points or [(time.time(), start_nav)]
 
@@ -420,13 +465,13 @@ class TurtleQuantCollector:
             if isinstance(hist_data, list):
                 close_events = [e for e in hist_data if e.get("event") == "close"]
                 open_events = [e for e in hist_data if e.get("event") == "open"]
-                opens_by_market = {str(e.get("market_id", "")): e for e in open_events}
+                effective_close_events = _effective_close_events(hist_data)
                 hist_age = _file_age_sec(hist_path)
                 if hist_age is not None:
                     state_file_age_g.add_metric([strategy, "history"], hist_age)
                 scrape_success_g.add_metric([strategy], 1.0 if isinstance(pos_data, dict) else 0.0)
 
-                equity_points = _equity_points(close_events, nav, total_pnl)
+                equity_points = _equity_points(effective_close_events, nav, total_pnl)
                 drawdown = _drawdown_stats(equity_points)
                 current_drawdown_usd_g.add_metric([strategy], drawdown["current_usd"])
                 current_drawdown_pct_g.add_metric([strategy], drawdown["current_pct"])
@@ -440,7 +485,7 @@ class TurtleQuantCollector:
                 closed_trades_g.add_metric([strategy], float(n_closed))
 
                 if n_closed > 0:
-                    pnls = [_safe_float(e.get("pnl")) for e in close_events]
+                    pnls = [_safe_float(e.get("_effective_pnl", e.get("pnl"))) for e in effective_close_events]
                     wins = sum(1 for p in pnls if p > 0)
                     winning_pnls = [p for p in pnls if p > 0]
                     losing_pnls = [p for p in pnls if p < 0]
@@ -477,8 +522,8 @@ class TurtleQuantCollector:
 
                     pnl_by_asset: dict[str, float] = {}
                     pnl_by_weekday: dict[str, float] = {}
-                    for e in close_events:
-                        pnl = _safe_float(e.get("pnl"))
+                    for e in effective_close_events:
+                        pnl = _safe_float(e.get("_effective_pnl", e.get("pnl")))
                         asset = str(e.get("asset", "unknown"))
                         pnl_by_asset[asset] = pnl_by_asset.get(asset, 0.0) + pnl
                         ts = _parse_ts(e.get("ts"))
@@ -499,14 +544,14 @@ class TurtleQuantCollector:
                 # Recent closed trades (last 20)
                 # Use sequential idx as the unique label so the same market traded
                 # multiple times doesn't produce duplicate label sets.
-                for idx, e in enumerate(close_events[-20:]):
+                for idx, e in enumerate(effective_close_events[-20:]):
                     market_id = str(e.get("market_id", ""))
                     asset = str(e.get("asset", ""))
                     reason = str(e.get("reason", "unknown"))
                     labels = [strategy, str(idx), market_id, asset, reason]
-                    pnl = _safe_float(e.get("pnl"))
+                    pnl = _safe_float(e.get("_effective_pnl", e.get("pnl")))
                     closed_pnl_g.add_metric(labels, pnl)
-                    opened_ts = _parse_ts(opens_by_market.get(market_id, {}).get("ts"))
+                    opened_ts = _parse_ts(e.get("_opened_ts"))
                     closed_ts = _parse_ts(e.get("ts"))
                     if opened_ts is not None and closed_ts is not None and closed_ts >= opened_ts:
                         closed_hold_g.add_metric(labels, (closed_ts - opened_ts) / 3600.0)
