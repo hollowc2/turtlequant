@@ -21,7 +21,7 @@ services:
       - "run"
       - "python"
       - "scripts/turtlequant_bot.py"
-      - "--paper"
+      - "--shadow"
       - "--asset"
       - "btc,eth"
     volumes:

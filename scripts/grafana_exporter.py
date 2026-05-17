@@ -8,6 +8,10 @@ Portfolio gauges (from *-positions.json):
   turtlequant_total_pnl_usd             — total realized P&L from positions file
   turtlequant_open_positions_count      — number of open positions
   turtlequant_total_exposure_usd        — sum of open position sizes in USD
+  turtlequant_open_unrealized_pnl_usd   — mark-to-bid unrealized P&L on open positions
+  turtlequant_avg_entry_slippage        — average open-entry slippage versus signal mid
+  turtlequant_avg_fill_ratio            — average order fill ratio
+  turtlequant_failed_orders_total       — failed-order events recorded by the bot
 
 Trade statistics (from *-history.json close events):
   turtlequant_closed_trades_total       — all-time count of closed trades
@@ -238,6 +242,36 @@ class TurtleQuantCollector:
             "Sum of open position sizes in USD by asset",
             labels=["strategy", "asset"],
         )
+        open_unrealized_pnl_g = GaugeMetricFamily(
+            "turtlequant_open_unrealized_pnl_usd",
+            "Open unrealized P&L marked to last executable bid",
+            labels=["strategy"],
+        )
+        open_unrealized_pnl_by_asset_g = GaugeMetricFamily(
+            "turtlequant_open_unrealized_pnl_by_asset_usd",
+            "Open unrealized P&L marked to last executable bid by asset",
+            labels=["strategy", "asset"],
+        )
+        avg_entry_slippage_g = GaugeMetricFamily(
+            "turtlequant_avg_entry_slippage",
+            "Average open-entry slippage versus signal mid price",
+            labels=["strategy"],
+        )
+        avg_fill_ratio_g = GaugeMetricFamily(
+            "turtlequant_avg_fill_ratio",
+            "Average order fill ratio across recorded order events",
+            labels=["strategy"],
+        )
+        failed_orders_g = GaugeMetricFamily(
+            "turtlequant_failed_orders_total",
+            "Count of failed order events",
+            labels=["strategy", "side"],
+        )
+        order_count_g = GaugeMetricFamily(
+            "turtlequant_orders_total",
+            "Count of order events",
+            labels=["strategy", "side", "status"],
+        )
         largest_position_pct_nav_g = GaugeMetricFamily(
             "turtlequant_largest_position_pct_nav",
             "Largest open position as a fraction of NAV",
@@ -425,11 +459,26 @@ class TurtleQuantCollector:
                 exposure = sum(p.get("size_usd", 0.0) for p in positions)
                 exposure_g.add_metric([strategy], float(exposure))
                 by_asset: dict[str, float] = {}
+                unrealized_by_asset: dict[str, float] = {}
+                unrealized_total = 0.0
                 for pos in positions:
                     asset = str(pos.get("asset", "unknown"))
                     by_asset[asset] = by_asset.get(asset, 0.0) + _safe_float(pos.get("size_usd"))
+                    tokens = _safe_float(pos.get("token_size"))
+                    if tokens <= 0:
+                        entry = _safe_float(pos.get("entry_price"))
+                        size_usd = _safe_float(pos.get("size_usd"))
+                        tokens = size_usd / entry if entry > 0 else 0.0
+                    mark = _safe_float(pos.get("last_bid")) or _safe_float(pos.get("last_yes_price"))
+                    entry = _safe_float(pos.get("entry_price"))
+                    unrealized = (mark - entry) * tokens - (tokens * mark * TAKER_FEE_RATE if mark > 0 else 0.0)
+                    unrealized_total += unrealized
+                    unrealized_by_asset[asset] = unrealized_by_asset.get(asset, 0.0) + unrealized
                 for asset, value in by_asset.items():
                     exposure_by_asset_g.add_metric([strategy, asset], value)
+                open_unrealized_pnl_g.add_metric([strategy], unrealized_total)
+                for asset, value in unrealized_by_asset.items():
+                    open_unrealized_pnl_by_asset_g.add_metric([strategy, asset], value)
                 largest = max((_safe_float(p.get("size_usd")) for p in positions), default=0.0)
                 largest_position_pct_nav_g.add_metric([strategy], largest / nav if nav and nav > 0 else 0.0)
 
@@ -465,6 +514,8 @@ class TurtleQuantCollector:
             if isinstance(hist_data, list):
                 close_events = [e for e in hist_data if e.get("event") == "close"]
                 open_events = [e for e in hist_data if e.get("event") == "open"]
+                order_events = [e for e in hist_data if e.get("event") == "order"]
+                failed_events = [e for e in hist_data if e.get("event") == "failed_order"]
                 effective_close_events = _effective_close_events(hist_data)
                 hist_age = _file_age_sec(hist_path)
                 if hist_age is not None:
@@ -541,6 +592,36 @@ class TurtleQuantCollector:
                     numeric_edges = [_safe_float(e) for e in edges]
                     avg_edge_g.add_metric([strategy], sum(numeric_edges) / len(numeric_edges))
 
+                slippages = [_safe_float(e.get("slippage")) for e in open_events if e.get("slippage") is not None]
+                if slippages:
+                    avg_entry_slippage_g.add_metric([strategy], sum(slippages) / len(slippages))
+
+                fill_ratios: list[float] = []
+                order_counts: dict[tuple[str, str], int] = {}
+                for event in order_events:
+                    side = str(event.get("side", "unknown"))
+                    status = str(event.get("status", "unknown"))
+                    order_counts[(side, status)] = order_counts.get((side, status), 0) + 1
+                    requested_usd = _safe_float(event.get("requested_usd"))
+                    requested_shares = _safe_float(event.get("requested_shares"))
+                    filled_usd = _safe_float(event.get("filled_usd"))
+                    filled_shares = _safe_float(event.get("filled_shares"))
+                    if requested_usd > 0:
+                        fill_ratios.append(min(1.0, filled_usd / requested_usd))
+                    elif requested_shares > 0:
+                        fill_ratios.append(min(1.0, filled_shares / requested_shares))
+                if fill_ratios:
+                    avg_fill_ratio_g.add_metric([strategy], sum(fill_ratios) / len(fill_ratios))
+                for (side, status), count in order_counts.items():
+                    order_count_g.add_metric([strategy, side, status], float(count))
+
+                failed_counts: dict[str, int] = {}
+                for event in failed_events:
+                    side = str(event.get("side", "unknown"))
+                    failed_counts[side] = failed_counts.get(side, 0) + 1
+                for side, count in failed_counts.items():
+                    failed_orders_g.add_metric([strategy, side], float(count))
+
                 # Recent closed trades (last 20)
                 # Use sequential idx as the unique label so the same market traded
                 # multiple times doesn't produce duplicate label sets.
@@ -563,6 +644,12 @@ class TurtleQuantCollector:
         yield open_pos_g
         yield exposure_g
         yield exposure_by_asset_g
+        yield open_unrealized_pnl_g
+        yield open_unrealized_pnl_by_asset_g
+        yield avg_entry_slippage_g
+        yield avg_fill_ratio_g
+        yield failed_orders_g
+        yield order_count_g
         yield largest_position_pct_nav_g
         yield current_drawdown_usd_g
         yield current_drawdown_pct_g

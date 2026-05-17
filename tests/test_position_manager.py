@@ -81,3 +81,66 @@ def test_exit_decision_covers_all_triggers(tmp_path):
     hold_decision = mgr.exit_decision("m-2", model_prob=0.57, yes_price=0.40)
     assert hold_decision.should_exit is False
     assert hold_decision.reason is None
+
+
+def test_partial_close_keeps_remaining_position(tmp_path):
+    mgr = PositionManager(positions_file=tmp_path / "positions.json")
+    pos = make_position(
+        market_id="m-4",
+        question="Will BTC be above $100k by March 30?",
+        asset="btc",
+        strike=100_000,
+        expiry=datetime.now(UTC) + timedelta(days=30),
+        option_type="european",
+        yes_token_id="token-999",
+        yes_price=0.50,
+        size_usd=50.0,
+        model_prob=0.60,
+        token_size=100.0,
+    )
+    mgr.open_position(pos)
+
+    closed, pnl = mgr.close_position("m-4", exit_price=0.60, reason="partial_exit", filled_shares=40.0)
+
+    assert closed is not None
+    assert pnl > 0
+    remaining = mgr.get_position("m-4")
+    assert remaining is not None
+    assert remaining.token_size == 60.0
+    assert remaining.size_usd == 30.0
+
+
+def test_load_legacy_position_backfills_stale_quote_fields(tmp_path):
+    positions_file = tmp_path / "positions.json"
+    positions_file.write_text(
+        """
+        {
+          "nav": 1000,
+          "total_pnl": 0,
+          "positions": [
+            {
+              "market_id": "m-5",
+              "question": "Will BTC be above $100k by March 30?",
+              "asset": "btc",
+              "strike": 100000,
+              "expiry_iso": "2026-12-31T00:00:00+00:00",
+              "option_type": "european",
+              "yes_token_id": "token-5",
+              "entry_price": 0.41,
+              "size_usd": 41,
+              "model_prob_at_entry": 0.5,
+              "edge_at_entry": 0.09,
+              "opened_at": "2026-05-01T00:00:00+00:00"
+            }
+          ]
+        }
+        """
+    )
+
+    mgr = PositionManager(positions_file=positions_file)
+    pos = mgr.get_position("m-5")
+
+    assert pos is not None
+    assert pos.last_yes_price == 0.41
+    assert pos.last_yes_price_at == "2026-05-01T00:00:00+00:00"
+    assert pos.token_size == 100.0

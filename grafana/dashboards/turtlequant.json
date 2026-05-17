@@ -7,7 +7,7 @@
     "polymarket"
   ],
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "30s",
   "time": {
     "from": "now-24h",
@@ -2629,6 +2629,375 @@
           "range": true,
           "legendFormat": "scrape failure marker",
           "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 36,
+      "type": "row",
+      "title": "Live Readiness",
+      "gridPos": {
+        "x": 0,
+        "y": 66,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 37,
+      "type": "stat",
+      "title": "Open Unrealized P&L",
+      "description": "Open positions marked to executable bid.",
+      "gridPos": {
+        "x": 0,
+        "y": 67,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_open_unrealized_pnl_usd{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "type": "stat",
+      "title": "Avg Entry Slippage",
+      "description": "Average entry fill minus signal mid.",
+      "gridPos": {
+        "x": 6,
+        "y": 67,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_avg_entry_slippage{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "type": "stat",
+      "title": "Avg Fill Ratio",
+      "description": "Filled amount divided by requested amount.",
+      "gridPos": {
+        "x": 12,
+        "y": 67,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_avg_fill_ratio{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "type": "stat",
+      "title": "Failed Orders",
+      "description": "Failed order events recorded by the bot.",
+      "gridPos": {
+        "x": 18,
+        "y": 67,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "text": {}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(turtlequant_failed_orders_total{strategy=\"$strategy\"})",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Order Count by Status",
+      "description": "Recorded order attempts by side and status.",
+      "gridPos": {
+        "x": 0,
+        "y": 71,
+        "w": 12,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_orders_total{strategy=\"$strategy\"}",
+          "instant": false,
+          "range": true,
+          "legendFormat": "{{side}} {{status}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "Open Unrealized P&L by Asset",
+      "description": "Mark-to-bid open P&L split by asset.",
+      "gridPos": {
+        "x": 12,
+        "y": 71,
+        "w": 12,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_open_unrealized_pnl_by_asset_usd{strategy=\"$strategy\"}",
+          "instant": false,
+          "range": true,
+          "legendFormat": "{{asset}}",
+          "refId": "A"
         }
       ]
     }

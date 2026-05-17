@@ -54,9 +54,12 @@ class Position:
     model_prob_at_entry: float
     edge_at_entry: float
     opened_at: str  # ISO 8601 UTC
+    token_size: float = 0.0  # YES shares actually filled
     fill_confirmed: bool = False  # True once the order is confirmed filled
     last_yes_price: float = 0.0  # last observed market YES price
     last_yes_price_at: str = ""  # ISO 8601 UTC for last observed market price
+    last_bid: float = 0.0
+    last_ask: float = 0.0
 
     @property
     def expiry(self) -> datetime:
@@ -178,6 +181,8 @@ class PositionManager:
         *,
         yes_token_id: str | None = None,
         yes_price: float | None = None,
+        bid: float | None = None,
+        ask: float | None = None,
         observed_at: datetime | None = None,
     ) -> bool:
         """Persist the latest market snapshot for an open position.
@@ -197,12 +202,18 @@ class PositionManager:
             pos.last_yes_price = yes_price
             pos.last_yes_price_at = (observed_at or datetime.now(UTC)).isoformat()
             changed = True
+        if bid is not None and bid > 0:
+            pos.last_bid = bid
+            changed = True
+        if ask is not None and ask > 0:
+            pos.last_ask = ask
+            changed = True
         if changed:
             self._save()
         return changed
 
     def close_position(
-        self, market_id: str, exit_price: float, reason: str = "edge_reversed"
+        self, market_id: str, exit_price: float, reason: str = "edge_reversed", filled_shares: float | None = None
     ) -> tuple[Position | None, float]:
         """Close a position and return (position, realised_pnl).
 
@@ -210,23 +221,35 @@ class PositionManager:
             tokens_held = size_usd / entry_price
             pnl         = (exit_price - entry_price) * tokens_held
         """
-        pos = self._positions.pop(market_id, None)
+        pos = self._positions.get(market_id)
         pnl = 0.0
         if pos:
-            tokens = pos.size_usd / pos.entry_price if pos.entry_price > 0 else 0.0
-            gross_pnl = (exit_price - pos.entry_price) * tokens
-            entry_fee = pos.size_usd * TAKER_FEE_RATE
-            exit_fee = tokens * exit_price * TAKER_FEE_RATE
+            tokens = pos.token_size if pos.token_size > 0 else pos.size_usd / pos.entry_price if pos.entry_price > 0 else 0.0
+            closed_tokens = min(tokens, filled_shares) if filled_shares is not None and filled_shares > 0 else tokens
+            if closed_tokens <= 0:
+                return pos, 0.0
+            gross_pnl = (exit_price - pos.entry_price) * closed_tokens
+            close_ratio = closed_tokens / tokens if tokens > 0 else 1.0
+            entry_fee = pos.size_usd * close_ratio * TAKER_FEE_RATE
+            exit_fee = closed_tokens * exit_price * TAKER_FEE_RATE
             pnl = gross_pnl - entry_fee - exit_fee
             self.current_nav += pnl
             self.total_pnl += pnl
+            if closed_tokens >= tokens - 1e-6:
+                self._positions.pop(market_id, None)
+            else:
+                pos.token_size = tokens - closed_tokens
+                pos.size_usd = max(0.0, pos.size_usd * (1.0 - close_ratio))
+                pos.last_yes_price = exit_price
+                pos.last_yes_price_at = datetime.now(UTC).isoformat()
             logger.info(
-                "Closing position: %s %s K=%.0f — reason=%s exit=%.4f gross=%+.4f fees=%.4f pnl=%+.4f nav=%.2f",
+                "Closing position: %s %s K=%.0f — reason=%s exit=%.4f shares=%.4f gross=%+.4f fees=%.4f pnl=%+.4f nav=%.2f",
                 pos.asset.upper(),
                 pos.option_type,
                 pos.strike,
                 reason,
                 exit_price,
+                closed_tokens,
                 gross_pnl,
                 entry_fee + exit_fee,
                 pnl,
@@ -235,13 +258,31 @@ class PositionManager:
             self._save()
         return pos, pnl
 
-    def confirm_fill(self, market_id: str, fill_price: float, yes_token_id: str | None = None) -> None:
+    def confirm_fill(
+        self,
+        market_id: str,
+        fill_price: float,
+        yes_token_id: str | None = None,
+        *,
+        size_usd: float | None = None,
+        token_size: float | None = None,
+        bid: float | None = None,
+        ask: float | None = None,
+    ) -> None:
         pos = self._positions.get(market_id)
         if pos:
             pos.entry_price = fill_price
+            if size_usd is not None and size_usd > 0:
+                pos.size_usd = size_usd
+            if token_size is not None and token_size > 0:
+                pos.token_size = token_size
             pos.fill_confirmed = True
             pos.last_yes_price = fill_price
             pos.last_yes_price_at = datetime.now(UTC).isoformat()
+            if bid is not None and bid > 0:
+                pos.last_bid = bid
+            if ask is not None and ask > 0:
+                pos.last_ask = ask
             if yes_token_id:
                 pos.yes_token_id = yes_token_id
             self._save()
@@ -293,6 +334,12 @@ class PositionManager:
                 self.current_nav = nav
             self.total_pnl = data.get("total_pnl", 0.0)
             for pos_data in data.get("positions", []):
+                if "token_size" not in pos_data:
+                    entry_price = pos_data.get("entry_price", 0.0)
+                    size_usd = pos_data.get("size_usd", 0.0)
+                    pos_data["token_size"] = size_usd / entry_price if entry_price > 0 else 0.0
+                pos_data.setdefault("last_bid", 0.0)
+                pos_data.setdefault("last_ask", 0.0)
                 pos = Position(**pos_data)
                 if pos.last_yes_price <= 0:
                     pos.last_yes_price = pos.entry_price
@@ -328,6 +375,7 @@ def make_position(
     yes_price: float,
     size_usd: float,
     model_prob: float,
+    token_size: float = 0.0,
 ) -> Position:
     """Factory helper to build a Position from trade decision data."""
     opened_at = datetime.now(UTC).isoformat()
@@ -341,6 +389,7 @@ def make_position(
         yes_token_id=yes_token_id,
         entry_price=yes_price,
         size_usd=size_usd,
+        token_size=token_size if token_size > 0 else size_usd / yes_price if yes_price > 0 else 0.0,
         model_prob_at_entry=model_prob,
         edge_at_entry=model_prob - yes_price,
         opened_at=opened_at,

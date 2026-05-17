@@ -14,7 +14,7 @@ Polymarket offers binary outcome markets like _"Will BTC be above $75,000 by Mar
 
 **TurtleQuant** — Long-dated markets (weeks–months). Black-Scholes pricing with Deribit implied volatility.
 
-It runs as a Docker service in paper-trading mode by default.
+It runs as a Docker service in shadow mode by default: orders stay simulated, but each signal records the executable bid/ask snapshot used for fill modeling.
 
 ---
 
@@ -46,9 +46,9 @@ P(barrier) = N(d₊) + (K/S₀)^(2μ/σ²) × N(d₋)   [reflection principle]
 
 ### 5. Edge Detection & Sizing
 ```
-edge = model_probability − yes_token_price
+edge = model_probability − executable_yes_price
 ```
-Enter when `edge > threshold`. Size via fractional Kelly (25% default in code and compose) capped by per-market, per-expiry, and total NAV limits.
+Enter when `edge > threshold` after crossing the executable ask. Size via fractional Kelly (25% default in code and compose) capped by per-market, per-expiry, and total NAV limits.
 
 | Entry edge | ≥5% |
 | Per-market NAV | 10% |
@@ -63,12 +63,24 @@ State persists to JSON across restarts. Positions close on three triggers:
 
 The bot also persists the last observed YES quote per open position so exits do not fall back to entry price if a market drops out of the active scan set.
 
+### 7. Execution
+TurtleQuant supports four runtime modes:
+
+| Mode | Behavior |
+|------|----------|
+| `--dry-run` | Signals only; no order or position state changes. |
+| `--paper` | Simulated fills using executable bid/ask depth. |
+| `--shadow` | Same as paper, plus explicit CLOB/Gamma quote and order events for live-readiness review. |
+| `--live --i-accept-live-risk` | Sends FAK market orders through `py_clob_client_v2` and records actual/partial fills. |
+
+Live mode expects `POLYMARKET_PRIVATE_KEY` plus API credentials (`POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, `POLYMARKET_API_PASSPHRASE`) in the environment. Optional `POLYMARKET_SIGNATURE_TYPE` and `POLYMARKET_FUNDER` are passed through for proxy-wallet setups.
+
 ---
 
 ## Architecture
 
 ```
-Gamma API → MarketScanner → MarketParser → ProbabilityEngine → PositionManager
+Gamma API → MarketScanner → MarketParser → ProbabilityEngine → ExecutionClient → PositionManager
                                               ↑           ↑
                                          VolSurface
                                           (Deribit)
@@ -94,10 +106,10 @@ Binance data falls back through Bybit → OKX → Gate.io for geo-resilience.
 
 ```bash
 cp .env.example .env          # configure parameters
-docker compose up             # runs TurtleQuant in paper-trading mode
+docker compose up             # runs TurtleQuant in shadow mode
 ```
 
-State files (`*-positions.json`, `*-history.json`) persist in `/opt/turtlequant/state`.
+State files (`*-positions.json`, `*-history.json`) persist in `/opt/turtlequant/state`. The history file includes `order`, `failed_order`, and `shadow_quote` events with bid/ask snapshots, slippage, fill ratio inputs, and partial-fill fields.
 
 ---
 

@@ -43,6 +43,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from turtlequant.data.binance import fetch_klines
+from turtlequant.clob_execution import ExecutionClient
 from turtlequant.market_parser import parse_market
 from turtlequant.market_scanner import MarketScanner
 from turtlequant.position_manager import PositionManager, make_position
@@ -132,43 +133,6 @@ def fetch_spot(asset: str) -> float | None:
 
 
 # ---------------------------------------------------------------------------
-# Paper trade simulation
-# ---------------------------------------------------------------------------
-
-
-def paper_buy(market_id: str, yes_price: float, size_usd: float, paper_mode: bool) -> bool:
-    """Simulate a YES token purchase in paper mode.
-
-    In paper mode: assume fill at yes_price (mid). Always returns True.
-    In live mode: would call CLOB client — currently raises NotImplementedError.
-    """
-    if paper_mode:
-        logger.info(
-            "[PAPER] BUY YES tokens: market=%s size=$%.2f at price=%.4f",
-            market_id[:16],
-            size_usd,
-            yes_price,
-        )
-        return True
-    raise NotImplementedError(
-        "Live order placement not yet implemented for TurtleQuant. Use --paper for paper trading."
-    )
-
-
-def paper_sell(market_id: str, yes_token_id: str, size_usd: float, yes_price: float, paper_mode: bool) -> bool:
-    """Simulate a YES token sale (exit) in paper mode."""
-    if paper_mode:
-        logger.info(
-            "[PAPER] SELL YES tokens: market=%s size=$%.2f at price=%.4f",
-            market_id[:16],
-            size_usd,
-            yes_price,
-        )
-        return True
-    raise NotImplementedError("Live order placement not yet implemented.")
-
-
-# ---------------------------------------------------------------------------
 # History tracking
 # ---------------------------------------------------------------------------
 
@@ -203,8 +167,14 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--paper", action="store_true", help="Paper trading mode (safe default)")
-    parser.add_argument("--live", action="store_true", help="Live trading (NOT YET IMPLEMENTED)")
+    parser.add_argument("--shadow", action="store_true", help="Paper trade while recording executable CLOB bid/ask")
+    parser.add_argument("--live", action="store_true", help="Live CLOB trading with fill and partial-fill handling")
     parser.add_argument("--dry-run", action="store_true", help="Evaluate signals only; no orders")
+    parser.add_argument(
+        "--i-accept-live-risk",
+        action="store_true",
+        help="Required with --live before real CLOB orders are sent",
+    )
     parser.add_argument(
         "--asset",
         default=os.getenv("ASSET", "btc,eth"),
@@ -254,10 +224,13 @@ def main() -> None:
     args = parser.parse_args()
 
     # Validate mode
-    if args.live:
-        logger.error("Live trading is not yet implemented. Use --paper.")
+    if sum(1 for enabled in (args.paper, args.shadow, args.live, args.dry_run) if enabled) > 1:
+        logger.error("Choose only one of --paper, --shadow, --live, or --dry-run")
         sys.exit(1)
-    paper_mode = True  # always paper until live is implemented
+    if args.live and not args.i_accept_live_risk:
+        logger.error("Live trading requires --i-accept-live-risk")
+        sys.exit(1)
+    execution_mode = "live" if args.live else "shadow" if args.shadow else "paper"
 
     # Parse assets
     assets = [a.strip().lower() for a in args.asset.split(",") if a.strip()]
@@ -284,9 +257,10 @@ def main() -> None:
         kelly_fraction=args.kelly_fraction,
         positions_file=state_dir / "turtlequant-positions.json",
     )
+    executor = ExecutionClient.from_env(mode=execution_mode, allow_live=args.i_accept_live_risk)
 
     logger.info("=== TurtleQuant Bot ===")
-    logger.info("Mode        : %s%s", "PAPER", " (dry-run)" if args.dry_run else "")
+    logger.info("Mode        : %s%s", execution_mode.upper(), " (dry-run)" if args.dry_run else "")
     logger.info("Assets      : %s", ", ".join(a.upper() for a in assets))
     logger.info("Entry thresh: %.3f (%.1f%%)", args.entry_threshold, args.entry_threshold * 100)
     logger.info("Kelly frac  : %.2f", args.kelly_fraction)
@@ -322,8 +296,6 @@ def main() -> None:
                             pos.expiry_iso[:10],
                             resolved_price,
                         )
-                        if not args.dry_run:
-                            paper_sell(pos.market_id, pos.yes_token_id, pos.size_usd, resolved_price, paper_mode)
                         _pos, pnl = pos_mgr.close_position(pos.market_id, exit_price=resolved_price, reason="expired")
                         recently_closed[pos.market_id] = datetime.now(UTC)
                         append_history(
@@ -359,38 +331,81 @@ def main() -> None:
                     model_prob = compute_probability(params, spot, sigma)
 
                     yes_price = scanner.fetch_market_price(pos.market_id)
+                    book = executor.get_order_book(
+                        pos.yes_token_id,
+                        fallback_bid=yes_price or pos.last_bid or pos.last_yes_price,
+                        fallback_ask=yes_price or pos.last_ask or pos.last_yes_price,
+                    )
                     if yes_price is None:
                         yes_price = pos.last_yes_price if pos.last_yes_price > 0 else pos.entry_price
                     else:
                         pos_mgr.record_market_data(
                             pos.market_id,
                             yes_price=yes_price,
+                            bid=book.best_bid,
+                            ask=book.best_ask,
                             observed_at=datetime.now(UTC),
                         )
 
-                    decision = pos_mgr.exit_decision(pos.market_id, model_prob, yes_price, now=datetime.now(UTC))
+                    executable_exit_price = book.best_bid or yes_price
+                    decision = pos_mgr.exit_decision(pos.market_id, model_prob, executable_exit_price, now=datetime.now(UTC))
                     if decision.should_exit:
+                        exit_result = None
                         if not args.dry_run:
-                            paper_sell(pos.market_id, pos.yes_token_id, pos.size_usd, yes_price, paper_mode)
+                            shares = pos.token_size if pos.token_size > 0 else pos.size_usd / pos.entry_price
+                            exit_result = executor.sell_yes(pos.yes_token_id, shares, book)
+                            append_history(
+                                state_dir,
+                                {
+                                    "event": "order",
+                                    "market_id": pos.market_id,
+                                    "asset": pos.asset,
+                                    "reason": decision.reason or "edge_reversed",
+                                    **exit_result.to_history(),
+                                    "ts": datetime.now(UTC).isoformat(),
+                                },
+                            )
+                            if not exit_result.success:
+                                append_history(
+                                    state_dir,
+                                    {
+                                        "event": "failed_order",
+                                        "market_id": pos.market_id,
+                                        "asset": pos.asset,
+                                        "side": "SELL",
+                                        "reason": decision.reason or "edge_reversed",
+                                        "error": exit_result.error or exit_result.status,
+                                        "ts": datetime.now(UTC).isoformat(),
+                                    },
+                                )
+                                continue
+                        filled_price = exit_result.avg_price if exit_result and exit_result.avg_price > 0 else executable_exit_price
+                        filled_shares = exit_result.filled_shares if exit_result else None
                         _pos, pnl = pos_mgr.close_position(
                             pos.market_id,
-                            exit_price=yes_price,
+                            exit_price=filled_price,
                             reason=decision.reason or "edge_reversed",
+                            filled_shares=filled_shares,
                         )
-                        recently_closed[pos.market_id] = datetime.now(UTC)
+                        if exit_result is None or exit_result.complete:
+                            recently_closed[pos.market_id] = datetime.now(UTC)
                         append_history(
                             state_dir,
                             {
-                                "event": "close",
+                                "event": "close" if exit_result is None or exit_result.complete else "partial_close",
                                 "market_id": pos.market_id,
                                 "asset": pos.asset,
                                 "strike": pos.strike,
                                 "reason": decision.reason or "edge_reversed",
                                 "model_prob": model_prob,
-                                "yes_price": yes_price,
+                                "yes_price": filled_price,
+                                "bid": book.best_bid,
+                                "ask": book.best_ask,
                                 "current_edge": decision.current_edge,
                                 "entry_edge": decision.entry_edge,
                                 "hours_to_expiry": decision.hours_to_expiry,
+                                "filled_shares": filled_shares,
+                                "complete": True if exit_result is None else exit_result.complete,
                                 "pnl": pnl,
                                 "ts": datetime.now(UTC).isoformat(),
                             },
@@ -402,7 +417,7 @@ def main() -> None:
                             pos.strike,
                             pos.expiry_iso[:10],
                             model_prob,
-                            yes_price,
+                            executable_exit_price,
                             decision.current_edge,
                             decision.entry_edge,
                             decision.hours_to_expiry or 0.0,
@@ -451,6 +466,8 @@ def main() -> None:
                             market.market_id,
                             yes_token_id=market.yes_token_id,
                             yes_price=yes_price,
+                            bid=market.bid,
+                            ask=market.ask,
                             observed_at=datetime.now(UTC),
                         )
 
@@ -467,32 +484,78 @@ def main() -> None:
 
                     # ── Check exit for existing positions ─────────────────
                     if pos_mgr.has_position(market.market_id):
-                        decision = pos_mgr.exit_decision(market.market_id, model_prob, yes_price, now=datetime.now(UTC))
+                        book = executor.get_order_book(
+                            market.yes_token_id,
+                            fallback_bid=market.bid,
+                            fallback_ask=market.ask,
+                        )
+                        executable_exit_price = book.best_bid or market.bid or yes_price
+                        decision = pos_mgr.exit_decision(
+                            market.market_id,
+                            model_prob,
+                            executable_exit_price,
+                            now=datetime.now(UTC),
+                        )
                         if decision.should_exit:
+                            exit_result = None
                             if not args.dry_run:
                                 pos = pos_mgr.get_position(market.market_id)
                                 if pos:
                                     token_id = pos.yes_token_id or market.yes_token_id
-                                    paper_sell(market.market_id, token_id, pos.size_usd, yes_price, paper_mode)
+                                    shares = pos.token_size if pos.token_size > 0 else pos.size_usd / pos.entry_price
+                                    exit_result = executor.sell_yes(token_id, shares, book)
+                                    append_history(
+                                        state_dir,
+                                        {
+                                            "event": "order",
+                                            "market_id": market.market_id,
+                                            "asset": params.asset,
+                                            "reason": decision.reason or "edge_reversed",
+                                            **exit_result.to_history(),
+                                            "ts": datetime.now(UTC).isoformat(),
+                                        },
+                                    )
+                                    if not exit_result.success:
+                                        append_history(
+                                            state_dir,
+                                            {
+                                                "event": "failed_order",
+                                                "market_id": market.market_id,
+                                                "asset": params.asset,
+                                                "side": "SELL",
+                                                "reason": decision.reason or "edge_reversed",
+                                                "error": exit_result.error or exit_result.status,
+                                                "ts": datetime.now(UTC).isoformat(),
+                                            },
+                                        )
+                                        continue
+                            filled_price = exit_result.avg_price if exit_result and exit_result.avg_price > 0 else executable_exit_price
+                            filled_shares = exit_result.filled_shares if exit_result else None
                             _pos, pnl = pos_mgr.close_position(
                                 market.market_id,
-                                exit_price=yes_price,
+                                exit_price=filled_price,
                                 reason=decision.reason or "edge_reversed",
+                                filled_shares=filled_shares,
                             )
-                            recently_closed[market.market_id] = datetime.now(UTC)
+                            if exit_result is None or exit_result.complete:
+                                recently_closed[market.market_id] = datetime.now(UTC)
                             append_history(
                                 state_dir,
                                 {
-                                    "event": "close",
+                                    "event": "close" if exit_result is None or exit_result.complete else "partial_close",
                                     "market_id": market.market_id,
                                     "asset": params.asset,
                                     "strike": params.strike,
                                     "reason": decision.reason or "edge_reversed",
                                     "model_prob": model_prob,
-                                    "yes_price": yes_price,
+                                    "yes_price": filled_price,
+                                    "bid": book.best_bid,
+                                    "ask": book.best_ask,
                                     "current_edge": decision.current_edge,
                                     "entry_edge": decision.entry_edge,
                                     "hours_to_expiry": decision.hours_to_expiry,
+                                    "filled_shares": filled_shares,
+                                    "complete": True if exit_result is None else exit_result.complete,
                                     "pnl": pnl,
                                     "ts": datetime.now(UTC).isoformat(),
                                 },
@@ -541,8 +604,54 @@ def main() -> None:
                         continue
 
                     # Place order
-                    filled = paper_buy(market.market_id, yes_price, size_usd, paper_mode)
-                    if not filled:
+                    book = executor.get_order_book(
+                        market.yes_token_id,
+                        fallback_bid=market.bid,
+                        fallback_ask=market.ask,
+                    )
+                    executable_entry_price = book.best_ask or market.ask or yes_price
+                    entry_edge = model_prob - executable_entry_price
+                    if entry_edge < args.entry_threshold:
+                        append_history(
+                            state_dir,
+                            {
+                                "event": "shadow_quote",
+                                "market_id": market.market_id,
+                                "asset": params.asset,
+                                "model_prob": model_prob,
+                                "mid_price": yes_price,
+                                "bid": book.best_bid,
+                                "ask": book.best_ask,
+                                "edge": entry_edge,
+                                "reason": "ask_erased_edge",
+                                "quote": book.to_dict(),
+                                "ts": datetime.now(UTC).isoformat(),
+                            },
+                        )
+                        continue
+                    entry_result = executor.buy_yes(market.yes_token_id, size_usd, book)
+                    append_history(
+                        state_dir,
+                        {
+                            "event": "order",
+                            "market_id": market.market_id,
+                            "asset": params.asset,
+                            **entry_result.to_history(),
+                            "ts": datetime.now(UTC).isoformat(),
+                        },
+                    )
+                    if not entry_result.success:
+                        append_history(
+                            state_dir,
+                            {
+                                "event": "failed_order",
+                                "market_id": market.market_id,
+                                "asset": params.asset,
+                                "side": "BUY",
+                                "error": entry_result.error or entry_result.status,
+                                "ts": datetime.now(UTC).isoformat(),
+                            },
+                        )
                         continue
 
                     pos = make_position(
@@ -553,12 +662,21 @@ def main() -> None:
                         expiry=params.expiry,
                         option_type=params.option_type.value,
                         yes_token_id=market.yes_token_id,
-                        yes_price=yes_price,
-                        size_usd=size_usd,
+                        yes_price=entry_result.avg_price,
+                        size_usd=entry_result.filled_usd,
                         model_prob=model_prob,
+                        token_size=entry_result.filled_shares,
                     )
                     pos_mgr.open_position(pos)
-                    pos_mgr.confirm_fill(market.market_id, yes_price, yes_token_id=market.yes_token_id)
+                    pos_mgr.confirm_fill(
+                        market.market_id,
+                        entry_result.avg_price,
+                        yes_token_id=market.yes_token_id,
+                        size_usd=entry_result.filled_usd,
+                        token_size=entry_result.filled_shares,
+                        bid=book.best_bid,
+                        ask=book.best_ask,
+                    )
                     append_history(
                         state_dir,
                         {
@@ -570,9 +688,16 @@ def main() -> None:
                             "expiry": params.expiry.isoformat(),
                             "option_type": params.option_type.value,
                             "model_prob": model_prob,
-                            "yes_price": yes_price,
-                            "edge": edge,
-                            "size_usd": size_usd,
+                            "yes_price": entry_result.avg_price,
+                            "bid": book.best_bid,
+                            "ask": book.best_ask,
+                            "mid_price": yes_price,
+                            "edge": entry_edge,
+                            "size_usd": entry_result.filled_usd,
+                            "requested_size_usd": size_usd,
+                            "filled_shares": entry_result.filled_shares,
+                            "complete": entry_result.complete,
+                            "slippage": entry_result.avg_price - yes_price,
                             "sigma": sigma,
                             "yes_token_id": market.yes_token_id,
                             "fill_confirmed": True,
