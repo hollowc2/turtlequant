@@ -22,8 +22,14 @@ logger = logging.getLogger(__name__)
 DERIBIT_API_BASE = "https://www.deribit.com/api/v2/public"
 DERIBIT_API_PRIVATE = "https://www.deribit.com/api/v2/private"
 _DERIBIT_REFRESH_SECS = 300  # 5 minutes
+_DERIBIT_FAILURE_RETRY_SECS = 60
+_DERIBIT_WARNING_COOLDOWN_SECS = 300
 _REALIZED_LOOKBACK_DAYS = 30
 _TOKEN_EXPIRY_SECS = 850  # Deribit tokens last ~900s; refresh before expiry
+_REQUEST_TIMEOUT_SECS = 10
+_REQUEST_RETRIES = 2
+_REQUEST_BACKOFF_SECS = 0.5
+_TRANSIENT_HTTP_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
 
 _ASSET_TO_DERIBIT_CCY: dict[str, str] = {
     "btc": "BTC",
@@ -70,6 +76,8 @@ class VolSurface:
     _session: requests.Session = field(default_factory=requests.Session, repr=False)
     _access_token: str | None = field(default=None, repr=False)
     _token_fetched_at: float = field(default=0.0, repr=False)
+    _last_deribit_attempt: float = field(default=0.0, repr=False)
+    _last_warning_at: dict[str, float] = field(default_factory=dict, repr=False)
 
     def get_iv(self, spot: float, strike: float, expiry: datetime) -> float:
         """Return annualized implied vol for (strike, expiry).
@@ -118,14 +126,13 @@ class VolSurface:
     def _fetch_access_token(self, client_id: str, client_secret: str) -> str | None:
         """Exchange client_id/secret for a short-lived access token."""
         try:
-            resp = self._session.get(
+            resp = self._get(
                 f"{DERIBIT_API_BASE}/auth",
                 params={
                     "grant_type": "client_credentials",
                     "client_id": client_id,
                     "client_secret": client_secret,
                 },
-                timeout=10,
             )
             resp.raise_for_status()
             token = resp.json().get("result", {}).get("access_token")
@@ -133,7 +140,7 @@ class VolSurface:
                 logger.info("Deribit: authenticated as %s", client_id)
             return token
         except Exception as exc:
-            logger.warning("Deribit auth failed: %s", exc)
+            self._log_warning("auth", "Deribit auth failed: %s", exc)
             return None
 
     # ------------------------------------------------------------------
@@ -144,15 +151,18 @@ class VolSurface:
         age = time.time() - self._last_deribit_fetch
         if age < _DERIBIT_REFRESH_SECS and self._iv_points:
             return
+        attempt_age = time.time() - self._last_deribit_attempt
+        if attempt_age < _DERIBIT_FAILURE_RETRY_SECS:
+            return
         ccy = _ASSET_TO_DERIBIT_CCY.get(self.asset)
         if ccy is None:
             return
+        self._last_deribit_attempt = time.time()
         try:
-            resp = self._session.get(
+            resp = self._get(
                 f"{DERIBIT_API_BASE}/get_book_summary_by_currency",
                 params={"currency": ccy, "kind": "option"},
                 headers=self._get_auth_header(),
-                timeout=10,
             )
             resp.raise_for_status()
             data = resp.json().get("result", [])
@@ -180,9 +190,36 @@ class VolSurface:
                 self._last_deribit_fetch = time.time()
                 logger.info("Deribit: loaded %d IV points for %s", len(points), self.asset.upper())
             else:
-                logger.warning("Deribit returned 0 usable IV points for %s", self.asset.upper())
+                self._log_warning("empty", "Deribit returned 0 usable IV points for %s", self.asset.upper())
         except Exception as exc:
-            logger.warning("Deribit IV fetch failed for %s: %s", self.asset.upper(), exc)
+            self._log_warning("iv", "Deribit IV fetch failed for %s: %s", self.asset.upper(), exc)
+
+    def _get(self, url: str, **kwargs: object) -> requests.Response:
+        last_exc: Exception | None = None
+        for attempt in range(_REQUEST_RETRIES + 1):
+            try:
+                resp = self._session.get(url, timeout=_REQUEST_TIMEOUT_SECS, **kwargs)
+                if getattr(resp, "status_code", 200) in _TRANSIENT_HTTP_STATUSES and attempt < _REQUEST_RETRIES:
+                    time.sleep(_REQUEST_BACKOFF_SECS * (attempt + 1))
+                    continue
+                return resp
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt >= _REQUEST_RETRIES:
+                    break
+                time.sleep(_REQUEST_BACKOFF_SECS * (attempt + 1))
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(f"request failed: {url}")
+
+    def _log_warning(self, key: str, msg: str, *args: object) -> None:
+        now = time.time()
+        last = self._last_warning_at.get(key, 0.0)
+        if now - last >= _DERIBIT_WARNING_COOLDOWN_SECS:
+            logger.warning(msg, *args)
+            self._last_warning_at[key] = now
+        else:
+            logger.debug(msg, *args)
 
     def _interpolate(self, spot: float, strike: float, expiry: datetime) -> float | None:
         """Log-linear interpolation in moneyness + linear in sqrt(T)."""

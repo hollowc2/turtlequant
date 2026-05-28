@@ -11,6 +11,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 import requests
 
@@ -27,6 +28,12 @@ DEFAULT_MIN_HOURS_TO_RESOLUTION = 4.0
 # volume/liquidity descending so the most relevant markets appear first
 _PAGE_SIZE = 100
 _MAX_PAGES = 5
+_REQUEST_TIMEOUT_SECS = 10
+_REQUEST_RETRIES = 2
+_REQUEST_BACKOFF_SECS = 0.5
+_CACHE_TTL_SECS = 15 * 60
+_WARNING_COOLDOWN_SECS = 5 * 60
+_TRANSIENT_HTTP_STATUSES = {403, 408, 409, 425, 429, 500, 502, 503, 504}
 
 
 @dataclass
@@ -75,6 +82,10 @@ class MarketScanner:
         # Assets to track, e.g. ["btc", "eth"]; None = all crypto price markets
         self.assets: set[str] = {a.lower() for a in assets} if assets else set()
         self._session = session or self._make_session()
+        self._markets_cache: list[dict] = []
+        self._markets_cache_at = 0.0
+        self._price_cache: dict[str, tuple[float, float]] = {}
+        self._last_warning_at: dict[str, float] = {}
 
     @staticmethod
     def _make_session() -> requests.Session:
@@ -109,9 +120,9 @@ class MarketScanner:
         page_count = 0
         while page_count < _MAX_PAGES:
             try:
-                resp = self._session.get(
+                page = self._get_json(
                     f"{GAMMA_API_BASE}/markets",
-                    params={
+                    {
                         "active": "true",
                         "closed": "false",
                         "tag_slug": "crypto",
@@ -120,10 +131,7 @@ class MarketScanner:
                         "order": "volume24hr",
                         "ascending": "false",
                     },
-                    timeout=10,
                 )
-                resp.raise_for_status()
-                page = resp.json()
                 if not page:
                     break
                 results.extend(page)
@@ -133,8 +141,14 @@ class MarketScanner:
                 offset += _PAGE_SIZE
                 time.sleep(0.1)
             except Exception as exc:
-                logger.warning("Gamma API fetch failed (offset=%d): %s", offset, exc)
+                self._log_api_warning("markets", "Gamma API fetch failed (offset=%d): %s", offset, exc)
                 break
+        if results:
+            self._markets_cache = results
+            self._markets_cache_at = time.time()
+        elif self._markets_cache and time.time() - self._markets_cache_at <= _CACHE_TTL_SECS:
+            logger.info("Gamma API unavailable; using cached market page set (%d markets)", len(self._markets_cache))
+            return list(self._markets_cache)
         return results
 
     def _parse_raw(self, raw: dict) -> ActiveMarket | None:
@@ -218,20 +232,51 @@ class MarketScanner:
         (1.0 for YES, 0.0 for NO).  Returns None on any error.
         """
         try:
-            resp = self._session.get(
-                f"{GAMMA_API_BASE}/markets/{market_id}",
-                timeout=10,
-            )
-            resp.raise_for_status()
-            raw = resp.json()
+            raw = self._get_json(f"{GAMMA_API_BASE}/markets/{market_id}")
             # Prefer explicit resolution price fields; fall back to last trade price
             for key in ("resolutionPrice", "resolution_price", "price", "lastTradePrice"):
                 val = raw.get(key)
                 if val is not None:
-                    return float(val)
+                    price = float(val)
+                    self._price_cache[market_id] = (price, time.time())
+                    return price
         except Exception as exc:
-            logger.warning("fetch_market_price(%s) failed: %s", market_id, exc)
+            cached = self._price_cache.get(market_id)
+            if cached and time.time() - cached[1] <= _CACHE_TTL_SECS:
+                logger.info("fetch_market_price(%s) failed; using cached price %.4f", market_id, cached[0])
+                return cached[0]
+            self._log_api_warning(f"price:{market_id}", "fetch_market_price(%s) failed: %s", market_id, exc)
         return None
+
+    def _get_json(self, url: str, params: dict[str, Any] | None = None) -> Any:
+        last_exc: Exception | None = None
+        for attempt in range(_REQUEST_RETRIES + 1):
+            try:
+                resp = self._session.get(url, params=params, timeout=_REQUEST_TIMEOUT_SECS)
+                if getattr(resp, "status_code", 200) in _TRANSIENT_HTTP_STATUSES and attempt < _REQUEST_RETRIES:
+                    time.sleep(_REQUEST_BACKOFF_SECS * (attempt + 1))
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt >= _REQUEST_RETRIES:
+                    break
+                time.sleep(_REQUEST_BACKOFF_SECS * (attempt + 1))
+            except Exception:
+                raise
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(f"request failed: {url}")
+
+    def _log_api_warning(self, key: str, msg: str, *args: object) -> None:
+        now = time.time()
+        last = self._last_warning_at.get(key, 0.0)
+        if now - last >= _WARNING_COOLDOWN_SECS:
+            logger.warning(msg, *args)
+            self._last_warning_at[key] = now
+        else:
+            logger.debug(msg, *args)
 
     def _passes_filters(self, market: ActiveMarket) -> bool:
         if market.liquidity_usd < self.min_liquidity:

@@ -44,3 +44,28 @@ def test_failed_exit_when_no_executable_bid_depth():
     assert result.success is False
     assert result.filled_shares == 0
     assert result.status == "paper"
+
+
+class _FlakyBookClient:
+    def __init__(self):
+        self.calls = 0
+
+    def get_order_book(self, _token_id):
+        self.calls += 1
+        if self.calls < 3:
+            raise RuntimeError("timeout")
+        return {
+            "bids": [{"price": "0.40", "size": "10"}],
+            "asks": [{"price": "0.42", "size": "20"}],
+        }
+
+
+def test_get_order_book_retries_before_synthetic_fallback():
+    flaky = _FlakyBookClient()
+    client = ExecutionClient(mode="paper", clob_client=flaky)
+
+    book = client.get_order_book("yes", fallback_bid=0.30, fallback_ask=0.50)
+
+    assert flaky.calls == 3
+    assert book.best_bid == 0.40
+    assert book.best_ask == 0.42

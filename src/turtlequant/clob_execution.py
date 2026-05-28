@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -12,6 +13,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 POLYMARKET_CLOB_HOST = "https://clob.polymarket.com"
+_BOOK_RETRIES = 2
+_BOOK_RETRY_BACKOFF_SECS = 0.5
+_BOOK_WARNING_COOLDOWN_SECS = 5 * 60
 
 
 class OrderSide(str, Enum):
@@ -202,6 +206,7 @@ class ExecutionClient:
         self.chain_id = chain_id
         self.allow_live = allow_live
         self._client = clob_client if clob_client is not None else self._build_clob_client()
+        self._last_book_warning_at: dict[str, float] = {}
 
     @classmethod
     def from_env(cls, *, mode: str, allow_live: bool = False) -> "ExecutionClient":
@@ -214,14 +219,30 @@ class ExecutionClient:
 
     def get_order_book(self, token_id: str, fallback_bid: float = 0.0, fallback_ask: float = 0.0) -> OrderBook:
         if self._client is not None:
-            try:
-                raw = self._client.get_order_book(token_id)
-                book = _parse_clob_book(token_id, raw)
-                if book.best_bid > 0 or book.best_ask > 0:
-                    return book
-            except Exception as exc:
-                logger.warning("CLOB order book fetch failed for %s: %s", token_id[:16], exc)
+            last_exc: Exception | None = None
+            for attempt in range(_BOOK_RETRIES + 1):
+                try:
+                    raw = self._client.get_order_book(token_id)
+                    book = _parse_clob_book(token_id, raw)
+                    if book.best_bid > 0 or book.best_ask > 0:
+                        return book
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt >= _BOOK_RETRIES:
+                        break
+                    time.sleep(_BOOK_RETRY_BACKOFF_SECS * (attempt + 1))
+            if last_exc is not None:
+                self._log_book_warning(token_id, "CLOB order book fetch failed for %s: %s", token_id[:16], last_exc)
         return synthetic_book(token_id, fallback_bid, fallback_ask)
+
+    def _log_book_warning(self, token_id: str, msg: str, *args: object) -> None:
+        now = time.time()
+        last = self._last_book_warning_at.get(token_id, 0.0)
+        if now - last >= _BOOK_WARNING_COOLDOWN_SECS:
+            logger.warning(msg, *args)
+            self._last_book_warning_at[token_id] = now
+        else:
+            logger.debug(msg, *args)
 
     def buy_yes(self, token_id: str, amount_usd: float, book: OrderBook) -> ExecutionResult:
         estimate = estimate_buy_fill(book, amount_usd)

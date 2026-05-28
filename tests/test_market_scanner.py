@@ -32,7 +32,43 @@ class _FailingSession:
         raise RuntimeError("api outage")
 
 
+class _Response:
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"status {self.status_code}")
+
+    def json(self):
+        return self._payload
+
+
+class _FlakySession:
+    def __init__(self):
+        self.calls = 0
+
+    def get(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return _Response([], status_code=503)
+        return _Response([])
+
+
+class _CachedMarketSession:
+    def __init__(self):
+        self.fail = False
+
+    def get(self, *_args, **_kwargs):
+        if self.fail:
+            raise RuntimeError("api outage")
+        return _Response([{"id": "market-1"}])
+
+
 class _ResolutionFailureResponse:
+    status_code = 200
+
     def raise_for_status(self):
         return None
 
@@ -49,6 +85,24 @@ def test_fetch_all_pages_handles_api_outage():
     scanner = MarketScanner(session=_FailingSession())
 
     assert scanner._fetch_all_pages() == []
+
+
+def test_fetch_all_pages_retries_transient_status():
+    session = _FlakySession()
+    scanner = MarketScanner(session=session)
+
+    assert scanner._fetch_all_pages() == []
+    assert session.calls == 2
+
+
+def test_fetch_all_pages_uses_recent_cache_on_outage():
+    session = _CachedMarketSession()
+    scanner = MarketScanner(session=session)
+
+    assert scanner._fetch_all_pages() == [{"id": "market-1"}]
+    session.fail = True
+
+    assert scanner._fetch_all_pages() == [{"id": "market-1"}]
 
 
 def test_fetch_market_price_handles_resolution_failure():
