@@ -40,6 +40,7 @@ import signal
 import sys
 import time
 from datetime import UTC, datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from turtlequant.data.binance import fetch_klines
@@ -56,7 +57,9 @@ from turtlequant.vol_surface import VolSurface
 
 
 def _setup_logging() -> logging.Logger:
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"
+    )
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     # Always log to stderr
@@ -67,7 +70,9 @@ def _setup_logging() -> logging.Logger:
     log_file = os.getenv("LOG_FILE", "")
     if log_file:
         Path(log_file).parent.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(log_file)
+        max_bytes = int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024)))
+        backup_count = int(os.getenv("LOG_BACKUP_COUNT", "5"))
+        fh = RotatingFileHandler(log_file, maxBytes=max_bytes, backupCount=backup_count)
         fh.setFormatter(fmt)
         root.addHandler(fh)
     return logging.getLogger("turtlequant_bot")
@@ -166,10 +171,22 @@ def main() -> None:
         description="TurtleQuant — probabilistic digital-option bot for Polymarket",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--paper", action="store_true", help="Paper trading mode (safe default)")
-    parser.add_argument("--shadow", action="store_true", help="Paper trade while recording executable CLOB bid/ask")
-    parser.add_argument("--live", action="store_true", help="Live CLOB trading with fill and partial-fill handling")
-    parser.add_argument("--dry-run", action="store_true", help="Evaluate signals only; no orders")
+    parser.add_argument(
+        "--paper", action="store_true", help="Paper trading mode (safe default)"
+    )
+    parser.add_argument(
+        "--shadow",
+        action="store_true",
+        help="Paper trade while recording executable CLOB bid/ask",
+    )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Live CLOB trading with fill and partial-fill handling",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Evaluate signals only; no orders"
+    )
     parser.add_argument(
         "--i-accept-live-risk",
         action="store_true",
@@ -224,7 +241,14 @@ def main() -> None:
     args = parser.parse_args()
 
     # Validate mode
-    if sum(1 for enabled in (args.paper, args.shadow, args.live, args.dry_run) if enabled) > 1:
+    if (
+        sum(
+            1
+            for enabled in (args.paper, args.shadow, args.live, args.dry_run)
+            if enabled
+        )
+        > 1
+    ):
         logger.error("Choose only one of --paper, --shadow, --live, or --dry-run")
         sys.exit(1)
     if args.live and not args.i_accept_live_risk:
@@ -257,12 +281,20 @@ def main() -> None:
         kelly_fraction=args.kelly_fraction,
         positions_file=state_dir / "turtlequant-positions.json",
     )
-    executor = ExecutionClient.from_env(mode=execution_mode, allow_live=args.i_accept_live_risk)
+    executor = ExecutionClient.from_env(
+        mode=execution_mode, allow_live=args.i_accept_live_risk
+    )
 
     logger.info("=== TurtleQuant Bot ===")
-    logger.info("Mode        : %s%s", execution_mode.upper(), " (dry-run)" if args.dry_run else "")
+    logger.info(
+        "Mode        : %s%s",
+        execution_mode.upper(),
+        " (dry-run)" if args.dry_run else "",
+    )
     logger.info("Assets      : %s", ", ".join(a.upper() for a in assets))
-    logger.info("Entry thresh: %.3f (%.1f%%)", args.entry_threshold, args.entry_threshold * 100)
+    logger.info(
+        "Entry thresh: %.3f (%.1f%%)", args.entry_threshold, args.entry_threshold * 100
+    )
     logger.info("Kelly frac  : %.2f", args.kelly_fraction)
     logger.info("Starting NAV: $%.2f", args.starting_nav)
     logger.info("State dir   : %s", state_dir)
@@ -270,7 +302,9 @@ def main() -> None:
 
     last_scan_time = 0.0
     last_reprice_time = 0.0
-    recently_closed: dict[str, datetime] = {}  # market_id → close time (cooldown tracker)
+    recently_closed: dict[
+        str, datetime
+    ] = {}  # market_id → close time (cooldown tracker)
 
     while running:
         now = time.time()
@@ -296,7 +330,9 @@ def main() -> None:
                             pos.expiry_iso[:10],
                             resolved_price,
                         )
-                        _pos, pnl = pos_mgr.close_position(pos.market_id, exit_price=resolved_price, reason="expired")
+                        _pos, pnl = pos_mgr.close_position(
+                            pos.market_id, exit_price=resolved_price, reason="expired"
+                        )
                         recently_closed[pos.market_id] = datetime.now(UTC)
                         append_history(
                             state_dir,
@@ -337,7 +373,11 @@ def main() -> None:
                         fallback_ask=yes_price or pos.last_ask or pos.last_yes_price,
                     )
                     if yes_price is None:
-                        yes_price = pos.last_yes_price if pos.last_yes_price > 0 else pos.entry_price
+                        yes_price = (
+                            pos.last_yes_price
+                            if pos.last_yes_price > 0
+                            else pos.entry_price
+                        )
                     else:
                         pos_mgr.record_market_data(
                             pos.market_id,
@@ -348,12 +388,23 @@ def main() -> None:
                         )
 
                     executable_exit_price = book.best_bid or yes_price
-                    decision = pos_mgr.exit_decision(pos.market_id, model_prob, executable_exit_price, now=datetime.now(UTC))
+                    decision = pos_mgr.exit_decision(
+                        pos.market_id,
+                        model_prob,
+                        executable_exit_price,
+                        now=datetime.now(UTC),
+                    )
                     if decision.should_exit:
                         exit_result = None
                         if not args.dry_run:
-                            shares = pos.token_size if pos.token_size > 0 else pos.size_usd / pos.entry_price
-                            exit_result = executor.sell_yes(pos.yes_token_id, shares, book)
+                            shares = (
+                                pos.token_size
+                                if pos.token_size > 0
+                                else pos.size_usd / pos.entry_price
+                            )
+                            exit_result = executor.sell_yes(
+                                pos.yes_token_id, shares, book
+                            )
                             append_history(
                                 state_dir,
                                 {
@@ -374,13 +425,20 @@ def main() -> None:
                                         "asset": pos.asset,
                                         "side": "SELL",
                                         "reason": decision.reason or "edge_reversed",
-                                        "error": exit_result.error or exit_result.status,
+                                        "error": exit_result.error
+                                        or exit_result.status,
                                         "ts": datetime.now(UTC).isoformat(),
                                     },
                                 )
                                 continue
-                        filled_price = exit_result.avg_price if exit_result and exit_result.avg_price > 0 else executable_exit_price
-                        filled_shares = exit_result.filled_shares if exit_result else None
+                        filled_price = (
+                            exit_result.avg_price
+                            if exit_result and exit_result.avg_price > 0
+                            else executable_exit_price
+                        )
+                        filled_shares = (
+                            exit_result.filled_shares if exit_result else None
+                        )
                         _pos, pnl = pos_mgr.close_position(
                             pos.market_id,
                             exit_price=filled_price,
@@ -392,7 +450,9 @@ def main() -> None:
                         append_history(
                             state_dir,
                             {
-                                "event": "close" if exit_result is None or exit_result.complete else "partial_close",
+                                "event": "close"
+                                if exit_result is None or exit_result.complete
+                                else "partial_close",
                                 "market_id": pos.market_id,
                                 "asset": pos.asset,
                                 "strike": pos.strike,
@@ -405,7 +465,9 @@ def main() -> None:
                                 "entry_edge": decision.entry_edge,
                                 "hours_to_expiry": decision.hours_to_expiry,
                                 "filled_shares": filled_shares,
-                                "complete": True if exit_result is None else exit_result.complete,
+                                "complete": True
+                                if exit_result is None
+                                else exit_result.complete,
                                 "pnl": pnl,
                                 "ts": datetime.now(UTC).isoformat(),
                             },
@@ -502,15 +564,22 @@ def main() -> None:
                                 pos = pos_mgr.get_position(market.market_id)
                                 if pos:
                                     token_id = pos.yes_token_id or market.yes_token_id
-                                    shares = pos.token_size if pos.token_size > 0 else pos.size_usd / pos.entry_price
-                                    exit_result = executor.sell_yes(token_id, shares, book)
+                                    shares = (
+                                        pos.token_size
+                                        if pos.token_size > 0
+                                        else pos.size_usd / pos.entry_price
+                                    )
+                                    exit_result = executor.sell_yes(
+                                        token_id, shares, book
+                                    )
                                     append_history(
                                         state_dir,
                                         {
                                             "event": "order",
                                             "market_id": market.market_id,
                                             "asset": params.asset,
-                                            "reason": decision.reason or "edge_reversed",
+                                            "reason": decision.reason
+                                            or "edge_reversed",
                                             **exit_result.to_history(),
                                             "ts": datetime.now(UTC).isoformat(),
                                         },
@@ -523,14 +592,22 @@ def main() -> None:
                                                 "market_id": market.market_id,
                                                 "asset": params.asset,
                                                 "side": "SELL",
-                                                "reason": decision.reason or "edge_reversed",
-                                                "error": exit_result.error or exit_result.status,
+                                                "reason": decision.reason
+                                                or "edge_reversed",
+                                                "error": exit_result.error
+                                                or exit_result.status,
                                                 "ts": datetime.now(UTC).isoformat(),
                                             },
                                         )
                                         continue
-                            filled_price = exit_result.avg_price if exit_result and exit_result.avg_price > 0 else executable_exit_price
-                            filled_shares = exit_result.filled_shares if exit_result else None
+                            filled_price = (
+                                exit_result.avg_price
+                                if exit_result and exit_result.avg_price > 0
+                                else executable_exit_price
+                            )
+                            filled_shares = (
+                                exit_result.filled_shares if exit_result else None
+                            )
                             _pos, pnl = pos_mgr.close_position(
                                 market.market_id,
                                 exit_price=filled_price,
@@ -542,7 +619,9 @@ def main() -> None:
                             append_history(
                                 state_dir,
                                 {
-                                    "event": "close" if exit_result is None or exit_result.complete else "partial_close",
+                                    "event": "close"
+                                    if exit_result is None or exit_result.complete
+                                    else "partial_close",
                                     "market_id": market.market_id,
                                     "asset": params.asset,
                                     "strike": params.strike,
@@ -555,7 +634,9 @@ def main() -> None:
                                     "entry_edge": decision.entry_edge,
                                     "hours_to_expiry": decision.hours_to_expiry,
                                     "filled_shares": filled_shares,
-                                    "complete": True if exit_result is None else exit_result.complete,
+                                    "complete": True
+                                    if exit_result is None
+                                    else exit_result.complete,
                                     "pnl": pnl,
                                     "ts": datetime.now(UTC).isoformat(),
                                 },
@@ -565,8 +646,15 @@ def main() -> None:
                     # ── Check entry ───────────────────────────────────────
                     # Skip if this market was recently closed (re-entry cooldown)
                     closed_at = recently_closed.get(market.market_id)
-                    if closed_at and (datetime.now(UTC) - closed_at).total_seconds() < REENTRY_COOLDOWN_SECS:
-                        logger.debug("Cooldown active for %s — skip re-entry", market.market_id[:16])
+                    if (
+                        closed_at
+                        and (datetime.now(UTC) - closed_at).total_seconds()
+                        < REENTRY_COOLDOWN_SECS
+                    ):
+                        logger.debug(
+                            "Cooldown active for %s — skip re-entry",
+                            market.market_id[:16],
+                        )
                         continue
 
                     if edge < args.entry_threshold:
@@ -576,7 +664,11 @@ def main() -> None:
 
                     size_usd = pos_mgr.kelly_size(edge, model_prob, yes_price)
                     if size_usd < 1.0:
-                        logger.debug("Size too small ($%.2f) for %s — skip", size_usd, market.market_id[:16])
+                        logger.debug(
+                            "Size too small ($%.2f) for %s — skip",
+                            size_usd,
+                            market.market_id[:16],
+                        )
                         continue
 
                     # Per-expiry exposure check
@@ -706,7 +798,9 @@ def main() -> None:
                     )
 
                 except Exception as exc:
-                    logger.warning("Market processing error (%s): %s", market.market_id[:16], exc)
+                    logger.warning(
+                        "Market processing error (%s): %s", market.market_id[:16], exc
+                    )
 
         # Sleep until next event
         time.sleep(5)

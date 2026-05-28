@@ -43,16 +43,16 @@ from textual.widgets import DataTable, Footer, Header, Label, Static
 class StrategyMeta:
     """Describes one strategy — where its state lives and how to display it."""
 
-    name: str           # display name
-    key: str            # slug used in widget IDs and file names
-    state_dir: Path     # host-side state directory
+    name: str  # display name
+    key: str  # slug used in widget IDs and file names
+    state_dir: Path  # host-side state directory
     positions_file: str
     history_file: str
     log_file: str
-    model_label: str = "Model P"   # column header for the probability field
-    has_regime: bool = False        # show regime column/metric
-    has_bs_mc: bool = False         # show BS vs MC breakdown
-    color: str = "cyan"             # card accent color
+    model_label: str = "Model P"  # column header for the probability field
+    has_regime: bool = False  # show regime column/metric
+    has_bs_mc: bool = False  # show BS vs MC breakdown
+    color: str = "cyan"  # card accent color
     # NAV limits shown in card (informational)
     max_per_market_pct: float = 0.10
     max_total_exposure_pct: float = 0.40
@@ -164,7 +164,11 @@ class StrategyState:
 
     @property
     def jump_premium(self) -> float | None:
-        vals = [e["mc_prob"] - e["bs_prob"] for e in self.opens if "mc_prob" in e and "bs_prob" in e]
+        vals = [
+            e["mc_prob"] - e["bs_prob"]
+            for e in self.opens
+            if "mc_prob" in e and "bs_prob" in e
+        ]
         return mean(vals) if vals else None
 
     @property
@@ -324,8 +328,14 @@ class StrategyCard(Static):
 
         pnl_color = "green" if s.total_pnl >= 0 else "red"
         wr = s.win_rate
-        wr_color = "green" if wr and wr >= 0.5 else ("yellow" if wr is not None else "dim")
-        exp_color = "yellow" if s.current_exposure_pct > m.max_total_exposure_pct * 80 else "white"
+        wr_color = (
+            "green" if wr and wr >= 0.5 else ("yellow" if wr is not None else "dim")
+        )
+        exp_color = (
+            "yellow"
+            if s.current_exposure_pct > m.max_total_exposure_pct * 80
+            else "white"
+        )
 
         title = (
             f"[bold {m.color}]{m.name}[/bold {m.color}]"
@@ -335,7 +345,7 @@ class StrategyCard(Static):
         )
 
         lines: list[str] = [
-            f"[dim]{'─'*60}[/dim]",
+            f"[dim]{'─' * 60}[/dim]",
             # Position stats
             f"Open: [bold]{len(s.positions)}[/bold]"
             f"  Entries: {len(s.opens)}"
@@ -365,8 +375,8 @@ class StrategyCard(Static):
         lines += [
             # Risk / exposure
             f"Exposure: [{exp_color}]${s.current_exposure_usd:.2f} ({_pct(s.current_exposure_pct)})[/{exp_color}]"
-            f"  Cap: {m.max_total_exposure_pct*100:.0f}%"
-            f"  Per-Market Cap: {m.max_per_market_pct*100:.0f}%",
+            f"  Cap: {m.max_total_exposure_pct * 100:.0f}%"
+            f"  Per-Market Cap: {m.max_per_market_pct * 100:.0f}%",
             # Timing
             f"Avg Hold: {_v(s.avg_hold_hours, '.1f', suffix='h')}"
             f"  Vol Traded: ${s.total_volume:.2f}"
@@ -391,11 +401,19 @@ def _populate_positions(table: DataTable, state: StrategyState) -> None:
     table.clear(columns=True)
     m = state.meta
     table.add_columns(
-        "Question", "Asset", "Type", "Strike", "Expiry",
-        "Entry P", m.model_label, "Edge@Entry", "Size $",
-        "Exposure%", "Time Left", "Fill",
+        "Question",
+        "Asset",
+        "Type",
+        "Strike",
+        "Expiry",
+        "Entry P",
+        m.model_label,
+        "Edge@Entry",
+        "Size $",
+        "Exposure%",
+        "Time Left",
+        "Fill",
     )
-    now = datetime.now(UTC)
     for p in state.positions:
         edge = p.get("edge_at_entry", 0.0)
         size = p.get("size_usd", 0.0)
@@ -425,15 +443,35 @@ def _populate_history(table: DataTable, state: StrategyState) -> None:
 
     if m.has_bs_mc:
         table.add_columns(
-            "Time (UTC)", "Event", "Asset", "Type", "Strike",
-            "BS Prob", "MC Prob", "Mkt P", "Edge", "Score",
-            "Sigma", "Size $", "PnL", "Reason",
+            "Time (UTC)",
+            "Event",
+            "Asset",
+            "Type",
+            "Strike",
+            "BS Prob",
+            "MC Prob",
+            "Mkt P",
+            "Edge",
+            "Score",
+            "Sigma",
+            "Size $",
+            "PnL",
+            "Reason",
         )
     else:
         table.add_columns(
-            "Time (UTC)", "Event", "Asset", "Type", "Strike",
-            m.model_label, "Mkt P", "Edge", "Sigma",
-            "Size $", "PnL", "Reason",
+            "Time (UTC)",
+            "Event",
+            "Asset",
+            "Type",
+            "Strike",
+            m.model_label,
+            "Mkt P",
+            "Edge",
+            "Sigma",
+            "Size $",
+            "PnL",
+            "Reason",
         )
 
     recent = list(reversed(state.history[-40:]))
@@ -560,7 +598,9 @@ class QuantDash(App[None]):
 
     selected_index: reactive[int] = reactive(0)
 
-    def __init__(self, registry: list[StrategyMeta], refresh_secs: int = 15, **kwargs: Any) -> None:
+    def __init__(
+        self, registry: list[StrategyMeta], refresh_secs: int = 15, **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self._refresh_secs = refresh_secs
         self._states = [StrategyState(meta=m) for m in registry]
@@ -641,7 +681,9 @@ class QuantDash(App[None]):
         _populate_history(self.query_one("#hist-table", DataTable), state)
 
         # Log
-        log_text = "\n".join(state.log_lines[-16:]) if state.log_lines else "(no log yet)"
+        log_text = (
+            "\n".join(state.log_lines[-16:]) if state.log_lines else "(no log yet)"
+        )
         self.query_one("#log-content", Static).update(log_text)
 
         # Update subtitle with last refresh time
@@ -653,13 +695,19 @@ class QuantDash(App[None]):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="QuantDash — unified TurtleQuant strategy monitor")
+    parser = argparse.ArgumentParser(
+        description="QuantDash — unified TurtleQuant strategy monitor"
+    )
     parser.add_argument(
-        "--refresh", type=int, default=15, metavar="SEC",
+        "--refresh",
+        type=int,
+        default=15,
+        metavar="SEC",
         help="Auto-refresh interval in seconds (default: 15)",
     )
     parser.add_argument(
-        "--state-root", type=Path,
+        "--state-root",
+        type=Path,
         default=Path(os.getenv("STATE_ROOT", "/opt/turtlequant/state")),
         help="Root state directory (default: /opt/turtlequant/state)",
     )

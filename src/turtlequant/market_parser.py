@@ -29,7 +29,9 @@ logger = logging.getLogger(__name__)
 class OptionType(StrEnum):
     EUROPEAN = "european"  # P(S_T > K) at expiry
     BARRIER = "barrier"  # P(max(S_t) > K) for any t in [0, T]  — upside touch
-    BARRIER_DOWN = "barrier_down"  # P(min(S_t) < K) for any t in [0, T] — downside touch
+    BARRIER_DOWN = (
+        "barrier_down"  # P(min(S_t) < K) for any t in [0, T] — downside touch
+    )
     EUROPEAN_PUT = "european_put"  # P(S_T < K) at expiry
 
 
@@ -56,8 +58,9 @@ class MarketParams:
 # Recognised assets (case-insensitive)
 _ASSET_PAT = r"(BTC|Bitcoin|ETH|Ethereum|SOL|Solana|XRP|Ripple)"
 
-# Strike: $75,000 or $75k or 75000
-_STRIKE_PAT = r"\$?([\d,]+(?:\.\d+)?)\s*[kK]?"
+# Strike: $75,000 or $75k or 75000. Keep the suffix inside the
+# capture so _parse_strike can scale compact values correctly.
+_STRIKE_PAT = r"\$?([\d,]+(?:\.\d+)?\s*[kK]?)"
 
 # Date phrase: "March 30", "March 30, 2025", "2025-03-30", "end of March", "March 16-22"
 _DATE_PAT = (
@@ -121,7 +124,9 @@ _CORPUS_FILE = Path("unclassified_markets.jsonl")
 # ---------------------------------------------------------------------------
 
 
-def parse_market(question: str, resolution_time: datetime | None = None) -> MarketParams | None:
+def parse_market(
+    question: str, resolution_time: datetime | None = None
+) -> MarketParams | None:
     """Parse a Polymarket question into MarketParams.
 
     Returns None if the question cannot be classified. Also logs
@@ -164,28 +169,45 @@ def parse_market(question: str, resolution_time: datetime | None = None) -> Mark
 # ---------------------------------------------------------------------------
 
 
-def _try_european(question: str, resolution_time: datetime | None) -> MarketParams | None:
+def _try_european(
+    question: str, resolution_time: datetime | None
+) -> MarketParams | None:
     m = _EUROPEAN_RE.search(question)
     if m is None:
         return None
     asset_raw, strike_raw, date_raw = m.group(1), m.group(2), m.group(3)
-    return _build_params(question, asset_raw, strike_raw, date_raw, OptionType.EUROPEAN, resolution_time)
+    return _build_params(
+        question, asset_raw, strike_raw, date_raw, OptionType.EUROPEAN, resolution_time
+    )
 
 
-def _try_barrier(question: str, resolution_time: datetime | None) -> MarketParams | None:
+def _try_barrier(
+    question: str, resolution_time: datetime | None
+) -> MarketParams | None:
     m = _BARRIER_RE.search(question)
     if m is None:
         return None
     asset_raw, strike_raw, date_raw = m.group(1), m.group(2), m.group(3)
-    return _build_params(question, asset_raw, strike_raw, date_raw, OptionType.BARRIER, resolution_time)
+    return _build_params(
+        question, asset_raw, strike_raw, date_raw, OptionType.BARRIER, resolution_time
+    )
 
 
-def _try_barrier_down(question: str, resolution_time: datetime | None) -> MarketParams | None:
+def _try_barrier_down(
+    question: str, resolution_time: datetime | None
+) -> MarketParams | None:
     m = _BARRIER_DOWN_RE.search(question)
     if m is None:
         return None
     asset_raw, strike_raw, date_raw = m.group(1), m.group(2), m.group(3)
-    return _build_params(question, asset_raw, strike_raw, date_raw, OptionType.BARRIER_DOWN, resolution_time)
+    return _build_params(
+        question,
+        asset_raw,
+        strike_raw,
+        date_raw,
+        OptionType.BARRIER_DOWN,
+        resolution_time,
+    )
 
 
 def _try_simple(question: str, resolution_time: datetime | None) -> MarketParams | None:
@@ -193,7 +215,9 @@ def _try_simple(question: str, resolution_time: datetime | None) -> MarketParams
     if m is None:
         return None
     asset_raw, strike_raw, date_raw = m.group(1), m.group(2), m.group(3)
-    return _build_params(question, asset_raw, strike_raw, date_raw, OptionType.EUROPEAN, resolution_time)
+    return _build_params(
+        question, asset_raw, strike_raw, date_raw, OptionType.EUROPEAN, resolution_time
+    )
 
 
 def _build_params(
@@ -242,10 +266,12 @@ def _build_params(
 def _parse_strike(raw: str) -> float | None:
     """Parse '$75,000' or '$75k' or '75000' → 75000.0"""
     raw = raw.replace(",", "").strip()
+    multiplier = 1_000.0 if raw.lower().endswith("k") else 1.0
+    if multiplier > 1:
+        raw = raw[:-1].strip()
     try:
         val = float(raw)
-        # Handle e.g. "75k" — already stripped by regex not capturing 'k'
-        return val
+        return val * multiplier
     except ValueError:
         return None
 
@@ -262,7 +288,11 @@ def _parse_date(raw: str) -> datetime | None:
     # Handle "March 16-22" date ranges → use the end date as expiry
     range_match = re.match(r"([A-Za-z]+)\s+\d{1,2}-(\d{1,2})(?:,?\s*(\d{4}))?", raw)
     if range_match:
-        month, end_day, year = range_match.group(1), range_match.group(2), range_match.group(3)
+        month, end_day, year = (
+            range_match.group(1),
+            range_match.group(2),
+            range_match.group(3),
+        )
         raw = f"{month} {end_day}" + (f", {year}" if year else "")
 
     # Handle "end of March" → last day of that month

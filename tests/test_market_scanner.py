@@ -25,6 +25,7 @@ def test_parse_raw_accepts_gamma_json_string_token_fields():
     assert market.yes_token_id == "yes-token"
     assert market.no_token_id == "no-token"
     assert market.yes_price == 0.39
+    assert market.liquidity_usd == 36104.5944
 
 
 class _FailingSession:

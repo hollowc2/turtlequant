@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -140,7 +141,9 @@ class VolSurface:
                 logger.info("Deribit: authenticated as %s", client_id)
             return token
         except Exception as exc:
-            self._log_warning("auth", "Deribit auth failed: %s", exc)
+            self._log_warning(
+                "auth", "Deribit auth failed: %s", _redact_url_secret(str(exc))
+            )
             return None
 
     # ------------------------------------------------------------------
@@ -168,7 +171,11 @@ class VolSurface:
             data = resp.json().get("result", [])
             points: list[IVPoint] = []
             for item in data:
-                iv = _safe_float(item.get("mark_iv")) or _safe_float(item.get("bid_iv")) or 0.0
+                iv = (
+                    _safe_float(item.get("mark_iv"))
+                    or _safe_float(item.get("bid_iv"))
+                    or 0.0
+                )
                 if iv <= 0:
                     continue
                 instr = item.get("instrument_name", "")
@@ -188,18 +195,31 @@ class VolSurface:
             if points:
                 self._iv_points = points
                 self._last_deribit_fetch = time.time()
-                logger.info("Deribit: loaded %d IV points for %s", len(points), self.asset.upper())
+                logger.info(
+                    "Deribit: loaded %d IV points for %s",
+                    len(points),
+                    self.asset.upper(),
+                )
             else:
-                self._log_warning("empty", "Deribit returned 0 usable IV points for %s", self.asset.upper())
+                self._log_warning(
+                    "empty",
+                    "Deribit returned 0 usable IV points for %s",
+                    self.asset.upper(),
+                )
         except Exception as exc:
-            self._log_warning("iv", "Deribit IV fetch failed for %s: %s", self.asset.upper(), exc)
+            self._log_warning(
+                "iv", "Deribit IV fetch failed for %s: %s", self.asset.upper(), exc
+            )
 
     def _get(self, url: str, **kwargs: object) -> requests.Response:
         last_exc: Exception | None = None
         for attempt in range(_REQUEST_RETRIES + 1):
             try:
                 resp = self._session.get(url, timeout=_REQUEST_TIMEOUT_SECS, **kwargs)
-                if getattr(resp, "status_code", 200) in _TRANSIENT_HTTP_STATUSES and attempt < _REQUEST_RETRIES:
+                if (
+                    getattr(resp, "status_code", 200) in _TRANSIENT_HTTP_STATUSES
+                    and attempt < _REQUEST_RETRIES
+                ):
                     time.sleep(_REQUEST_BACKOFF_SECS * (attempt + 1))
                     continue
                 return resp
@@ -221,7 +241,9 @@ class VolSurface:
         else:
             logger.debug(msg, *args)
 
-    def _interpolate(self, spot: float, strike: float, expiry: datetime) -> float | None:
+    def _interpolate(
+        self, spot: float, strike: float, expiry: datetime
+    ) -> float | None:
         """Log-linear interpolation in moneyness + linear in sqrt(T)."""
         points = self._iv_points
         if not points:
@@ -329,7 +351,9 @@ class VolSurface:
             logger.info("Realized vol for %s: %.3f (30d)", self.asset.upper(), rv)
             return rv
         except Exception as exc:
-            logger.warning("Realized vol fetch failed for %s: %s", self.asset.upper(), exc)
+            logger.warning(
+                "Realized vol fetch failed for %s: %s", self.asset.upper(), exc
+            )
             return 0.80
 
 
@@ -378,3 +402,8 @@ def _safe_float(v: object) -> float | None:
         return f if not (f != f) else None  # NaN check
     except (TypeError, ValueError):
         return None
+
+
+def _redact_url_secret(message: str) -> str:
+    """Avoid writing Deribit client_secret query values into logs."""
+    return re.sub(r"(client_secret=)[^&\s]+", r"\1<redacted>", message)
