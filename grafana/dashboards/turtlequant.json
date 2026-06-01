@@ -472,11 +472,12 @@
           "unit": "currencyUSD",
           "decimals": 2,
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
           },
           "custom": {
             "lineWidth": 2,
             "fillOpacity": 10,
+            "gradientMode": "scheme",
             "showPoints": "never",
             "spanNulls": false
           },
@@ -484,8 +485,12 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "red",
                 "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
               }
             ]
           }
