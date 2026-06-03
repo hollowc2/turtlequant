@@ -1,0 +1,59 @@
+# TurtleQuant alerting rules — load from /opt/monitoring/prometheus.yml (rule_files).
+# Requires Alertmanager (or Grafana unified alerting) for notifications.
+
+groups:
+  - name: turtlequant
+    rules:
+      - alert: TurtleQuantExporterDown
+        expr: turtlequant_exporter_scrape_success{strategy="turtlequant"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "TurtleQuant exporter cannot read state files"
+          description: "Positions or history JSON under /opt/turtlequant/state is missing or unreadable."
+
+      - alert: TurtleQuantBotStale
+        expr: turtlequant_bot_log_age_sec{strategy="turtlequant"} > 180
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "TurtleQuant bot log has not been updated"
+          description: "No log writes for >3m — scan loop may be hung or container crashed."
+
+      - alert: TurtleQuantNoScans
+        expr: turtlequant_bot_log_age_sec{strategy="turtlequant"} > 120
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TurtleQuant scan loop appears idle"
+          description: "Expected log activity every ~60s during normal operation."
+
+      - alert: TurtleQuantFailedOrdersSpike
+        expr: increase(turtlequant_failed_orders_total{strategy="turtlequant"}[15m]) > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TurtleQuant failed order spike"
+          description: "More than 3 failed_order events in 15 minutes."
+
+      - alert: TurtleQuantNavDrawdown
+        expr: turtlequant_current_drawdown_pct{strategy="turtlequant"} > 0.15
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TurtleQuant NAV drawdown >15%"
+          description: "Realized equity curve drawdown exceeded 15% from peak."
+
+      - alert: TurtleQuantExporterRestarted
+        expr: changes(process_start_time_seconds{job="turtlequant"}[15m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TurtleQuant Prometheus exporter restarted"
+          description: "turtlequant-grafana-exporter process restarted — check docker logs and bot health."

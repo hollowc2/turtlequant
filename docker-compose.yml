@@ -12,7 +12,7 @@ x-bot-common: &bot-common
 services:
 
   # TurtleQuant — digital option pricing on longer-dated Polymarket crypto markets
-  # Calibration passed (5yr BTC+ETH): Brier=0.178/0.199, RMSE=0.044/0.043
+  # Mode is CLI-only: --shadow (default below), --paper, --live --i-accept-live-risk
   turtlequant-bot:
     <<: *bot-common
     container_name: turtlequant-bot
@@ -28,7 +28,6 @@ services:
       - /opt/turtlequant/state:/app/state
       - /opt/turtlequant/data:/app/data
     environment:
-      PAPER_TRADE: "true"
       ASSET: "btc,eth"
       ENTRY_THRESHOLD: "0.05"
       KELLY_FRACTION: "0.25"
@@ -37,6 +36,22 @@ services:
       LOG_FILE: "/app/state/turtlequant-bot.log"
       DERIBIT_CLIENT_ID: "${DERIBIT_CLIENT_ID:-}"
       DERIBIT_CLIENT_SECRET: "${DERIBIT_CLIENT_SECRET:-}"
+      POLYMARKET_PRIVATE_KEY: "${POLYMARKET_PRIVATE_KEY:-}"
+      POLYMARKET_API_KEY: "${POLYMARKET_API_KEY:-}"
+      POLYMARKET_API_SECRET: "${POLYMARKET_API_SECRET:-}"
+      POLYMARKET_API_PASSPHRASE: "${POLYMARKET_API_PASSPHRASE:-}"
+      POLYMARKET_SIGNATURE_TYPE: "${POLYMARKET_SIGNATURE_TYPE:-0}"
+      POLYMARKET_FUNDER: "${POLYMARKET_FUNDER:-}"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import os,time; p=os.environ.get('LOG_FILE','/app/state/turtlequant-bot.log'); exit(0 if os.path.isfile(p) and time.time()-os.path.getmtime(p)<180 else 1)\"",
+        ]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
 
   # Prometheus metrics exporter — reads TurtleQuant JSON state files
   turtlequant-grafana-exporter:
@@ -56,6 +71,11 @@ services:
     environment:
       EXPORTER_PORT: "8004"
       STATE_DIR: "/opt/turtlequant/state"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/metrics', timeout=3)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
 networks:
   monitoring_net:

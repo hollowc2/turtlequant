@@ -105,11 +105,14 @@ Binance data falls back through Bybit → OKX → Gate.io for geo-resilience.
 ## Quickstart
 
 ```bash
-cp .env.example .env          # configure parameters
-docker compose up             # runs TurtleQuant in shadow mode
+./scripts/setup-vps.sh        # create /opt/turtlequant/{state,data} + monitoring_net
+cp .env.example .env          # configure secrets on the VPS (never commit)
+docker compose up -d          # runs TurtleQuant in shadow mode (--shadow)
 ```
 
 State files (`*-positions.json`, `*-history.json`) persist in `/opt/turtlequant/state`. The history file includes `order`, `failed_order`, and `shadow_quote` events with bid/ask snapshots, slippage, fill ratio inputs, and partial-fill fields.
+
+See [docs/OPS.md](docs/OPS.md) for secrets, Grafana/Prometheus wiring, alerts, healthchecks, and rollback.
 
 ---
 

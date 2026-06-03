@@ -63,6 +63,10 @@ STRATEGIES = {
     ),
 }
 
+BOT_LOG_FILES = {
+    "turtlequant": "turtlequant-bot.log",
+}
+
 # Keep this aligned with turtlequant.position_manager.TAKER_FEE_RATE. The
 # exporter uses it only to normalize legacy history rows that recorded flat
 # closes as zero before fee-adjusted P&L was persisted.
@@ -430,6 +434,11 @@ class TurtleQuantCollector:
             "Age of bot state files in seconds",
             labels=["strategy", "file"],
         )
+        bot_log_age_g = GaugeMetricFamily(
+            "turtlequant_bot_log_age_sec",
+            "Age of bot log file in seconds (staleness indicates scan loop stopped)",
+            labels=["strategy"],
+        )
         scrape_success_g = GaugeMetricFamily(
             "turtlequant_exporter_scrape_success",
             "1 when both positions and history files were readable; 0 otherwise",
@@ -508,6 +517,12 @@ class TurtleQuantCollector:
             pos_age = _file_age_sec(pos_path)
             if pos_age is not None:
                 state_file_age_g.add_metric([strategy, "positions"], pos_age)
+
+            log_name = BOT_LOG_FILES.get(strategy)
+            if log_name:
+                log_age = _file_age_sec(os.path.join(self.state_dir, log_name))
+                if log_age is not None:
+                    bot_log_age_g.add_metric([strategy], log_age)
 
             # ---- History file ----
             hist_data = _load_json(hist_path)
@@ -680,6 +695,7 @@ class TurtleQuantCollector:
         yield closed_pnl_g
         yield closed_hold_g
         yield state_file_age_g
+        yield bot_log_age_g
         yield scrape_success_g
 
 

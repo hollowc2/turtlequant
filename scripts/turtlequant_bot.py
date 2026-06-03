@@ -23,7 +23,7 @@ Usage:
     uv run python scripts/turtlequant_bot.py --dry-run --asset eth
 
 Configuration (env vars or CLI):
-    PAPER_TRADE          true/false — default true
+    Mode flags           --shadow | --paper | --live --i-accept-live-risk | --dry-run
     ENTRY_THRESHOLD      min edge to enter — default 0.05
     KELLY_FRACTION       fractional Kelly — default 0.25
     STARTING_NAV         starting bankroll in USD — default 1000.0
