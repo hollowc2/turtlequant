@@ -44,7 +44,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from turtlequant.data.binance import fetch_klines
-from turtlequant.clob_execution import ExecutionClient
+from turtlequant.clob_execution import ExecutionClient, estimate_buy_fill
 from turtlequant.market_parser import parse_market
 from turtlequant.market_scanner import MarketScanner
 from turtlequant.position_manager import PositionManager, make_position
@@ -500,6 +500,31 @@ def main() -> None:
                 time.sleep(5)
                 continue
 
+            scan_started_at = datetime.now(UTC)
+            scan_stats: dict[str, object] = {
+                "event": "scan_summary",
+                "markets_passed_filters": len(markets),
+                "parse_attempted": 0,
+                "parsed_markets": 0,
+                "unclassified_markets": 0,
+                "asset_skipped": 0,
+                "spot_missing": 0,
+                "vol_sources": {},
+                "mid_edge_candidates": 0,
+                "executable_edge_candidates": 0,
+                "ask_erased_edge": 0,
+                "book_sources": {},
+                "ts": scan_started_at.isoformat(),
+            }
+
+            def _inc_scan_stat(key: str, subkey: str | None = None) -> None:
+                if subkey is None:
+                    scan_stats[key] = int(scan_stats.get(key, 0)) + 1
+                    return
+                bucket = scan_stats.setdefault(key, {})
+                if isinstance(bucket, dict):
+                    bucket[subkey] = int(bucket.get(subkey, 0)) + 1
+
             # Fetch spot prices once per scan
             spots: dict[str, float | None] = {a: fetch_spot(a) for a in assets}
 
@@ -507,18 +532,25 @@ def main() -> None:
                 if not running:
                     break
                 try:
+                    _inc_scan_stat("parse_attempted")
                     params = parse_market(market.question, market.resolution_time)
                     if params is None:
+                        _inc_scan_stat("unclassified_markets")
                         continue
+                    _inc_scan_stat("parsed_markets")
                     if params.asset not in assets:
+                        _inc_scan_stat("asset_skipped")
                         continue
 
                     spot = spots.get(params.asset)
                     if spot is None or spot <= 0:
+                        _inc_scan_stat("spot_missing")
                         continue
 
                     vs = vol_surfaces[params.asset]
                     sigma = vs.get_iv(spot, params.strike, params.expiry)
+                    vol_source = vs.last_source
+                    _inc_scan_stat("vol_sources", vol_source)
                     model_prob = compute_probability(params, spot, sigma)
                     yes_price = market.yes_price
                     edge = model_prob - yes_price
@@ -659,6 +691,7 @@ def main() -> None:
 
                     if edge < args.entry_threshold:
                         continue
+                    _inc_scan_stat("mid_edge_candidates")
                     if yes_price <= 0.02 or yes_price >= 0.98:
                         continue  # near-certain markets — skip
 
@@ -701,26 +734,73 @@ def main() -> None:
                         fallback_bid=market.bid,
                         fallback_ask=market.ask,
                     )
+                    _inc_scan_stat("book_sources", book.source)
                     executable_entry_price = book.best_ask or market.ask or yes_price
                     entry_edge = model_prob - executable_entry_price
+                    fill_estimate = estimate_buy_fill(book, size_usd)
+                    fill_ratio = (
+                        min(1.0, fill_estimate.filled_usd / size_usd)
+                        if size_usd > 0
+                        else 0.0
+                    )
+                    append_history(
+                        state_dir,
+                        {
+                            "event": "signal_evaluation",
+                            "parsed": True,
+                            "market_id": market.market_id,
+                            "asset": params.asset,
+                            "strike": params.strike,
+                            "expiry": params.expiry.isoformat(),
+                            "option_type": params.option_type.value,
+                            "model_prob": model_prob,
+                            "mid_price": yes_price,
+                            "executable_price": executable_entry_price,
+                            "mid_edge": edge,
+                            "ask_edge": entry_edge,
+                            "entry_threshold": args.entry_threshold,
+                            "ask_erased_edge": entry_edge < args.entry_threshold,
+                            "requested_size_usd": size_usd,
+                            "estimated_fill_ratio": fill_ratio,
+                            "estimated_avg_price": fill_estimate.avg_price,
+                            "estimated_slippage": fill_estimate.avg_price - yes_price
+                            if fill_estimate.avg_price > 0
+                            else 0.0,
+                            "estimated_complete": fill_estimate.complete,
+                            "vol_source": vol_source,
+                            "sigma": sigma,
+                            "book_source": book.source,
+                            "quote": book.to_dict(),
+                            "ts": datetime.now(UTC).isoformat(),
+                        },
+                    )
+                    quote_reason = (
+                        "ask_erased_edge"
+                        if entry_edge < args.entry_threshold
+                        else "executable_edge"
+                    )
+                    append_history(
+                        state_dir,
+                        {
+                            "event": "shadow_quote",
+                            "market_id": market.market_id,
+                            "asset": params.asset,
+                            "model_prob": model_prob,
+                            "mid_price": yes_price,
+                            "bid": book.best_bid,
+                            "ask": book.best_ask,
+                            "edge": entry_edge,
+                            "reason": quote_reason,
+                            "book_source": book.source,
+                            "vol_source": vol_source,
+                            "quote": book.to_dict(),
+                            "ts": datetime.now(UTC).isoformat(),
+                        },
+                    )
                     if entry_edge < args.entry_threshold:
-                        append_history(
-                            state_dir,
-                            {
-                                "event": "shadow_quote",
-                                "market_id": market.market_id,
-                                "asset": params.asset,
-                                "model_prob": model_prob,
-                                "mid_price": yes_price,
-                                "bid": book.best_bid,
-                                "ask": book.best_ask,
-                                "edge": entry_edge,
-                                "reason": "ask_erased_edge",
-                                "quote": book.to_dict(),
-                                "ts": datetime.now(UTC).isoformat(),
-                            },
-                        )
+                        _inc_scan_stat("ask_erased_edge")
                         continue
+                    _inc_scan_stat("executable_edge_candidates")
                     entry_result = executor.buy_yes(market.yes_token_id, size_usd, book)
                     append_history(
                         state_dir,
@@ -791,6 +871,8 @@ def main() -> None:
                             "complete": entry_result.complete,
                             "slippage": entry_result.avg_price - yes_price,
                             "sigma": sigma,
+                            "vol_source": vol_source,
+                            "book_source": book.source,
                             "yes_token_id": market.yes_token_id,
                             "fill_confirmed": True,
                             "ts": datetime.now(UTC).isoformat(),
@@ -801,6 +883,8 @@ def main() -> None:
                     logger.warning(
                         "Market processing error (%s): %s", market.market_id[:16], exc
                     )
+
+            append_history(state_dir, scan_stats)
 
         # Sleep until next event
         time.sleep(5)

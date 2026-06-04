@@ -178,7 +178,7 @@ def estimate_sell_fill(book: OrderBook, shares: float) -> FillEstimate:
     )
 
 
-def synthetic_book(token_id: str, bid: float, ask: float, source: str = "gamma") -> OrderBook:
+def synthetic_book(token_id: str, bid: float, ask: float, source: str = "synthetic") -> OrderBook:
     bid = max(0.0, float(bid or 0.0))
     ask = max(0.0, float(ask or 0.0))
     return OrderBook(

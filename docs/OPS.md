@@ -62,6 +62,41 @@ Trading mode is **CLI only**: `--shadow` (compose default), `--paper`, or `--liv
 | Failed orders | >3 `failed_order` events in 15m |
 | NAV drawdown | `current_drawdown_pct > 15%` for 15m |
 | Exporter down | `exporter_scrape_success == 0` for 5m |
+| No shadow quotes | no `shadow_quote` events for 10m |
+| Ask erases edge | `ask_erased_edge_ratio > 25%` for 10m |
+| Synthetic books | `synthetic_book_ratio > 20%` for 15m |
+| Parser hit rate low | `parser_hit_rate < 75%` for 15m |
+| Realized-vol fallback high | `realized_vol_fallback_ratio > 30%` for 15m |
+
+## Phase 1 shadow soak
+
+Before live trading, run TurtleQuant in shadow mode long enough to cover normal market discovery, pricing, and order-book paths:
+
+```bash
+cd /opt/polymarket/app/turtlequant
+docker compose up -d --build turtlequant-bot turtlequant-grafana-exporter
+docker compose logs -f turtlequant-bot
+```
+
+During the soak, review the `Phase 1 Shadow Soak` row in Grafana and the Prometheus alerts above. The exporter is expected to expose:
+
+| Metric | Review target |
+|--------|---------------|
+| `turtlequant_shadow_quotes_total` | steadily increases while scan loop finds executable candidates |
+| `turtlequant_ask_erased_edge_ratio` | stays low; high values mean executable ask removes modeled edge |
+| `turtlequant_synthetic_book_ratio` | stays low; high values mean fill modeling depends on synthetic books |
+| `turtlequant_parser_hit_rate` | remains high enough that discovery is not dominated by unparsed markets |
+| `turtlequant_realized_vol_fallback_ratio` | remains low; high values mean Deribit IV coverage is weak |
+| `turtlequant_order_book_source_total` | confirms real CLOB book usage versus synthetic fallback |
+| `turtlequant_vol_source_total` | confirms Deribit IV usage versus realized-vol fallback |
+
+Promotion gate:
+
+1. No critical alerts firing for the soak window.
+2. `shadow_quotes_total` is increasing during active scan periods.
+3. Synthetic-book and realized-vol fallback ratios are understood and acceptable for the current market set.
+4. Parser misses are reviewed before raising live risk.
+5. Failed-order and stale-exporter alerts are quiet.
 
 ## Healthchecks
 

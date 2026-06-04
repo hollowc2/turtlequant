@@ -57,3 +57,70 @@ groups:
         annotations:
           summary: "TurtleQuant Prometheus exporter restarted"
           description: "turtlequant-grafana-exporter process restarted — check docker logs and bot health."
+
+      - alert: TurtleQuantNoShadowQuotes
+        expr: increase(turtlequant_shadow_quotes_total{strategy="turtlequant"}[10m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TurtleQuant shadow quote stream is idle"
+          description: "No shadow_quote events were exported for 10 minutes during the Phase 1 soak."
+
+      - alert: TurtleQuantAskErasesEdgeHigh
+        expr: turtlequant_ask_erased_edge_ratio{strategy="turtlequant"} > 0.25
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TurtleQuant executable ask is erasing modeled edge"
+          description: "More than 25% of candidate edges are erased after crossing the executable ask."
+
+      - alert: TurtleQuantSyntheticBookRatioHigh
+        expr: turtlequant_synthetic_book_ratio{strategy="turtlequant"} > 0.20
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TurtleQuant synthetic order-book usage is elevated"
+          description: "More than 20% of quote events are using synthetic book fallback during the shadow soak."
+
+      - alert: TurtleQuantParserHitRateLow
+        expr: turtlequant_parser_hit_rate{strategy="turtlequant"} < 0.75
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TurtleQuant parser hit rate is low"
+          description: "Less than 75% of discovered markets are being parsed into tradable contracts."
+
+      - alert: TurtleQuantRealizedVolFallbackHigh
+        expr: turtlequant_realized_vol_fallback_ratio{strategy="turtlequant"} > 0.30
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TurtleQuant realized-vol fallback usage is elevated"
+          description: "More than 30% of volatility lookups are falling back from Deribit IV to realized volatility."
+
+      - alert: TurtleQuantOnlySyntheticBooks
+        expr: |
+          sum by (strategy) (increase(turtlequant_order_book_source_total{strategy="turtlequant", source="clob"}[15m])) == 0
+          and sum by (strategy) (increase(turtlequant_order_book_source_total{strategy="turtlequant"}[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TurtleQuant has no real order-book source events"
+          description: "Order-book source counters increased, but only synthetic fallback sources were observed."
+
+      - alert: TurtleQuantOnlyRealizedVol
+        expr: |
+          sum by (strategy) (increase(turtlequant_vol_source_total{strategy="turtlequant", source="deribit"}[15m])) == 0
+          and sum by (strategy) (increase(turtlequant_vol_source_total{strategy="turtlequant"}[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TurtleQuant has no implied-vol source events"
+          description: "Volatility source counters increased, but only realized-vol fallback sources were observed."

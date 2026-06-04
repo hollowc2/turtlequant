@@ -14,6 +14,13 @@ _effective_close_events = grafana_exporter._effective_close_events
 TurtleQuantCollector = grafana_exporter.TurtleQuantCollector
 
 
+def _sample_value(family, **labels):
+    for sample in family.samples:
+        if all(sample.labels.get(key) == value for key, value in labels.items()):
+            return sample.value
+    raise AssertionError(f"missing sample in {family.name}: {labels}")
+
+
 def test_effective_close_events_fee_adjust_legacy_flat_close():
     events = [
         {
@@ -101,3 +108,115 @@ def test_collector_exports_live_readiness_metrics(tmp_path):
     assert families["turtlequant_avg_entry_slippage"].samples[0].value == 0.02
     assert families["turtlequant_avg_fill_ratio"].samples[0].value == 0.8
     assert families["turtlequant_failed_orders_total"].samples[0].labels["side"] == "SELL"
+
+
+def test_collector_exports_shadow_soak_history_metrics(tmp_path):
+    (tmp_path / "turtlequant-positions.json").write_text(
+        """
+        {
+          "nav": 1000,
+          "total_pnl": 0,
+          "positions": []
+        }
+        """
+    )
+    (tmp_path / "turtlequant-history.json").write_text(
+        """
+        [
+          {
+            "event": "shadow_quote",
+            "reason": "ask_erased_edge",
+            "quote": {"source": "clob"},
+            "ts": "2026-05-01T00:00:00+00:00"
+          },
+          {
+            "event": "shadow_quote",
+            "reason": "ask_erased_edge",
+            "quote": {"source": "gamma"},
+            "ts": "2026-05-01T00:01:00+00:00"
+          },
+          {
+            "event": "shadow_quote",
+            "reason": "below_threshold",
+            "quote": {"source": "clob"},
+            "ts": "2026-05-01T00:02:00+00:00"
+          },
+          {
+            "event": "signal_evaluation",
+            "parsed": true,
+            "book_source": "clob",
+            "vol_source": "deribit",
+            "ts": "2026-05-01T00:03:00+00:00"
+          },
+          {
+            "event": "signal_evaluation",
+            "parsed": false,
+            "book_source": "synthetic",
+            "vol_source": "realized",
+            "ts": "2026-05-01T00:04:00+00:00"
+          },
+          {
+            "event": "scan_summary",
+            "markets_passed_filters": 10,
+            "parse_attempted": 10,
+            "parsed_markets": 8,
+            "unclassified_markets": 2,
+            "vol_sources": {"deribit": 6, "realized": 2},
+            "book_sources": {"clob": 3, "synthetic": 1},
+            "ts": "2026-05-01T00:05:00+00:00"
+          }
+        ]
+        """
+    )
+
+    families = {metric.name: metric for metric in TurtleQuantCollector(str(tmp_path)).collect()}
+
+    assert _sample_value(
+        families["turtlequant_shadow_quotes_total"],
+        strategy="turtlequant",
+        reason="ask_erased_edge",
+    ) == 2.0
+    assert _sample_value(
+        families["turtlequant_shadow_quotes_total"],
+        strategy="turtlequant",
+        reason="below_threshold",
+    ) == 1.0
+    assert families["turtlequant_ask_erased_edge_ratio"].samples[0].value == 2 / 3
+    assert _sample_value(
+        families["turtlequant_order_book_source_total"],
+        strategy="turtlequant",
+        source="clob",
+    ) == 6.0
+    assert _sample_value(
+        families["turtlequant_order_book_source_ratio"],
+        strategy="turtlequant",
+        source="synthetic",
+    ) == 2 / 9
+    assert families["turtlequant_synthetic_book_ratio"].samples[0].value == 1 / 3
+    assert families["turtlequant_parser_hit_rate"].samples[0].value == 0.8
+    assert _sample_value(
+        families["turtlequant_signal_evaluation_count"],
+        strategy="turtlequant",
+        parsed="true",
+    ) == 1.0
+    assert _sample_value(
+        families["turtlequant_signal_evaluation_count"],
+        strategy="turtlequant",
+        parsed="false",
+    ) == 1.0
+    assert _sample_value(
+        families["turtlequant_signal_book_source_count"],
+        strategy="turtlequant",
+        source="synthetic",
+    ) == 1.0
+    assert _sample_value(
+        families["turtlequant_signal_vol_source_count"],
+        strategy="turtlequant",
+        source="deribit",
+    ) == 1.0
+    assert _sample_value(
+        families["turtlequant_vol_source_total"],
+        strategy="turtlequant",
+        source="realized",
+    ) == 3.0
+    assert families["turtlequant_realized_vol_fallback_ratio"].samples[0].value == 3 / 10

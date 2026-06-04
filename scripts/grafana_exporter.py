@@ -102,6 +102,25 @@ def _safe_float(value: object, default: float = 0.0) -> float:
         return default
 
 
+def _history_source(event: dict) -> str | None:
+    quote = event.get("quote")
+    if not isinstance(quote, dict):
+        return None
+    source = quote.get("source")
+    if source is None:
+        return None
+    return str(source) or "unknown"
+
+
+def _is_fallback_source(source: str) -> bool:
+    normalized = source.lower()
+    return "fallback" in normalized or normalized in {"default", "proxy", "realized", "unknown"}
+
+
+def _is_synthetic_book_source(source: str) -> bool:
+    return source.lower() in {"synthetic", "gamma"}
+
+
 def _effective_close_events(history_events: list[dict]) -> list[dict]:
     """Return close events with fee-adjusted P&L for legacy zero-P&L rows."""
     open_queues: dict[str, list[dict]] = {}
@@ -393,6 +412,61 @@ class TurtleQuantCollector:
             "Count of closed trades per exit reason",
             labels=["strategy", "reason"],
         )
+        shadow_quote_g = GaugeMetricFamily(
+            "turtlequant_shadow_quotes_total",
+            "Count of shadow quote events by reason",
+            labels=["strategy", "reason"],
+        )
+        ask_erased_edge_ratio_g = GaugeMetricFamily(
+            "turtlequant_ask_erased_edge_ratio",
+            "Fraction of shadow quote events where executable ask erased the model edge",
+            labels=["strategy"],
+        )
+        order_book_source_g = GaugeMetricFamily(
+            "turtlequant_order_book_source_total",
+            "Count of history events by nested quote.source order book source",
+            labels=["strategy", "source"],
+        )
+        order_book_source_ratio_g = GaugeMetricFamily(
+            "turtlequant_order_book_source_ratio",
+            "Fraction of history events with nested quote.source by order book source",
+            labels=["strategy", "source"],
+        )
+        signal_evaluation_g = GaugeMetricFamily(
+            "turtlequant_signal_evaluation_count",
+            "Count of signal evaluation events by parser outcome",
+            labels=["strategy", "parsed"],
+        )
+        parser_hit_rate_g = GaugeMetricFamily(
+            "turtlequant_parser_hit_rate",
+            "Fraction of scan-summary parse attempts that were classified",
+            labels=["strategy"],
+        )
+        signal_book_source_g = GaugeMetricFamily(
+            "turtlequant_signal_book_source_count",
+            "Count of signal evaluation events by book_source field",
+            labels=["strategy", "source"],
+        )
+        parser_scanner_vol_source_g = GaugeMetricFamily(
+            "turtlequant_signal_vol_source_count",
+            "Count of signal evaluation events by vol_source field",
+            labels=["strategy", "source"],
+        )
+        vol_source_g = GaugeMetricFamily(
+            "turtlequant_vol_source_total",
+            "Count of history events by volatility source",
+            labels=["strategy", "source"],
+        )
+        synthetic_book_ratio_g = GaugeMetricFamily(
+            "turtlequant_synthetic_book_ratio",
+            "Fraction of order-book source events that used synthetic fallback books",
+            labels=["strategy"],
+        )
+        realized_vol_fallback_ratio_g = GaugeMetricFamily(
+            "turtlequant_realized_vol_fallback_ratio",
+            "Fraction of history events with vol_source that used a fallback volatility source",
+            labels=["strategy"],
+        )
 
         # --- Per active position ---
         pos_size_g = GaugeMetricFamily(
@@ -531,6 +605,9 @@ class TurtleQuantCollector:
                 open_events = [e for e in hist_data if e.get("event") == "open"]
                 order_events = [e for e in hist_data if e.get("event") == "order"]
                 failed_events = [e for e in hist_data if e.get("event") == "failed_order"]
+                shadow_quote_events = [e for e in hist_data if e.get("event") == "shadow_quote"]
+                signal_evaluation_events = [e for e in hist_data if e.get("event") == "signal_evaluation"]
+                scan_summary_events = [e for e in hist_data if e.get("event") == "scan_summary"]
                 effective_close_events = _effective_close_events(hist_data)
                 hist_age = _file_age_sec(hist_path)
                 if hist_age is not None:
@@ -637,6 +714,90 @@ class TurtleQuantCollector:
                 for side, count in failed_counts.items():
                     failed_orders_g.add_metric([strategy, side], float(count))
 
+                shadow_counts: dict[str, int] = {}
+                for event in shadow_quote_events:
+                    reason = str(event.get("reason", "unknown"))
+                    shadow_counts[reason] = shadow_counts.get(reason, 0) + 1
+                for reason, count in shadow_counts.items():
+                    shadow_quote_g.add_metric([strategy, reason], float(count))
+                if shadow_quote_events:
+                    erased = shadow_counts.get("ask_erased_edge", 0)
+                    ask_erased_edge_ratio_g.add_metric([strategy], erased / len(shadow_quote_events))
+
+                book_source_counts: dict[str, int] = {}
+                for event in hist_data:
+                    source = _history_source(event)
+                    if source is None and event.get("book_source") is not None:
+                        source = str(event.get("book_source")) or "unknown"
+                    if source is None:
+                        continue
+                    book_source_counts[source] = book_source_counts.get(source, 0) + 1
+                for event in scan_summary_events:
+                    sources = event.get("book_sources")
+                    if not isinstance(sources, dict):
+                        continue
+                    for source, count in sources.items():
+                        key = str(source) or "unknown"
+                        book_source_counts[key] = book_source_counts.get(key, 0) + int(_safe_float(count))
+                book_source_total = sum(book_source_counts.values())
+                for source, count in book_source_counts.items():
+                    order_book_source_g.add_metric([strategy, source], float(count))
+                    if book_source_total > 0:
+                        order_book_source_ratio_g.add_metric([strategy, source], count / book_source_total)
+                if book_source_total > 0:
+                    synthetic_count = sum(count for source, count in book_source_counts.items() if _is_synthetic_book_source(source))
+                    synthetic_book_ratio_g.add_metric([strategy], synthetic_count / book_source_total)
+
+                parsed_counts: dict[str, int] = {}
+                signal_book_counts: dict[str, int] = {}
+                signal_vol_counts: dict[str, int] = {}
+                parse_attempted = 0
+                parsed_markets = 0
+                for event in scan_summary_events:
+                    parse_attempted += int(_safe_float(event.get("parse_attempted")))
+                    parsed_markets += int(_safe_float(event.get("parsed_markets")))
+                for event in signal_evaluation_events:
+                    if "parsed" in event:
+                        parsed = "true" if bool(event.get("parsed")) else "false"
+                        parsed_counts[parsed] = parsed_counts.get(parsed, 0) + 1
+                    book_source = event.get("book_source")
+                    if book_source is not None:
+                        source = str(book_source) or "unknown"
+                        signal_book_counts[source] = signal_book_counts.get(source, 0) + 1
+                    vol_source = event.get("vol_source")
+                    if vol_source is not None:
+                        source = str(vol_source) or "unknown"
+                        signal_vol_counts[source] = signal_vol_counts.get(source, 0) + 1
+                for parsed, count in parsed_counts.items():
+                    signal_evaluation_g.add_metric([strategy, parsed], float(count))
+                if parse_attempted > 0:
+                    parser_hit_rate_g.add_metric([strategy], parsed_markets / parse_attempted)
+                for source, count in signal_book_counts.items():
+                    signal_book_source_g.add_metric([strategy, source], float(count))
+                for source, count in signal_vol_counts.items():
+                    parser_scanner_vol_source_g.add_metric([strategy, source], float(count))
+
+                vol_source_counts: dict[str, int] = {}
+                for event in hist_data:
+                    vol_source = event.get("vol_source")
+                    if vol_source is None:
+                        continue
+                    source = str(vol_source) or "unknown"
+                    vol_source_counts[source] = vol_source_counts.get(source, 0) + 1
+                for event in scan_summary_events:
+                    sources = event.get("vol_sources")
+                    if not isinstance(sources, dict):
+                        continue
+                    for source, count in sources.items():
+                        key = str(source) or "unknown"
+                        vol_source_counts[key] = vol_source_counts.get(key, 0) + int(_safe_float(count))
+                vol_source_total = sum(vol_source_counts.values())
+                for source, count in vol_source_counts.items():
+                    vol_source_g.add_metric([strategy, source], float(count))
+                if vol_source_total > 0:
+                    fallback_count = sum(count for source, count in vol_source_counts.items() if _is_fallback_source(source))
+                    realized_vol_fallback_ratio_g.add_metric([strategy], fallback_count / vol_source_total)
+
                 # Recent closed trades (last 20)
                 # Use sequential idx as the unique label so the same market traded
                 # multiple times doesn't produce duplicate label sets.
@@ -688,6 +849,17 @@ class TurtleQuantCollector:
         yield avg_edge_g
         yield last_trade_age_g
         yield exit_reason_g
+        yield shadow_quote_g
+        yield ask_erased_edge_ratio_g
+        yield order_book_source_g
+        yield order_book_source_ratio_g
+        yield signal_evaluation_g
+        yield parser_hit_rate_g
+        yield signal_book_source_g
+        yield parser_scanner_vol_source_g
+        yield vol_source_g
+        yield synthetic_book_ratio_g
+        yield realized_vol_fallback_ratio_g
         yield pos_size_g
         yield pos_edge_g
         yield pos_age_g

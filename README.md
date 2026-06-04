@@ -16,6 +16,12 @@ Polymarket offers binary outcome markets like _"Will BTC be above $75,000 by Mar
 
 It runs as a Docker service in shadow mode by default: orders stay simulated, but each signal records the executable bid/ask snapshot used for fill modeling.
 
+Phase 1 shadow-soak monitoring expects exporter metrics for quote/source quality:
+`turtlequant_ask_erased_edge_ratio`, `turtlequant_synthetic_book_ratio`,
+`turtlequant_parser_hit_rate`, `turtlequant_realized_vol_fallback_ratio`,
+`turtlequant_shadow_quotes_total`, `turtlequant_order_book_source_total`, and
+`turtlequant_vol_source_total`.
+
 ---
 
 ## How It Works
@@ -113,6 +119,8 @@ docker compose up -d          # runs TurtleQuant in shadow mode (--shadow)
 State files (`*-positions.json`, `*-history.json`) persist in `/opt/turtlequant/state`. The history file includes `order`, `failed_order`, and `shadow_quote` events with bid/ask snapshots, slippage, fill ratio inputs, and partial-fill fields.
 
 See [docs/OPS.md](docs/OPS.md) for secrets, Grafana/Prometheus wiring, alerts, healthchecks, and rollback.
+
+For Phase 1 promotion, run a shadow soak first and review the Grafana `Phase 1 Shadow Soak` row plus Prometheus alerts before enabling live execution.
 
 ---
 

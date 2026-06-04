@@ -79,6 +79,7 @@ class VolSurface:
     _token_fetched_at: float = field(default=0.0, repr=False)
     _last_deribit_attempt: float = field(default=0.0, repr=False)
     _last_warning_at: dict[str, float] = field(default_factory=dict, repr=False)
+    last_source: str = field(default="unknown", init=False)
 
     def get_iv(self, spot: float, strike: float, expiry: datetime) -> float:
         """Return annualized implied vol for (strike, expiry).
@@ -90,9 +91,11 @@ class VolSurface:
         if self._iv_points:
             iv = self._interpolate(spot, strike, expiry)
             if iv is not None:
+                self.last_source = "deribit"
                 return iv
         # Fallback
         rv = self._get_realized_vol()
+        self.last_source = "wide_fallback" if rv == 0.80 else "realized"
         logger.info(
             "Using realized vol fallback for %s: σ=%.3f (no Deribit data for K=%.0f)",
             self.asset.upper(),

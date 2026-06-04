@@ -69,3 +69,14 @@ def test_get_order_book_retries_before_synthetic_fallback():
     assert flaky.calls == 3
     assert book.best_bid == 0.40
     assert book.best_ask == 0.42
+    assert book.source == "clob"
+
+
+def test_get_order_book_marks_synthetic_fallback_source():
+    client = ExecutionClient(mode="paper", clob_client=None)
+
+    book = client.get_order_book("yes", fallback_bid=0.30, fallback_ask=0.50)
+
+    assert book.best_bid == 0.30
+    assert book.best_ask == 0.50
+    assert book.source == "synthetic"
