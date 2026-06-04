@@ -110,6 +110,17 @@ def test_polymarket_env_reads_crypto_clob_aliases(monkeypatch):
     assert funder == "0xfunder"
 
 
+def test_polymarket_env_ignores_funder_for_eoa_signature(monkeypatch):
+    monkeypatch.setenv("PRIVATE_KEY", "0xabc")
+    monkeypatch.setenv("FUNDER_ADDRESS", "0xfunder")
+    monkeypatch.setenv("POLYMARKET_SIGNATURE_TYPE", "0")
+
+    _, _, _, _, sig, funder = _polymarket_env()
+
+    assert sig == 0
+    assert funder == ""
+
+
 def test_build_clob_client_derives_api_creds_when_not_in_env(monkeypatch):
     monkeypatch.setenv("PRIVATE_KEY", "0x" + "11" * 32)
     monkeypatch.delenv("POLYMARKET_API_KEY", raising=False)

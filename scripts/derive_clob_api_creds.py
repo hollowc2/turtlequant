@@ -25,7 +25,9 @@ def main() -> int:
     signature_type = int(
         os.getenv("POLYMARKET_SIGNATURE_TYPE", os.getenv("SIGNATURE_TYPE", "0"))
     )
-    funder = os.getenv("POLYMARKET_FUNDER") or os.getenv("FUNDER_ADDRESS", "")
+    funder = ""
+    if signature_type:
+        funder = os.getenv("POLYMARKET_FUNDER") or os.getenv("FUNDER_ADDRESS", "")
 
     kwargs: dict = {
         "host": os.getenv("POLYMARKET_CLOB_HOST", "https://clob.polymarket.com"),
@@ -34,7 +36,7 @@ def main() -> int:
     }
     if signature_type:
         kwargs["signature_type"] = signature_type
-    if funder:
+    if signature_type and funder:
         kwargs["funder"] = funder
 
     client = ClobClient(**kwargs)

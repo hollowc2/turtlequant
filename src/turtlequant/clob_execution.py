@@ -37,11 +37,13 @@ def _polymarket_env() -> tuple[str, str, str, str, int, str]:
     signature_type = int(
         os.getenv("POLYMARKET_SIGNATURE_TYPE", os.getenv("SIGNATURE_TYPE", "0"))
     )
-    funder = (
-        os.getenv("POLYMARKET_FUNDER")
-        or os.getenv("FUNDER_ADDRESS")
-        or os.getenv("DEPOSIT_WALLET_ADDRESS", "")
-    )
+    funder = ""
+    if signature_type:
+        funder = (
+            os.getenv("POLYMARKET_FUNDER")
+            or os.getenv("FUNDER_ADDRESS")
+            or os.getenv("DEPOSIT_WALLET_ADDRESS", "")
+        )
     return private_key, api_key, api_secret, api_passphrase, signature_type, funder
 _BOOK_RETRY_BACKOFF_SECS = 0.5
 _BOOK_WARNING_COOLDOWN_SECS = 5 * 60

@@ -1,0 +1,26 @@
+services:
+  turtlequant-bot:
+    command:
+      - "uv"
+      - "run"
+      - "python"
+      - "scripts/turtlequant_bot.py"
+      - "--live"
+      - "--i-accept-live-risk"
+      - "--asset"
+      - "btc,eth"
+    volumes:
+      - /opt/turtlequant/state/live-state:/app/state
+      - /opt/turtlequant/data:/app/data
+    environment:
+      STATE_DIR: "/app/state"
+      LOG_FILE: "/app/state/turtlequant-bot.log"
+      POLYMARKET_SIGNATURE_TYPE: "0"
+      POLYMARKET_FUNDER: ""
+
+  turtlequant-grafana-exporter:
+    volumes:
+      - /opt/turtlequant/state/live-state:/opt/turtlequant/state:ro
+      - .:/app
+    environment:
+      STATE_DIR: "/opt/turtlequant/state"

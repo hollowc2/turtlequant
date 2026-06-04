@@ -12,6 +12,7 @@ docker compose up -d --build
 | Path | Purpose |
 |------|---------|
 | `/opt/turtlequant/state` | Positions, history, bot log (bind-mounted) |
+| `/opt/turtlequant/state/live-state` | Separate live positions, history, bot log |
 | `/opt/turtlequant/data` | Calibration / auxiliary data |
 | `/opt/polymarket/app/turtlequant` | Deploy source (compose file lives here) |
 
@@ -41,6 +42,7 @@ TurtleQuant uses `py-clob-client-v2` (pUSD collateral). Wallet USDC.e + V1 excha
 ### 1. Fund wallet
 
 - Polygon EOA with USDC.e (and MATIC for gas).
+- For signing EOA wallets: set `POLYMARKET_SIGNATURE_TYPE=0` and leave `POLYMARKET_FUNDER` unset/empty.
 - For proxy/Magic wallets: set `POLYMARKET_SIGNATURE_TYPE=1` and `POLYMARKET_FUNDER` to the address that holds funds.
 
 ### 2. Migrate collateral (USDC.e → pUSD)
@@ -70,8 +72,14 @@ uv run scripts/derive_clob_api_creds.py >> .env
 cp /opt/turtlequant/state/turtlequant-positions.json \
    /opt/turtlequant/state/turtlequant-positions.json.bak-$(date -u +%Y%m%dT%H%M%SZ)
 
+mkdir -p /opt/turtlequant/state/live-state
+printf '{"nav":50.0,"total_pnl":0.0,"positions":[]}\n' \
+  > /opt/turtlequant/state/live-state/turtlequant-positions.json
+printf '[]\n' > /opt/turtlequant/state/live-state/turtlequant-history.json
+
 uv run python scripts/turtlequant_bot.py \
   --live --i-accept-live-risk \
+  --state-dir /opt/turtlequant/state/live-state \
   --asset btc \
   --starting-nav 50 \
   --entry-threshold 0.10
@@ -88,6 +96,12 @@ uv run scripts/reconcile_nav.py
 ```
 
 Compares file NAV to CLOB pUSD balance + open position bid marks. Investigate if drift > 5% of NAV.
+
+For the long-running live container, use the live override so shadow bookkeeping in `/opt/turtlequant/state/turtlequant-positions.json` is not inherited:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.live.yml up -d --build turtlequant-bot turtlequant-grafana-exporter
+```
 
 ## Observability
 
