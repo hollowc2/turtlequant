@@ -26,10 +26,68 @@ Compose interpolates only the variables listed in `docker-compose.yml` from `.en
 | Variable | Required when |
 |----------|----------------|
 | `DERIBIT_CLIENT_ID`, `DERIBIT_CLIENT_SECRET` | Always recommended (rate limits) |
-| `POLYMARKET_PRIVATE_KEY` + API trio | `--live` only |
-| `POLYMARKET_SIGNATURE_TYPE`, `POLYMARKET_FUNDER` | Proxy wallet setups |
+| `POLYMARKET_PRIVATE_KEY` (or `PRIVATE_KEY`) | `--live` / `--shadow` with authenticated CLOB |
+| `POLYMARKET_API_*` | Optional — derived from private key at runtime if omitted |
+| `POLYMARKET_SIGNATURE_TYPE`, `POLYMARKET_FUNDER` | Proxy wallet setups (`SIGNATURE_TYPE=1`) |
+
+Legacy aliases from `crypto_up_or_down` are supported: `PRIVATE_KEY`, `CLOB_API_*`, `FUNDER_ADDRESS`, `SIGNATURE_TYPE`.
 
 Trading mode is **CLI only**: `--shadow` (compose default), `--paper`, or `--live --i-accept-live-risk`. There is no `PAPER_TRADE` env var on the bot.
+
+## Live trading prep (CLOB v2)
+
+TurtleQuant uses `py-clob-client-v2` (pUSD collateral). Wallet USDC.e + V1 exchange approvals are **not** sufficient.
+
+### 1. Fund wallet
+
+- Polygon EOA with USDC.e (and MATIC for gas).
+- For proxy/Magic wallets: set `POLYMARKET_SIGNATURE_TYPE=1` and `POLYMARKET_FUNDER` to the address that holds funds.
+
+### 2. Migrate collateral (USDC.e → pUSD)
+
+```bash
+cd /opt/polymarket/app/turtlequant
+set -a && source .env && set +a
+
+uv run scripts/migrate_pusd_v2.py --dry-run   # review plan
+uv run scripts/migrate_pusd_v2.py             # wrap all USDC.e + v2 approvals
+# uv run scripts/migrate_pusd_v2.py --wrap-usd 50   # partial wrap
+```
+
+After migration, CLOB balance should match wrapped pUSD (check script output).
+
+### 3. API credentials
+
+Derived automatically when only `PRIVATE_KEY` is set. To persist explicit keys:
+
+```bash
+uv run scripts/derive_clob_api_creds.py >> .env
+```
+
+### 4. One-shot live smoke test
+
+```bash
+cp /opt/turtlequant/state/turtlequant-positions.json \
+   /opt/turtlequant/state/turtlequant-positions.json.bak-$(date -u +%Y%m%dT%H%M%SZ)
+
+uv run python scripts/turtlequant_bot.py \
+  --live --i-accept-live-risk \
+  --asset btc \
+  --starting-nav 50 \
+  --entry-threshold 0.10
+```
+
+Verify: order in `turtlequant-bot.log`, fill fields on position, exit on test size.
+
+### 5. NAV reconciliation
+
+Internal `nav` in `turtlequant-positions.json` is bookkeeping, not wallet balance.
+
+```bash
+uv run scripts/reconcile_nav.py
+```
+
+Compares file NAV to CLOB pUSD balance + open position bid marks. Investigate if drift > 5% of NAV.
 
 ## Observability
 

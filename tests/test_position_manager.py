@@ -144,3 +144,28 @@ def test_load_legacy_position_backfills_stale_quote_fields(tmp_path):
     assert pos.last_yes_price == 0.41
     assert pos.last_yes_price_at == "2026-05-01T00:00:00+00:00"
     assert pos.token_size == 100.0
+
+
+def test_save_replaces_positions_file_atomically(tmp_path):
+    positions_file = tmp_path / "positions.json"
+    mgr = PositionManager(positions_file=positions_file)
+
+    pos = make_position(
+        market_id="m-6",
+        question="Will ETH be above $3k by March 30?",
+        asset="eth",
+        strike=3_000,
+        expiry=datetime.now(UTC) + timedelta(days=30),
+        option_type="european",
+        yes_token_id="token-6",
+        yes_price=0.25,
+        size_usd=25.0,
+        model_prob=0.40,
+    )
+    mgr.open_position(pos)
+
+    assert positions_file.exists()
+    assert not list(tmp_path.glob("*.tmp"))
+
+    reloaded = PositionManager(positions_file=positions_file)
+    assert reloaded.get_position("m-6") is not None

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -359,7 +360,15 @@ class PositionManager:
                 "updated_at": datetime.now(UTC).isoformat(),
                 "positions": [asdict(p) for p in self._positions.values()],
             }
-            self.positions_file.write_text(json.dumps(data, indent=2))
+            tmp_file = self.positions_file.with_name(
+                f".{self.positions_file.name}.{os.getpid()}.tmp"
+            )
+            with tmp_file.open("w") as f:
+                f.write(json.dumps(data, indent=2))
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_file, self.positions_file)
         except Exception as exc:
             logger.warning("Could not save positions file: %s", exc)
 

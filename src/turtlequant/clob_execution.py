@@ -14,6 +14,35 @@ logger = logging.getLogger(__name__)
 
 POLYMARKET_CLOB_HOST = "https://clob.polymarket.com"
 _BOOK_RETRIES = 2
+
+
+def _polymarket_env() -> tuple[str, str, str, str, int, str]:
+    """Return (private_key, api_key, api_secret, api_passphrase, signature_type, funder)."""
+    private_key = os.getenv("POLYMARKET_PRIVATE_KEY") or os.getenv("PRIVATE_KEY", "")
+    api_key = (
+        os.getenv("POLYMARKET_API_KEY")
+        or os.getenv("CLOB_API_KEY")
+        or os.getenv("API_KEY", "")
+    )
+    api_secret = (
+        os.getenv("POLYMARKET_API_SECRET")
+        or os.getenv("CLOB_API_SECRET")
+        or os.getenv("SECRET", "")
+    )
+    api_passphrase = (
+        os.getenv("POLYMARKET_API_PASSPHRASE")
+        or os.getenv("CLOB_API_PASSPHRASE")
+        or os.getenv("PASSPHRASE", "")
+    )
+    signature_type = int(
+        os.getenv("POLYMARKET_SIGNATURE_TYPE", os.getenv("SIGNATURE_TYPE", "0"))
+    )
+    funder = (
+        os.getenv("POLYMARKET_FUNDER")
+        or os.getenv("FUNDER_ADDRESS")
+        or os.getenv("DEPOSIT_WALLET_ADDRESS", "")
+    )
+    return private_key, api_key, api_secret, api_passphrase, signature_type, funder
 _BOOK_RETRY_BACKOFF_SECS = 0.5
 _BOOK_WARNING_COOLDOWN_SECS = 5 * 60
 
@@ -262,28 +291,34 @@ class ExecutionClient:
         except ImportError:
             return None
 
-        private_key = os.getenv("POLYMARKET_PRIVATE_KEY") or os.getenv("PRIVATE_KEY")
-        api_key = os.getenv("POLYMARKET_API_KEY") or os.getenv("API_KEY")
-        api_secret = os.getenv("POLYMARKET_API_SECRET") or os.getenv("SECRET")
-        api_passphrase = os.getenv("POLYMARKET_API_PASSPHRASE") or os.getenv("PASSPHRASE")
-        signature_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0"))
-        funder = os.getenv("POLYMARKET_FUNDER") or os.getenv("DEPOSIT_WALLET_ADDRESS")
+        private_key, api_key, api_secret, api_passphrase, signature_type, funder = _polymarket_env()
 
         if self.mode == "live" and not private_key:
             raise RuntimeError("POLYMARKET_PRIVATE_KEY or PRIVATE_KEY is required for live CLOB execution")
-        if private_key and api_key and api_secret and api_passphrase:
-            kwargs: dict[str, Any] = {
-                "host": self.host,
-                "chain_id": self.chain_id,
-                "key": private_key,
-                "creds": ApiCreds(api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase),
-            }
-            if signature_type:
-                kwargs["signature_type"] = signature_type
-            if funder:
-                kwargs["funder"] = funder
+        if not private_key:
+            return ClobClient(host=self.host, chain_id=self.chain_id)
+
+        kwargs: dict[str, Any] = {
+            "host": self.host,
+            "chain_id": self.chain_id,
+            "key": private_key,
+        }
+        if signature_type:
+            kwargs["signature_type"] = signature_type
+        if funder:
+            kwargs["funder"] = funder
+
+        if api_key and api_secret and api_passphrase:
+            kwargs["creds"] = ApiCreds(
+                api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase
+            )
             return ClobClient(**kwargs)
-        return ClobClient(host=self.host, chain_id=self.chain_id)
+
+        client = ClobClient(**kwargs)
+        creds = client.create_or_derive_api_key()
+        client.set_api_creds(creds)
+        logger.info("Derived CLOB API credentials from private key")
+        return client
 
     def _post_market_order(
         self,

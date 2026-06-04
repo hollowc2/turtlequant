@@ -146,13 +146,20 @@ def append_history(state_dir: Path, entry: dict) -> None:
     """Append a trade event to turtlequant-history.json."""
     history_file = state_dir / HISTORY_FILE_NAME
     try:
+        state_dir.mkdir(parents=True, exist_ok=True)
         if history_file.exists():
             with history_file.open() as f:
                 history: list[dict] = json.load(f)
         else:
             history = []
         history.append(entry)
-        history_file.write_text(json.dumps(history, indent=2))
+        tmp_file = history_file.with_name(f".{history_file.name}.{os.getpid()}.tmp")
+        with tmp_file.open("w") as f:
+            f.write(json.dumps(history, indent=2))
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_file, history_file)
     except Exception as exc:
         logger.warning("Failed to append history: %s", exc)
 
@@ -425,6 +432,9 @@ def main() -> None:
                                         "asset": pos.asset,
                                         "side": "SELL",
                                         "reason": decision.reason or "edge_reversed",
+                                        "remaining_shares": shares,
+                                        "remaining_size_usd": pos.size_usd,
+                                        "unhedged_exposure": True,
                                         "error": exit_result.error
                                         or exit_result.status,
                                         "ts": datetime.now(UTC).isoformat(),
@@ -465,6 +475,11 @@ def main() -> None:
                                 "entry_edge": decision.entry_edge,
                                 "hours_to_expiry": decision.hours_to_expiry,
                                 "filled_shares": filled_shares,
+                                "remaining_shares": (
+                                    max(0.0, shares - filled_shares)
+                                    if filled_shares is not None
+                                    else 0.0
+                                ),
                                 "complete": True
                                 if exit_result is None
                                 else exit_result.complete,
@@ -626,6 +641,9 @@ def main() -> None:
                                                 "side": "SELL",
                                                 "reason": decision.reason
                                                 or "edge_reversed",
+                                                "remaining_shares": shares,
+                                                "remaining_size_usd": pos.size_usd,
+                                                "unhedged_exposure": True,
                                                 "error": exit_result.error
                                                 or exit_result.status,
                                                 "ts": datetime.now(UTC).isoformat(),
@@ -666,6 +684,11 @@ def main() -> None:
                                     "entry_edge": decision.entry_edge,
                                     "hours_to_expiry": decision.hours_to_expiry,
                                     "filled_shares": filled_shares,
+                                    "remaining_shares": (
+                                        max(0.0, shares - filled_shares)
+                                        if filled_shares is not None
+                                        else 0.0
+                                    ),
                                     "complete": True
                                     if exit_result is None
                                     else exit_result.complete,
