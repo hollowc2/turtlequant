@@ -43,6 +43,7 @@ from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from turtlequant.discord_trades import DiscordTrades
 from turtlequant.data.binance import fetch_klines
 from turtlequant.clob_execution import ExecutionClient, estimate_buy_fill
 from turtlequant.market_parser import parse_market
@@ -162,6 +163,52 @@ def append_history(state_dir: Path, entry: dict) -> None:
         os.replace(tmp_file, history_file)
     except Exception as exc:
         logger.warning("Failed to append history: %s", exc)
+
+
+def trade_chart(discord: DiscordTrades, asset: str, entry_ms: int, exit_ms: int | None = None) -> bytes | None:
+    interval = os.getenv("DISCORD_CHART_INTERVAL", "4h")
+    end_ms = exit_ms or int(time.time() * 1000)
+    start_ms = end_ms - (90 if interval == "1d" else 30) * 86_400_000
+    try:
+        frame = fetch_klines(ASSET_TO_SYMBOL[asset], interval, start_ms, end_ms)
+        return discord.chart(frame, f"{asset.upper()} {interval} spot", entry_ms, exit_ms)
+    except Exception:
+        return None
+
+
+def notify_entry(discord: DiscordTrades, pos, *, model_prob: float, bid: float, ask: float, sigma: float) -> None:
+    entry_ms = int(datetime.fromisoformat(pos.opened_at).timestamp() * 1000)
+    discord.send(
+        pos.market_id,
+        (
+            f"🐢 **TURTLEQUANT ENTERED** `{pos.asset.upper()} YES`\n"
+            f"> {pos.question[:180]}\n"
+            f"> Fill: **{pos.entry_price:.3f}** | Bid/Ask: {bid:.3f}/{ask:.3f}\n"
+            f"> Size: **${pos.size_usd:.2f}** | Shares: {pos.token_size:.4f}\n"
+            f"> Model: {model_prob:.1%} | Edge: {pos.edge_at_entry:+.1%} | IV: {sigma:.1%}\n"
+            f"> Strike: ${pos.strike:,.0f} | Expiry: {pos.expiry_iso}"
+        ),
+        trade_chart(discord, pos.asset, entry_ms),
+        remember=True,
+    )
+
+
+def notify_exit(discord: DiscordTrades, pos, exit_price: float, pnl: float, reason: str) -> None:
+    entry_ms = int(datetime.fromisoformat(pos.opened_at).timestamp() * 1000)
+    exit_ms = int(time.time() * 1000)
+    held = (exit_ms - entry_ms) / 3_600_000
+    pnl_pct = pnl / pos.size_usd if pos.size_usd else 0.0
+    discord.send(
+        pos.market_id,
+        (
+            f"{'✅' if pnl >= 0 else '❌'} **TURTLEQUANT EXITED** `{pos.asset.upper()} YES`\n"
+            f"> {pos.question[:180]}\n"
+            f"> Entry: {pos.entry_price:.3f} → Exit: **{exit_price:.3f}**\n"
+            f"> P&L: **${pnl:+.2f}** ({pnl_pct:+.1%}) | Fees included\n"
+            f"> Held: {held:.1f}h | Reason: `{reason}`"
+        ),
+        trade_chart(discord, pos.asset, entry_ms, exit_ms),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +338,7 @@ def main() -> None:
     executor = ExecutionClient.from_env(
         mode=execution_mode, allow_live=args.i_accept_live_risk
     )
+    discord = DiscordTrades(state_dir, execution_mode)
 
     logger.info("=== TurtleQuant Bot ===")
     logger.info(
@@ -354,6 +402,8 @@ def main() -> None:
                                 "ts": datetime.now(UTC).isoformat(),
                             },
                         )
+                        if _pos and _pos.fill_confirmed:
+                            notify_exit(discord, _pos, resolved_price, pnl, "expired")
                         continue
 
                     spot = fetch_spot(pos.asset)
@@ -487,6 +537,14 @@ def main() -> None:
                                 "ts": datetime.now(UTC).isoformat(),
                             },
                         )
+                        if _pos and _pos.fill_confirmed and (exit_result is None or exit_result.complete):
+                            notify_exit(
+                                discord,
+                                _pos,
+                                filled_price,
+                                pnl,
+                                decision.reason or "edge_reversed",
+                            )
                     else:
                         logger.info(
                             "[HOLD] %s K=%.0f exp=%s model_p=%.4f mkt_p=%.4f edge=%.4f entry_edge=%.4f ttl=%.1fh",
@@ -696,6 +754,14 @@ def main() -> None:
                                     "ts": datetime.now(UTC).isoformat(),
                                 },
                             )
+                            if _pos and _pos.fill_confirmed and (exit_result is None or exit_result.complete):
+                                notify_exit(
+                                    discord,
+                                    _pos,
+                                    filled_price,
+                                    pnl,
+                                    decision.reason or "edge_reversed",
+                                )
                         continue
 
                     # ── Check entry ───────────────────────────────────────
@@ -900,6 +966,14 @@ def main() -> None:
                             "fill_confirmed": True,
                             "ts": datetime.now(UTC).isoformat(),
                         },
+                    )
+                    notify_entry(
+                        discord,
+                        pos,
+                        model_prob=model_prob,
+                        bid=book.best_bid,
+                        ask=book.best_ask,
+                        sigma=sigma,
                     )
 
                 except Exception as exc:

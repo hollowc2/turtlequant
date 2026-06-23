@@ -27,6 +27,7 @@ services:
     volumes:
       - /opt/turtlequant/state:/app/state
       - /opt/turtlequant/data:/app/data
+      - /opt/monitoring/alertmanager/secrets/turtlequant-webhook:/run/secrets/discord-webhook:ro
     environment:
       ASSET: "btc,eth"
       ENTRY_THRESHOLD: "0.05"
@@ -46,6 +47,8 @@ services:
       CLOB_API_PASSPHRASE: "${CLOB_API_PASSPHRASE:-}"
       POLYMARKET_SIGNATURE_TYPE: "${POLYMARKET_SIGNATURE_TYPE:-0}"
       POLYMARKET_FUNDER: "${POLYMARKET_FUNDER:-}"
+      DISCORD_TRADES: "${DISCORD_TRADES:-all}"
+      DISCORD_CHART_INTERVAL: "${DISCORD_CHART_INTERVAL:-4h}"
     healthcheck:
       test:
         [
