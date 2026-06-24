@@ -165,18 +165,50 @@ def append_history(state_dir: Path, entry: dict) -> None:
         logger.warning("Failed to append history: %s", exc)
 
 
-def trade_chart(discord: DiscordTrades, asset: str, entry_ms: int, exit_ms: int | None = None) -> bytes | None:
+def trade_chart(
+    discord: DiscordTrades,
+    pos,
+    entry_ms: int,
+    exit_ms: int | None = None,
+    *,
+    model_prob: float | None = None,
+    sigma: float | None = None,
+    exit_price: float | None = None,
+    pnl: float | None = None,
+) -> bytes | None:
     interval = os.getenv("DISCORD_CHART_INTERVAL", "4h")
     end_ms = exit_ms or int(time.time() * 1000)
     start_ms = end_ms - (90 if interval == "1d" else 30) * 86_400_000
     try:
-        frame = fetch_klines(ASSET_TO_SYMBOL[asset], interval, start_ms, end_ms)
-        return discord.chart(frame, f"{asset.upper()} {interval} spot", entry_ms, exit_ms)
+        frame = fetch_klines(ASSET_TO_SYMBOL[pos.asset], interval, start_ms, end_ms)
+        return discord.chart(
+            frame,
+            f"{pos.asset.upper()} {interval} spot vs strike",
+            entry_ms,
+            exit_ms,
+            strike=pos.strike,
+            model_prob=model_prob or pos.model_prob_at_entry,
+            entry_price=pos.entry_price,
+            exit_price=exit_price,
+            edge=pos.edge_at_entry,
+            sigma=sigma,
+            pnl=pnl,
+            expiry=pos.expiry_iso,
+            yes_above_strike=pos.option_type not in {"barrier_down", "european_put"},
+        )
     except Exception:
         return None
 
 
-def notify_entry(discord: DiscordTrades, pos, *, model_prob: float, bid: float, ask: float, sigma: float) -> None:
+def notify_entry(
+    discord: DiscordTrades,
+    pos,
+    *,
+    model_prob: float,
+    bid: float,
+    ask: float,
+    sigma: float,
+) -> None:
     entry_ms = int(datetime.fromisoformat(pos.opened_at).timestamp() * 1000)
     discord.send(
         pos.market_id,
@@ -188,12 +220,14 @@ def notify_entry(discord: DiscordTrades, pos, *, model_prob: float, bid: float, 
             f"> Model: {model_prob:.1%} | Edge: {pos.edge_at_entry:+.1%} | IV: {sigma:.1%}\n"
             f"> Strike: ${pos.strike:,.0f} | Expiry: {pos.expiry_iso}"
         ),
-        trade_chart(discord, pos.asset, entry_ms),
+        trade_chart(discord, pos, entry_ms, model_prob=model_prob, sigma=sigma),
         remember=True,
     )
 
 
-def notify_exit(discord: DiscordTrades, pos, exit_price: float, pnl: float, reason: str) -> None:
+def notify_exit(
+    discord: DiscordTrades, pos, exit_price: float, pnl: float, reason: str
+) -> None:
     entry_ms = int(datetime.fromisoformat(pos.opened_at).timestamp() * 1000)
     exit_ms = int(time.time() * 1000)
     held = (exit_ms - entry_ms) / 3_600_000
@@ -207,7 +241,7 @@ def notify_exit(discord: DiscordTrades, pos, exit_price: float, pnl: float, reas
             f"> P&L: **${pnl:+.2f}** ({pnl_pct:+.1%}) | Fees included\n"
             f"> Held: {held:.1f}h | Reason: `{reason}`"
         ),
-        trade_chart(discord, pos.asset, entry_ms, exit_ms),
+        trade_chart(discord, pos, entry_ms, exit_ms, exit_price=exit_price, pnl=pnl),
     )
 
 
@@ -537,7 +571,11 @@ def main() -> None:
                                 "ts": datetime.now(UTC).isoformat(),
                             },
                         )
-                        if _pos and _pos.fill_confirmed and (exit_result is None or exit_result.complete):
+                        if (
+                            _pos
+                            and _pos.fill_confirmed
+                            and (exit_result is None or exit_result.complete)
+                        ):
                             notify_exit(
                                 discord,
                                 _pos,
@@ -754,7 +792,11 @@ def main() -> None:
                                     "ts": datetime.now(UTC).isoformat(),
                                 },
                             )
-                            if _pos and _pos.fill_confirmed and (exit_result is None or exit_result.complete):
+                            if (
+                                _pos
+                                and _pos.fill_confirmed
+                                and (exit_result is None or exit_result.complete)
+                            ):
                                 notify_exit(
                                     discord,
                                     _pos,

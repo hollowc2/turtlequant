@@ -14,4 +14,16 @@ def test_chart_and_live_only_filter(monkeypatch, tmp_path):
     frame = pd.DataFrame(
         {"open_time": [now - timedelta(hours=4), now], "close": [100.0, 105.0]}
     )
-    assert notifier.chart(frame, "test", int(now.timestamp() * 1000)).startswith(b"\x89PNG")
+    chart = notifier.chart(
+        frame,
+        "test",
+        int(now.timestamp() * 1000),
+        strike=103.0,
+        model_prob=0.62,
+        entry_price=0.52,
+        edge=0.10,
+        sigma=0.45,
+        expiry=now.isoformat(),
+        yes_above_strike=False,
+    )
+    assert chart.startswith(b"\x89PNG")
