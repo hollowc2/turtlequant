@@ -47,6 +47,7 @@ class DiscordTrades:
         pnl: float | None = None,
         expiry: str | None = None,
         yes_above_strike: bool = True,
+        bought_side: str = "YES",
     ) -> bytes | None:
         if frame is None or len(frame) < 2:
             return None
@@ -99,6 +100,11 @@ class DiscordTrades:
             draw.ellipse((x - 6, y - 6, x + 6, y + 6), fill=color)
             draw.text((x + 8, y - 8), label, fill=color)
         rows = [
+            ("Bought", bought_side.upper()),
+            (
+                "Target",
+                "above/reach strike" if yes_above_strike else "below/dip strike",
+            ),
             ("Entry", f"{entry_price:.3f}" if entry_price is not None else None),
             ("Exit", f"{exit_price:.3f}" if exit_price is not None else None),
             ("Model", f"{model_prob:.1%}" if model_prob is not None else None),

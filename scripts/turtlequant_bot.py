@@ -195,6 +195,7 @@ def trade_chart(
             pnl=pnl,
             expiry=pos.expiry_iso,
             yes_above_strike=pos.option_type not in {"barrier_down", "european_put"},
+            bought_side="YES",
         )
     except Exception:
         return None

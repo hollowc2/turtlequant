@@ -25,5 +25,6 @@ def test_chart_and_live_only_filter(monkeypatch, tmp_path):
         sigma=0.45,
         expiry=now.isoformat(),
         yes_above_strike=False,
+        bought_side="YES",
     )
     assert chart.startswith(b"\x89PNG")
