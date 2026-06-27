@@ -210,7 +210,6 @@ def notify_entry(
     ask: float,
     sigma: float,
 ) -> None:
-    entry_ms = int(datetime.fromisoformat(pos.opened_at).timestamp() * 1000)
     discord.send(
         pos.market_id,
         (
@@ -221,7 +220,6 @@ def notify_entry(
             f"> Model: {model_prob:.1%} | Edge: {pos.edge_at_entry:+.1%} | IV: {sigma:.1%}\n"
             f"> Strike: ${pos.strike:,.0f} | Expiry: {pos.expiry_iso}"
         ),
-        trade_chart(discord, pos, entry_ms, model_prob=model_prob, sigma=sigma),
         remember=True,
     )
 
