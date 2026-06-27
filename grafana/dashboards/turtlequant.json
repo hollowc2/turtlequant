@@ -2322,8 +2322,8 @@
     {
       "id": 15,
       "type": "table",
-      "title": "Recent Closed Trades (last 20)",
-      "description": "Most recent closed positions with P&L and exit reason",
+      "title": "Closed Trade Ledger",
+      "description": "All closed positions currently present in TurtleQuant state, including pre-Prometheus trade history.",
       "gridPos": {
         "x": 0,
         "y": 48,
@@ -2338,7 +2338,7 @@
         "showHeader": true,
         "sortBy": [
           {
-            "displayName": "P&L ($)",
+            "displayName": "Close Time",
             "desc": true
           }
         ],
@@ -2417,6 +2417,9 @@
               "market_id": "Market ID",
               "asset": "Asset",
               "reason": "Exit Reason",
+              "opened_at": "Open Time",
+              "closed_at": "Close Time",
+              "question": "Market",
               "strategy": "",
               "Time": ""
             },
@@ -2425,14 +2428,17 @@
               "Time": true,
               "__name__": true,
               "job": true,
-              "instance": true,
-              "idx": true
+              "instance": true
             },
             "indexByName": {
-              "Asset": 0,
-              "Exit Reason": 1,
-              "P&L ($)": 2,
-              "Market ID": 3
+              "idx": 0,
+              "Close Time": 1,
+              "Open Time": 2,
+              "Asset": 3,
+              "Market": 4,
+              "Exit Reason": 5,
+              "P&L ($)": 6,
+              "Market ID": 7
             }
           }
         }

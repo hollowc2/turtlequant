@@ -107,25 +107,16 @@ docker compose -f docker-compose.yml -f docker-compose.live.yml up -d --build tu
 
 - **Grafana dashboard**: provisioned from `grafana/dashboards/turtlequant.json` via `/opt/monitoring` (provider `turtlequant`).
 - **Prometheus scrape**: job `turtlequant` → `turtlequant-grafana-exporter:8004` on `monitoring_net` (already configured in `/opt/monitoring/prometheus.yml`).
-- **Alerts**: copy or symlink rules into the monitoring stack:
+- **Alerts**: centrally owned by `/opt/monitoring/prometheus-alerts/turtlequant.yml`.
 
   ```bash
-  sudo cp monitoring/prometheus-alerts.yml /opt/monitoring/prometheus-alerts/turtlequant.yml
-  # Ensure prometheus.yml includes:
-  #   rule_files:
-  #     - /etc/prometheus/alerts/*.yml
-  docker compose -f /opt/monitoring/docker-compose.yml exec prometheus kill -HUP 1
+  docker compose -f /opt/monitoring/docker-compose.yml exec prometheus \
+    promtool check rules /etc/prometheus/alerts/turtlequant.yml
   ```
 
-  Alertmanager + Discord bridge run in `/opt/monitoring` (`alertmanager`, `alertmanager-discord`).
-  Set `DISCORD_WEBHOOK_URL` in `/opt/monitoring/.env` (see `.env.example`), then:
-
-  ```bash
-  cd /opt/monitoring && docker compose up -d alertmanager alertmanager-discord
-  docker compose restart prometheus
-  ```
-
-  TurtleQuant alerts route to the shared `#ops` Discord channel (same webhook as butterflyguy).
+  Native Alertmanager Discord routing runs in `/opt/monitoring`. Operational
+  TurtleQuant alerts use its dedicated webhook; shadow-soak diagnostics remain
+  visible in Prometheus/Grafana without Discord notifications.
 
 | Alert | Condition |
 |-------|-----------|

@@ -220,3 +220,61 @@ def test_collector_exports_shadow_soak_history_metrics(tmp_path):
         source="realized",
     ) == 3.0
     assert families["turtlequant_realized_vol_fallback_ratio"].samples[0].value == 3 / 10
+
+
+def test_collector_exports_all_closed_trades(tmp_path):
+    (tmp_path / "turtlequant-positions.json").write_text(
+        """
+        {
+          "nav": 1000,
+          "total_pnl": 0,
+          "positions": []
+        }
+        """
+    )
+    (tmp_path / "turtlequant-history.json").write_text(
+        """
+        [
+          {"event": "open", "market_id": "m-1", "question": "Will BTC test close?", "yes_price": 0.40, "size_usd": 40, "ts": "2026-05-01T00:00:00+00:00"},
+          {"event": "close", "market_id": "m-1", "asset": "btc", "reason": "stop", "yes_price": 0.41, "pnl": 1.0, "ts": "2026-05-01T01:00:00+00:00"},
+          {"event": "open", "market_id": "m-2", "yes_price": 0.50, "size_usd": 50, "ts": "2026-05-02T00:00:00+00:00"},
+          {"event": "close", "market_id": "m-2", "asset": "eth", "reason": "target", "yes_price": 0.52, "pnl": 2.0, "ts": "2026-05-02T01:00:00+00:00"}
+        ]
+        """
+    )
+
+    families = {metric.name: metric for metric in TurtleQuantCollector(str(tmp_path)).collect()}
+
+    pnl_samples = families["turtlequant_closed_position_pnl_usd"].samples
+    hold_samples = families["turtlequant_closed_position_holding_hours"].samples
+
+    assert len(pnl_samples) == 2
+    assert len(hold_samples) == 2
+    assert {sample.labels["idx"] for sample in pnl_samples} == {"0", "1"}
+    assert pnl_samples[0].labels["opened_at"] == "2026-05-01T00:00:00+00:00"
+    assert pnl_samples[0].labels["closed_at"] == "2026-05-01T01:00:00+00:00"
+    assert pnl_samples[0].labels["question"] == "Will BTC test close?"
+    assert _sample_value(
+        families["turtlequant_closed_position_pnl_usd"],
+        strategy="turtlequant",
+        idx="0",
+        market_id="m-1",
+        asset="btc",
+        reason="stop",
+    ) == 1.0
+    assert _sample_value(
+        families["turtlequant_closed_position_pnl_usd"],
+        strategy="turtlequant",
+        idx="1",
+        market_id="m-2",
+        asset="eth",
+        reason="target",
+    ) == 2.0
+    assert _sample_value(
+        families["turtlequant_closed_position_holding_hours"],
+        strategy="turtlequant",
+        idx="0",
+        market_id="m-1",
+        asset="btc",
+        reason="stop",
+    ) == 1.0

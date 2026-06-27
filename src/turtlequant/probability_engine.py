@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-
-import numpy as np
-from scipy.stats import norm
+from math import exp, log, sqrt
+from statistics import NormalDist
 
 from .market_parser import MarketParams, OptionType
 
 logger = logging.getLogger(__name__)
+_NORMAL = NormalDist()
 
 # Risk-free rate (annualized) — matches crypto perpetual funding roughly
 RISK_FREE_RATE: float = 0.05
@@ -46,8 +46,8 @@ def digital_probability(
         logger.debug("digital_probability: degenerate input S0=%.2f K=%.2f T=%.6f σ=%.4f", S0, K, T, sigma)
         return 1.0 if S0 > K else 0.0
 
-    d2 = (np.log(S0 / K) + (r - 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-    p = float(norm.cdf(d2))
+    d2 = (log(S0 / K) + (r - 0.5 * sigma**2) * T) / (sigma * sqrt(T))
+    p = _NORMAL.cdf(d2)
     return max(1e-6, min(1.0 - 1e-6, p))
 
 
@@ -92,8 +92,8 @@ def barrier_probability(
         return 1.0
 
     mu = r - 0.5 * sigma**2
-    sqrtT = np.sqrt(T)
-    log_S0_K = np.log(S0 / K)  # negative when S0 < K
+    sqrtT = sqrt(T)
+    log_S0_K = log(S0 / K)  # negative when S0 < K
 
     d_plus = (log_S0_K + mu * T) / (sigma * sqrtT)
     d_minus = (log_S0_K - mu * T) / (sigma * sqrtT)
@@ -101,9 +101,9 @@ def barrier_probability(
     # Reflection coefficient: (K/S0)^(2μ/σ²) = exp(2μ × log(K/S0)/σ²)
     # When μ < 0 and K > S0: coefficient ∈ (0, 1)
     log_K_S0 = -log_S0_K  # positive
-    reflection_factor = float(np.exp(2 * mu * log_K_S0 / sigma**2))
+    reflection_factor = exp(2 * mu * log_K_S0 / sigma**2)
 
-    p = float(norm.cdf(d_plus) + reflection_factor * norm.cdf(d_minus))
+    p = _NORMAL.cdf(d_plus) + reflection_factor * _NORMAL.cdf(d_minus)
     return max(1e-6, min(1.0 - 1e-6, p))
 
 
@@ -149,17 +149,17 @@ def barrier_down_probability(
         return 1.0
 
     mu = r - 0.5 * sigma**2
-    sqrtT = np.sqrt(T)
-    log_K_S0 = np.log(K / S0)  # negative when K < S0
+    sqrtT = sqrt(T)
+    log_K_S0 = log(K / S0)  # negative when K < S0
 
     d_plus = (log_K_S0 + mu * T) / (sigma * sqrtT)
     d_minus = (log_K_S0 - mu * T) / (sigma * sqrtT)
 
     # Reflection coefficient: (K/S0)^(2μ/σ²) — with K<S0 and μ<0: >1 possible, but formula stays valid
     log_S0_K = -log_K_S0  # positive
-    reflection_factor = float(np.exp(-2 * mu * log_S0_K / sigma**2))
+    reflection_factor = exp(-2 * mu * log_S0_K / sigma**2)
 
-    p = float(norm.cdf(d_plus) + reflection_factor * norm.cdf(d_minus))
+    p = _NORMAL.cdf(d_plus) + reflection_factor * _NORMAL.cdf(d_minus)
     return max(1e-6, min(1.0 - 1e-6, p))
 
 

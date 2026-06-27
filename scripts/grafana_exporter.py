@@ -28,7 +28,7 @@ Per active position (labeled strategy, market_id, asset, option_type):
   turtlequant_position_age_hours
   turtlequant_position_model_prob_at_entry
 
-Recent closed trades — last 20 (labeled strategy, market_id, asset, reason):
+Closed trades from state (labeled strategy, idx, opened_at, closed_at, market_id, asset, reason, question):
   turtlequant_closed_position_pnl_usd
 
 Labels: strategy ("turtlequant")
@@ -55,17 +55,10 @@ log = logging.getLogger(__name__)
 STATE_DIR = os.environ.get("STATE_DIR", "/opt/turtlequant/state")
 PORT = int(os.environ.get("EXPORTER_PORT", "8004"))
 
-# Strategy -> (positions file, history file) relative to STATE_DIR
-STRATEGIES = {
-    "turtlequant": (
-        "turtlequant-positions.json",
-        "turtlequant-history.json",
-    ),
-}
-
-BOT_LOG_FILES = {
-    "turtlequant": "turtlequant-bot.log",
-}
+STRATEGY = "turtlequant"
+POSITIONS_FILE = "turtlequant-positions.json"
+HISTORY_FILE = "turtlequant-history.json"
+BOT_LOG_FILE = "turtlequant-bot.log"
 
 # Keep this aligned with turtlequant.position_manager.TAKER_FEE_RATE. The
 # exporter uses it only to normalize legacy history rows that recorded flat
@@ -100,6 +93,10 @@ def _safe_float(value: object, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _label_text(value: object) -> str:
+    return "" if value is None else str(value)
 
 
 def _history_source(event: dict) -> str | None:
@@ -141,6 +138,7 @@ def _effective_close_events(history_events: list[dict]) -> list[dict]:
         if queue:
             matching_open = queue.pop(0)
             close_event["_opened_ts"] = matching_open.get("ts")
+            close_event["_question"] = close_event.get("question") or matching_open.get("question")
 
         if matching_open is not None and recorded_pnl == 0.0:
             entry_price = _safe_float(matching_open.get("yes_price"))
@@ -495,13 +493,13 @@ class TurtleQuantCollector:
         # even when the same market is traded multiple times.
         closed_pnl_g = GaugeMetricFamily(
             "turtlequant_closed_position_pnl_usd",
-            "P&L of recent closed trade in USD",
-            labels=["strategy", "idx", "market_id", "asset", "reason"],
+            "P&L of closed trade in USD",
+            labels=["strategy", "idx", "opened_at", "closed_at", "market_id", "asset", "reason", "question"],
         )
         closed_hold_g = GaugeMetricFamily(
             "turtlequant_closed_position_holding_hours",
             "Holding period for recent closed trade in hours",
-            labels=["strategy", "idx", "market_id", "asset", "reason"],
+            labels=["strategy", "idx", "opened_at", "closed_at", "market_id", "asset", "reason", "question"],
         )
         state_file_age_g = GaugeMetricFamily(
             "turtlequant_state_file_age_sec",
@@ -519,301 +517,308 @@ class TurtleQuantCollector:
             labels=["strategy"],
         )
 
-        for strategy, (pos_file, hist_file) in STRATEGIES.items():
-            pos_path = os.path.join(self.state_dir, pos_file)
-            hist_path = os.path.join(self.state_dir, hist_file)
-            nav: float | None = None
-            total_pnl: float | None = None
-            positions: list[dict] = []
+        strategy, pos_file, hist_file = STRATEGY, POSITIONS_FILE, HISTORY_FILE
+        pos_path = os.path.join(self.state_dir, pos_file)
+        hist_path = os.path.join(self.state_dir, hist_file)
+        nav: float | None = None
+        total_pnl: float | None = None
+        positions: list[dict] = []
 
-            # ---- Positions file ----
-            pos_data = _load_json(pos_path)
-            if isinstance(pos_data, dict):
-                nav = _safe_float(pos_data.get("nav"))
-                total_pnl = _safe_float(pos_data.get("total_pnl"))
-                positions = pos_data.get("positions") or []
+        # ---- Positions file ----
+        pos_data = _load_json(pos_path)
+        if isinstance(pos_data, dict):
+            nav = _safe_float(pos_data.get("nav"))
+            total_pnl = _safe_float(pos_data.get("total_pnl"))
+            positions = pos_data.get("positions") or []
 
-                if nav is not None:
-                    nav_g.add_metric([strategy], nav)
-                if total_pnl is not None:
-                    total_pnl_g.add_metric([strategy], total_pnl)
+            if nav is not None:
+                nav_g.add_metric([strategy], nav)
+            if total_pnl is not None:
+                total_pnl_g.add_metric([strategy], total_pnl)
 
-                open_pos_g.add_metric([strategy], float(len(positions)))
-                exposure = sum(p.get("size_usd", 0.0) for p in positions)
-                exposure_g.add_metric([strategy], float(exposure))
-                by_asset: dict[str, float] = {}
-                unrealized_by_asset: dict[str, float] = {}
-                unrealized_total = 0.0
-                for pos in positions:
-                    asset = str(pos.get("asset", "unknown"))
-                    by_asset[asset] = by_asset.get(asset, 0.0) + _safe_float(pos.get("size_usd"))
-                    tokens = _safe_float(pos.get("token_size"))
-                    if tokens <= 0:
-                        entry = _safe_float(pos.get("entry_price"))
-                        size_usd = _safe_float(pos.get("size_usd"))
-                        tokens = size_usd / entry if entry > 0 else 0.0
-                    mark = _safe_float(pos.get("last_bid")) or _safe_float(pos.get("last_yes_price"))
+            open_pos_g.add_metric([strategy], float(len(positions)))
+            exposure = sum(p.get("size_usd", 0.0) for p in positions)
+            exposure_g.add_metric([strategy], float(exposure))
+            by_asset: dict[str, float] = {}
+            unrealized_by_asset: dict[str, float] = {}
+            unrealized_total = 0.0
+            for pos in positions:
+                asset = str(pos.get("asset", "unknown"))
+                by_asset[asset] = by_asset.get(asset, 0.0) + _safe_float(pos.get("size_usd"))
+                tokens = _safe_float(pos.get("token_size"))
+                if tokens <= 0:
                     entry = _safe_float(pos.get("entry_price"))
-                    unrealized = (mark - entry) * tokens - (tokens * mark * TAKER_FEE_RATE if mark > 0 else 0.0)
-                    unrealized_total += unrealized
-                    unrealized_by_asset[asset] = unrealized_by_asset.get(asset, 0.0) + unrealized
-                for asset, value in by_asset.items():
-                    exposure_by_asset_g.add_metric([strategy, asset], value)
-                open_unrealized_pnl_g.add_metric([strategy], unrealized_total)
-                for asset, value in unrealized_by_asset.items():
-                    open_unrealized_pnl_by_asset_g.add_metric([strategy, asset], value)
-                largest = max((_safe_float(p.get("size_usd")) for p in positions), default=0.0)
-                largest_position_pct_nav_g.add_metric([strategy], largest / nav if nav and nav > 0 else 0.0)
+                    size_usd = _safe_float(pos.get("size_usd"))
+                    tokens = size_usd / entry if entry > 0 else 0.0
+                mark = _safe_float(pos.get("last_bid")) or _safe_float(pos.get("last_yes_price"))
+                entry = _safe_float(pos.get("entry_price"))
+                unrealized = (mark - entry) * tokens - (tokens * mark * TAKER_FEE_RATE if mark > 0 else 0.0)
+                unrealized_total += unrealized
+                unrealized_by_asset[asset] = unrealized_by_asset.get(asset, 0.0) + unrealized
+            for asset, value in by_asset.items():
+                exposure_by_asset_g.add_metric([strategy, asset], value)
+            open_unrealized_pnl_g.add_metric([strategy], unrealized_total)
+            for asset, value in unrealized_by_asset.items():
+                open_unrealized_pnl_by_asset_g.add_metric([strategy, asset], value)
+            largest = max((_safe_float(p.get("size_usd")) for p in positions), default=0.0)
+            largest_position_pct_nav_g.add_metric([strategy], largest / nav if nav and nav > 0 else 0.0)
 
-                now = time.time()
-                for pos in positions:
-                    mid = str(pos.get("market_id", ""))
-                    asset = str(pos.get("asset", ""))
-                    opt_type = str(pos.get("option_type", ""))
-                    pos_labels = [strategy, mid, asset, opt_type]
+            now = time.time()
+            for pos in positions:
+                mid = str(pos.get("market_id", ""))
+                asset = str(pos.get("asset", ""))
+                opt_type = str(pos.get("option_type", ""))
+                pos_labels = [strategy, mid, asset, opt_type]
 
-                    size = pos.get("size_usd")
-                    if size is not None:
-                        pos_size_g.add_metric(pos_labels, float(size))
+                size = pos.get("size_usd")
+                if size is not None:
+                    pos_size_g.add_metric(pos_labels, float(size))
 
-                    edge = pos.get("edge_at_entry")
-                    if edge is not None:
-                        pos_edge_g.add_metric(pos_labels, float(edge))
+                edge = pos.get("edge_at_entry")
+                if edge is not None:
+                    pos_edge_g.add_metric(pos_labels, float(edge))
 
-                    model_prob = pos.get("model_prob_at_entry")
-                    if model_prob is not None:
-                        pos_model_prob_g.add_metric(pos_labels, float(model_prob))
+                model_prob = pos.get("model_prob_at_entry")
+                if model_prob is not None:
+                    pos_model_prob_g.add_metric(pos_labels, float(model_prob))
 
-                    opened_at = _parse_ts(pos.get("opened_at"))
-                    if opened_at is not None:
-                        age_hours = (now - opened_at) / 3600.0
-                        pos_age_g.add_metric(pos_labels, age_hours)
-            pos_age = _file_age_sec(pos_path)
-            if pos_age is not None:
-                state_file_age_g.add_metric([strategy, "positions"], pos_age)
+                opened_at = _parse_ts(pos.get("opened_at"))
+                if opened_at is not None:
+                    age_hours = (now - opened_at) / 3600.0
+                    pos_age_g.add_metric(pos_labels, age_hours)
+        pos_age = _file_age_sec(pos_path)
+        if pos_age is not None:
+            state_file_age_g.add_metric([strategy, "positions"], pos_age)
 
-            log_name = BOT_LOG_FILES.get(strategy)
-            if log_name:
-                log_age = _file_age_sec(os.path.join(self.state_dir, log_name))
-                if log_age is not None:
-                    bot_log_age_g.add_metric([strategy], log_age)
+        log_age = _file_age_sec(os.path.join(self.state_dir, BOT_LOG_FILE))
+        if log_age is not None:
+            bot_log_age_g.add_metric([strategy], log_age)
 
-            # ---- History file ----
-            hist_data = _load_json(hist_path)
-            if isinstance(hist_data, list):
-                close_events = [e for e in hist_data if e.get("event") == "close"]
-                open_events = [e for e in hist_data if e.get("event") == "open"]
-                order_events = [e for e in hist_data if e.get("event") == "order"]
-                failed_events = [e for e in hist_data if e.get("event") == "failed_order"]
-                shadow_quote_events = [e for e in hist_data if e.get("event") == "shadow_quote"]
-                signal_evaluation_events = [e for e in hist_data if e.get("event") == "signal_evaluation"]
-                scan_summary_events = [e for e in hist_data if e.get("event") == "scan_summary"]
-                effective_close_events = _effective_close_events(hist_data)
-                hist_age = _file_age_sec(hist_path)
-                if hist_age is not None:
-                    state_file_age_g.add_metric([strategy, "history"], hist_age)
-                scrape_success_g.add_metric([strategy], 1.0 if isinstance(pos_data, dict) else 0.0)
+        # ---- History file ----
+        hist_data = _load_json(hist_path)
+        if isinstance(hist_data, list):
+            close_events = [e for e in hist_data if e.get("event") == "close"]
+            open_events = [e for e in hist_data if e.get("event") == "open"]
+            order_events = [e for e in hist_data if e.get("event") == "order"]
+            failed_events = [e for e in hist_data if e.get("event") == "failed_order"]
+            shadow_quote_events = [e for e in hist_data if e.get("event") == "shadow_quote"]
+            signal_evaluation_events = [e for e in hist_data if e.get("event") == "signal_evaluation"]
+            scan_summary_events = [e for e in hist_data if e.get("event") == "scan_summary"]
+            effective_close_events = _effective_close_events(hist_data)
+            hist_age = _file_age_sec(hist_path)
+            if hist_age is not None:
+                state_file_age_g.add_metric([strategy, "history"], hist_age)
+            scrape_success_g.add_metric([strategy], 1.0 if isinstance(pos_data, dict) else 0.0)
 
-                equity_points = _equity_points(effective_close_events, nav, total_pnl)
-                drawdown = _drawdown_stats(equity_points)
-                current_drawdown_usd_g.add_metric([strategy], drawdown["current_usd"])
-                current_drawdown_pct_g.add_metric([strategy], drawdown["current_pct"])
-                max_drawdown_usd_g.add_metric([strategy], drawdown["max_usd"])
-                max_drawdown_pct_g.add_metric([strategy], drawdown["max_pct"])
-                longest_drawdown_g.add_metric([strategy], drawdown["longest_sec"])
-                max_drawdown_recovery_g.add_metric([strategy], drawdown["max_recovery_sec"])
+            equity_points = _equity_points(effective_close_events, nav, total_pnl)
+            drawdown = _drawdown_stats(equity_points)
+            current_drawdown_usd_g.add_metric([strategy], drawdown["current_usd"])
+            current_drawdown_pct_g.add_metric([strategy], drawdown["current_pct"])
+            max_drawdown_usd_g.add_metric([strategy], drawdown["max_usd"])
+            max_drawdown_pct_g.add_metric([strategy], drawdown["max_pct"])
+            longest_drawdown_g.add_metric([strategy], drawdown["longest_sec"])
+            max_drawdown_recovery_g.add_metric([strategy], drawdown["max_recovery_sec"])
 
-                # Trade statistics
-                n_closed = len(close_events)
-                closed_trades_g.add_metric([strategy], float(n_closed))
+            # Trade statistics
+            n_closed = len(close_events)
+            closed_trades_g.add_metric([strategy], float(n_closed))
 
-                if n_closed > 0:
-                    pnls = [_safe_float(e.get("_effective_pnl", e.get("pnl"))) for e in effective_close_events]
-                    wins = sum(1 for p in pnls if p > 0)
-                    winning_pnls = [p for p in pnls if p > 0]
-                    losing_pnls = [p for p in pnls if p < 0]
-                    winning_trades_g.add_metric([strategy], float(wins))
-                    win_rate_g.add_metric([strategy], wins / n_closed)
-                    avg_pnl_g.add_metric([strategy], sum(pnls) / n_closed)
-                    expectancy_g.add_metric([strategy], sum(pnls) / n_closed)
-                    best_trade_g.add_metric([strategy], max(pnls))
-                    worst_trade_g.add_metric([strategy], min(pnls))
-                    median_trade_g.add_metric([strategy], statistics.median(pnls))
-                    if winning_pnls:
-                        avg_win_g.add_metric([strategy], sum(winning_pnls) / len(winning_pnls))
-                    if losing_pnls:
-                        avg_loss_g.add_metric([strategy], sum(losing_pnls) / len(losing_pnls))
-                    gross_wins = sum(winning_pnls)
-                    gross_losses = abs(sum(losing_pnls))
-                    if gross_losses > 0:
-                        profit_factor_g.add_metric([strategy], gross_wins / gross_losses)
-                    elif gross_wins > 0:
-                        profit_factor_g.add_metric([strategy], gross_wins)
+            if n_closed > 0:
+                pnls = [_safe_float(e.get("_effective_pnl", e.get("pnl"))) for e in effective_close_events]
+                wins = sum(1 for p in pnls if p > 0)
+                winning_pnls = [p for p in pnls if p > 0]
+                losing_pnls = [p for p in pnls if p < 0]
+                winning_trades_g.add_metric([strategy], float(wins))
+                win_rate_g.add_metric([strategy], wins / n_closed)
+                avg_pnl_g.add_metric([strategy], sum(pnls) / n_closed)
+                expectancy_g.add_metric([strategy], sum(pnls) / n_closed)
+                best_trade_g.add_metric([strategy], max(pnls))
+                worst_trade_g.add_metric([strategy], min(pnls))
+                median_trade_g.add_metric([strategy], statistics.median(pnls))
+                if winning_pnls:
+                    avg_win_g.add_metric([strategy], sum(winning_pnls) / len(winning_pnls))
+                if losing_pnls:
+                    avg_loss_g.add_metric([strategy], sum(losing_pnls) / len(losing_pnls))
+                gross_wins = sum(winning_pnls)
+                gross_losses = abs(sum(losing_pnls))
+                if gross_losses > 0:
+                    profit_factor_g.add_metric([strategy], gross_wins / gross_losses)
+                elif gross_wins > 0:
+                    profit_factor_g.add_metric([strategy], gross_wins)
 
-                    # Last trade age
-                    last_ts = _parse_ts(close_events[-1].get("ts"))
-                    if last_ts is not None:
-                        last_trade_age_g.add_metric([strategy], time.time() - last_ts)
+                # Last trade age
+                last_ts = _parse_ts(close_events[-1].get("ts"))
+                if last_ts is not None:
+                    last_trade_age_g.add_metric([strategy], time.time() - last_ts)
 
-                    # Exit reasons
-                    reason_counts: dict[str, int] = {}
-                    for e in close_events:
-                        reason = str(e.get("reason", "unknown"))
-                        reason_counts[reason] = reason_counts.get(reason, 0) + 1
-                    for reason, count in reason_counts.items():
-                        exit_reason_g.add_metric([strategy, reason], float(count))
-
-                    pnl_by_asset: dict[str, float] = {}
-                    pnl_by_weekday: dict[str, float] = {}
-                    for e in effective_close_events:
-                        pnl = _safe_float(e.get("_effective_pnl", e.get("pnl")))
-                        asset = str(e.get("asset", "unknown"))
-                        pnl_by_asset[asset] = pnl_by_asset.get(asset, 0.0) + pnl
-                        ts = _parse_ts(e.get("ts"))
-                        if ts is not None:
-                            weekday = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%a")
-                            pnl_by_weekday[weekday] = pnl_by_weekday.get(weekday, 0.0) + pnl
-                    for asset, pnl in pnl_by_asset.items():
-                        pnl_by_asset_g.add_metric([strategy, asset], pnl)
-                    for weekday, pnl in pnl_by_weekday.items():
-                        pnl_by_weekday_g.add_metric([strategy, weekday], pnl)
-
-                # Avg edge at entry
-                edges = [e.get("edge") for e in open_events if e.get("edge") is not None]
-                if edges:
-                    numeric_edges = [_safe_float(e) for e in edges]
-                    avg_edge_g.add_metric([strategy], sum(numeric_edges) / len(numeric_edges))
-
-                slippages = [_safe_float(e.get("slippage")) for e in open_events if e.get("slippage") is not None]
-                if slippages:
-                    avg_entry_slippage_g.add_metric([strategy], sum(slippages) / len(slippages))
-
-                fill_ratios: list[float] = []
-                order_counts: dict[tuple[str, str], int] = {}
-                for event in order_events:
-                    side = str(event.get("side", "unknown"))
-                    status = str(event.get("status", "unknown"))
-                    order_counts[(side, status)] = order_counts.get((side, status), 0) + 1
-                    requested_usd = _safe_float(event.get("requested_usd"))
-                    requested_shares = _safe_float(event.get("requested_shares"))
-                    filled_usd = _safe_float(event.get("filled_usd"))
-                    filled_shares = _safe_float(event.get("filled_shares"))
-                    if requested_usd > 0:
-                        fill_ratios.append(min(1.0, filled_usd / requested_usd))
-                    elif requested_shares > 0:
-                        fill_ratios.append(min(1.0, filled_shares / requested_shares))
-                if fill_ratios:
-                    avg_fill_ratio_g.add_metric([strategy], sum(fill_ratios) / len(fill_ratios))
-                for (side, status), count in order_counts.items():
-                    order_count_g.add_metric([strategy, side, status], float(count))
-
-                failed_counts: dict[str, int] = {}
-                for event in failed_events:
-                    side = str(event.get("side", "unknown"))
-                    failed_counts[side] = failed_counts.get(side, 0) + 1
-                for side, count in failed_counts.items():
-                    failed_orders_g.add_metric([strategy, side], float(count))
-
-                shadow_counts: dict[str, int] = {}
-                for event in shadow_quote_events:
-                    reason = str(event.get("reason", "unknown"))
-                    shadow_counts[reason] = shadow_counts.get(reason, 0) + 1
-                for reason, count in shadow_counts.items():
-                    shadow_quote_g.add_metric([strategy, reason], float(count))
-                if shadow_quote_events:
-                    erased = shadow_counts.get("ask_erased_edge", 0)
-                    ask_erased_edge_ratio_g.add_metric([strategy], erased / len(shadow_quote_events))
-
-                book_source_counts: dict[str, int] = {}
-                for event in hist_data:
-                    source = _history_source(event)
-                    if source is None and event.get("book_source") is not None:
-                        source = str(event.get("book_source")) or "unknown"
-                    if source is None:
-                        continue
-                    book_source_counts[source] = book_source_counts.get(source, 0) + 1
-                for event in scan_summary_events:
-                    sources = event.get("book_sources")
-                    if not isinstance(sources, dict):
-                        continue
-                    for source, count in sources.items():
-                        key = str(source) or "unknown"
-                        book_source_counts[key] = book_source_counts.get(key, 0) + int(_safe_float(count))
-                book_source_total = sum(book_source_counts.values())
-                for source, count in book_source_counts.items():
-                    order_book_source_g.add_metric([strategy, source], float(count))
-                    if book_source_total > 0:
-                        order_book_source_ratio_g.add_metric([strategy, source], count / book_source_total)
-                if book_source_total > 0:
-                    synthetic_count = sum(count for source, count in book_source_counts.items() if _is_synthetic_book_source(source))
-                    synthetic_book_ratio_g.add_metric([strategy], synthetic_count / book_source_total)
-
-                parsed_counts: dict[str, int] = {}
-                signal_book_counts: dict[str, int] = {}
-                signal_vol_counts: dict[str, int] = {}
-                parse_attempted = 0
-                parsed_markets = 0
-                for event in scan_summary_events:
-                    parse_attempted += int(_safe_float(event.get("parse_attempted")))
-                    parsed_markets += int(_safe_float(event.get("parsed_markets")))
-                for event in signal_evaluation_events:
-                    if "parsed" in event:
-                        parsed = "true" if bool(event.get("parsed")) else "false"
-                        parsed_counts[parsed] = parsed_counts.get(parsed, 0) + 1
-                    book_source = event.get("book_source")
-                    if book_source is not None:
-                        source = str(book_source) or "unknown"
-                        signal_book_counts[source] = signal_book_counts.get(source, 0) + 1
-                    vol_source = event.get("vol_source")
-                    if vol_source is not None:
-                        source = str(vol_source) or "unknown"
-                        signal_vol_counts[source] = signal_vol_counts.get(source, 0) + 1
-                for parsed, count in parsed_counts.items():
-                    signal_evaluation_g.add_metric([strategy, parsed], float(count))
-                if parse_attempted > 0:
-                    parser_hit_rate_g.add_metric([strategy], parsed_markets / parse_attempted)
-                for source, count in signal_book_counts.items():
-                    signal_book_source_g.add_metric([strategy, source], float(count))
-                for source, count in signal_vol_counts.items():
-                    parser_scanner_vol_source_g.add_metric([strategy, source], float(count))
-
-                vol_source_counts: dict[str, int] = {}
-                for event in hist_data:
-                    vol_source = event.get("vol_source")
-                    if vol_source is None:
-                        continue
-                    source = str(vol_source) or "unknown"
-                    vol_source_counts[source] = vol_source_counts.get(source, 0) + 1
-                for event in scan_summary_events:
-                    sources = event.get("vol_sources")
-                    if not isinstance(sources, dict):
-                        continue
-                    for source, count in sources.items():
-                        key = str(source) or "unknown"
-                        vol_source_counts[key] = vol_source_counts.get(key, 0) + int(_safe_float(count))
-                vol_source_total = sum(vol_source_counts.values())
-                for source, count in vol_source_counts.items():
-                    vol_source_g.add_metric([strategy, source], float(count))
-                if vol_source_total > 0:
-                    fallback_count = sum(count for source, count in vol_source_counts.items() if _is_fallback_source(source))
-                    realized_vol_fallback_ratio_g.add_metric([strategy], fallback_count / vol_source_total)
-
-                # Recent closed trades (last 20)
-                # Use sequential idx as the unique label so the same market traded
-                # multiple times doesn't produce duplicate label sets.
-                for idx, e in enumerate(effective_close_events[-20:]):
-                    market_id = str(e.get("market_id", ""))
-                    asset = str(e.get("asset", ""))
+                # Exit reasons
+                reason_counts: dict[str, int] = {}
+                for e in close_events:
                     reason = str(e.get("reason", "unknown"))
-                    labels = [strategy, str(idx), market_id, asset, reason]
+                    reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                for reason, count in reason_counts.items():
+                    exit_reason_g.add_metric([strategy, reason], float(count))
+
+                pnl_by_asset: dict[str, float] = {}
+                pnl_by_weekday: dict[str, float] = {}
+                for e in effective_close_events:
                     pnl = _safe_float(e.get("_effective_pnl", e.get("pnl")))
-                    closed_pnl_g.add_metric(labels, pnl)
-                    opened_ts = _parse_ts(e.get("_opened_ts"))
-                    closed_ts = _parse_ts(e.get("ts"))
-                    if opened_ts is not None and closed_ts is not None and closed_ts >= opened_ts:
-                        closed_hold_g.add_metric(labels, (closed_ts - opened_ts) / 3600.0)
-            else:
-                scrape_success_g.add_metric([strategy], 0.0)
+                    asset = str(e.get("asset", "unknown"))
+                    pnl_by_asset[asset] = pnl_by_asset.get(asset, 0.0) + pnl
+                    ts = _parse_ts(e.get("ts"))
+                    if ts is not None:
+                        weekday = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%a")
+                        pnl_by_weekday[weekday] = pnl_by_weekday.get(weekday, 0.0) + pnl
+                for asset, pnl in pnl_by_asset.items():
+                    pnl_by_asset_g.add_metric([strategy, asset], pnl)
+                for weekday, pnl in pnl_by_weekday.items():
+                    pnl_by_weekday_g.add_metric([strategy, weekday], pnl)
+
+            # Avg edge at entry
+            edges = [e.get("edge") for e in open_events if e.get("edge") is not None]
+            if edges:
+                numeric_edges = [_safe_float(e) for e in edges]
+                avg_edge_g.add_metric([strategy], sum(numeric_edges) / len(numeric_edges))
+
+            slippages = [_safe_float(e.get("slippage")) for e in open_events if e.get("slippage") is not None]
+            if slippages:
+                avg_entry_slippage_g.add_metric([strategy], sum(slippages) / len(slippages))
+
+            fill_ratios: list[float] = []
+            order_counts: dict[tuple[str, str], int] = {}
+            for event in order_events:
+                side = str(event.get("side", "unknown"))
+                status = str(event.get("status", "unknown"))
+                order_counts[(side, status)] = order_counts.get((side, status), 0) + 1
+                requested_usd = _safe_float(event.get("requested_usd"))
+                requested_shares = _safe_float(event.get("requested_shares"))
+                filled_usd = _safe_float(event.get("filled_usd"))
+                filled_shares = _safe_float(event.get("filled_shares"))
+                if requested_usd > 0:
+                    fill_ratios.append(min(1.0, filled_usd / requested_usd))
+                elif requested_shares > 0:
+                    fill_ratios.append(min(1.0, filled_shares / requested_shares))
+            if fill_ratios:
+                avg_fill_ratio_g.add_metric([strategy], sum(fill_ratios) / len(fill_ratios))
+            for (side, status), count in order_counts.items():
+                order_count_g.add_metric([strategy, side, status], float(count))
+
+            failed_counts: dict[str, int] = {}
+            for event in failed_events:
+                side = str(event.get("side", "unknown"))
+                failed_counts[side] = failed_counts.get(side, 0) + 1
+            for side, count in failed_counts.items():
+                failed_orders_g.add_metric([strategy, side], float(count))
+
+            shadow_counts: dict[str, int] = {}
+            for event in shadow_quote_events:
+                reason = str(event.get("reason", "unknown"))
+                shadow_counts[reason] = shadow_counts.get(reason, 0) + 1
+            for reason, count in shadow_counts.items():
+                shadow_quote_g.add_metric([strategy, reason], float(count))
+            if shadow_quote_events:
+                erased = shadow_counts.get("ask_erased_edge", 0)
+                ask_erased_edge_ratio_g.add_metric([strategy], erased / len(shadow_quote_events))
+
+            book_source_counts: dict[str, int] = {}
+            for event in hist_data:
+                source = _history_source(event)
+                if source is None and event.get("book_source") is not None:
+                    source = str(event.get("book_source")) or "unknown"
+                if source is None:
+                    continue
+                book_source_counts[source] = book_source_counts.get(source, 0) + 1
+            for event in scan_summary_events:
+                sources = event.get("book_sources")
+                if not isinstance(sources, dict):
+                    continue
+                for source, count in sources.items():
+                    key = str(source) or "unknown"
+                    book_source_counts[key] = book_source_counts.get(key, 0) + int(_safe_float(count))
+            book_source_total = sum(book_source_counts.values())
+            for source, count in book_source_counts.items():
+                order_book_source_g.add_metric([strategy, source], float(count))
+                if book_source_total > 0:
+                    order_book_source_ratio_g.add_metric([strategy, source], count / book_source_total)
+            if book_source_total > 0:
+                synthetic_count = sum(count for source, count in book_source_counts.items() if _is_synthetic_book_source(source))
+                synthetic_book_ratio_g.add_metric([strategy], synthetic_count / book_source_total)
+
+            parsed_counts: dict[str, int] = {}
+            signal_book_counts: dict[str, int] = {}
+            signal_vol_counts: dict[str, int] = {}
+            parse_attempted = 0
+            parsed_markets = 0
+            for event in scan_summary_events:
+                parse_attempted += int(_safe_float(event.get("parse_attempted")))
+                parsed_markets += int(_safe_float(event.get("parsed_markets")))
+            for event in signal_evaluation_events:
+                if "parsed" in event:
+                    parsed = "true" if bool(event.get("parsed")) else "false"
+                    parsed_counts[parsed] = parsed_counts.get(parsed, 0) + 1
+                book_source = event.get("book_source")
+                if book_source is not None:
+                    source = str(book_source) or "unknown"
+                    signal_book_counts[source] = signal_book_counts.get(source, 0) + 1
+                vol_source = event.get("vol_source")
+                if vol_source is not None:
+                    source = str(vol_source) or "unknown"
+                    signal_vol_counts[source] = signal_vol_counts.get(source, 0) + 1
+            for parsed, count in parsed_counts.items():
+                signal_evaluation_g.add_metric([strategy, parsed], float(count))
+            if parse_attempted > 0:
+                parser_hit_rate_g.add_metric([strategy], parsed_markets / parse_attempted)
+            for source, count in signal_book_counts.items():
+                signal_book_source_g.add_metric([strategy, source], float(count))
+            for source, count in signal_vol_counts.items():
+                parser_scanner_vol_source_g.add_metric([strategy, source], float(count))
+
+            vol_source_counts: dict[str, int] = {}
+            for event in hist_data:
+                vol_source = event.get("vol_source")
+                if vol_source is None:
+                    continue
+                source = str(vol_source) or "unknown"
+                vol_source_counts[source] = vol_source_counts.get(source, 0) + 1
+            for event in scan_summary_events:
+                sources = event.get("vol_sources")
+                if not isinstance(sources, dict):
+                    continue
+                for source, count in sources.items():
+                    key = str(source) or "unknown"
+                    vol_source_counts[key] = vol_source_counts.get(key, 0) + int(_safe_float(count))
+            vol_source_total = sum(vol_source_counts.values())
+            for source, count in vol_source_counts.items():
+                vol_source_g.add_metric([strategy, source], float(count))
+            if vol_source_total > 0:
+                fallback_count = sum(count for source, count in vol_source_counts.items() if _is_fallback_source(source))
+                realized_vol_fallback_ratio_g.add_metric([strategy], fallback_count / vol_source_total)
+
+            # Closed trades from state.
+            # Use sequential idx as the unique label so the same market traded
+            # multiple times doesn't produce duplicate label sets.
+            for idx, e in enumerate(effective_close_events):
+                market_id = str(e.get("market_id", ""))
+                asset = str(e.get("asset", ""))
+                reason = str(e.get("reason", "unknown"))
+                labels = [
+                    strategy,
+                    str(idx),
+                    _label_text(e.get("_opened_ts")),
+                    _label_text(e.get("ts")),
+                    market_id,
+                    asset,
+                    reason,
+                    _label_text(e.get("_question", e.get("question"))),
+                ]
+                pnl = _safe_float(e.get("_effective_pnl", e.get("pnl")))
+                closed_pnl_g.add_metric(labels, pnl)
+                opened_ts = _parse_ts(e.get("_opened_ts"))
+                closed_ts = _parse_ts(e.get("ts"))
+                if opened_ts is not None and closed_ts is not None and closed_ts >= opened_ts:
+                    closed_hold_g.add_metric(labels, (closed_ts - opened_ts) / 3600.0)
+        else:
+            scrape_success_g.add_metric([strategy], 0.0)
 
         yield nav_g
         yield total_pnl_g

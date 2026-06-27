@@ -1,4 +1,4 @@
-<img src="data/images/turlequant_small.png" align="right" height="64"/>
+<img src="data/images/turtlequant.png" align="right" height="64"/>
 
 # TurtleQuant
 

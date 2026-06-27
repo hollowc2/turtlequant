@@ -1,3 +1,6 @@
+import pytest
+
+
 def test_data_binance_import():
     from turtlequant.data.binance import fetch_klines
     assert callable(fetch_klines)
@@ -16,3 +19,9 @@ def test_turtlequant_core_imports():
     assert VolSurface is not None
     assert callable(compute_probability)
     assert callable(parse_market)
+
+
+def test_digital_probability_known_value():
+    from turtlequant.probability_engine import digital_probability
+
+    assert digital_probability(100, 100, 1, 0.2) == pytest.approx(0.5596176924)

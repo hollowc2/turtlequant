@@ -288,9 +288,6 @@ class PositionManager:
                 pos.yes_token_id = yes_token_id
             self._save()
 
-    def update_nav(self, new_nav: float) -> None:
-        self.current_nav = new_nav
-
     def exit_decision(
         self,
         market_id: str,
@@ -315,10 +312,6 @@ class PositionManager:
         if hours_to_expiry <= 6.0 and current_edge <= 0.05:
             return ExitDecision(True, "time_cleanup", current_edge, entry_edge, hours_to_expiry)
         return ExitDecision(False, None, current_edge, entry_edge, hours_to_expiry)
-
-    def should_exit(self, market_id: str, model_prob: float, yes_price: float) -> bool:
-        """Compatibility wrapper for older callers."""
-        return self.exit_decision(market_id, model_prob, yes_price).should_exit
 
     # ------------------------------------------------------------------
     # Persistence
