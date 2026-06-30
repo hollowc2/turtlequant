@@ -15,6 +15,11 @@ docker compose up -d --build
 | `/opt/turtlequant/state/live-state` | Separate live positions, history, bot log |
 | `/opt/turtlequant/data` | Calibration / auxiliary data |
 | `/opt/polymarket/app/turtlequant` | Deploy source (compose file lives here) |
+| `/opt/polymarket/state` | Other Polymarket bots; not TurtleQuant runtime state |
+
+Old repo-local samples under `/opt/polymarket/app/crypto_up_or_down/state/turtlequant`
+are not the active TurtleQuant state. Check `/opt/turtlequant/state` for the running
+bot unless the live override is explicitly in use.
 
 `monitoring_net` must exist before `docker compose up` (created by `/opt/monitoring` stack or `setup-vps.sh`).
 

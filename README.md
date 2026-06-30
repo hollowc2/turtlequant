@@ -116,6 +116,15 @@ cp .env.example .env          # configure secrets on the VPS (never commit)
 docker compose up -d          # runs TurtleQuant in shadow mode (--shadow)
 ```
 
+Runtime state is outside this repo:
+
+| Path | Meaning |
+|------|---------|
+| `/opt/polymarket/app/turtlequant` | Source and compose files |
+| `/opt/turtlequant/state` | Active shadow-mode positions, history, and bot log |
+| `/opt/turtlequant/state/live-state` | Separate live-mode state when `docker-compose.live.yml` is used |
+| `/opt/polymarket/state` | Other `crypto_up_or_down` bot state, not TurtleQuant runtime state |
+
 State files (`*-positions.json`, `*-history.json`) persist in `/opt/turtlequant/state`. The history file includes `order`, `failed_order`, and `shadow_quote` events with bid/ask snapshots, slippage, fill ratio inputs, and partial-fill fields.
 
 See [docs/OPS.md](docs/OPS.md) for secrets, Grafana/Prometheus wiring, alerts, healthchecks, and rollback.
