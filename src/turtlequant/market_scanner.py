@@ -15,6 +15,8 @@ from typing import Any
 
 import requests
 
+from turtlequant.http import REQUEST_TIMEOUT, retrying_session
+
 logger = logging.getLogger(__name__)
 
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
@@ -28,12 +30,8 @@ DEFAULT_MIN_HOURS_TO_RESOLUTION = 4.0
 # volume/liquidity descending so the most relevant markets appear first
 _PAGE_SIZE = 100
 _MAX_PAGES = 5
-_REQUEST_TIMEOUT_SECS = 10
-_REQUEST_RETRIES = 2
-_REQUEST_BACKOFF_SECS = 0.5
 _CACHE_TTL_SECS = 15 * 60
 _WARNING_COOLDOWN_SECS = 5 * 60
-_TRANSIENT_HTTP_STATUSES = {403, 408, 409, 425, 429, 500, 502, 503, 504}
 
 
 @dataclass
@@ -89,7 +87,7 @@ class MarketScanner:
 
     @staticmethod
     def _make_session() -> requests.Session:
-        s = requests.Session()
+        s = retrying_session()
         s.headers.update(
             {"Accept": "application/json", "User-Agent": "turtlequant/0.1"}
         )
@@ -289,31 +287,27 @@ class MarketScanner:
             )
         return None
 
+    def fetch_resolution(self, market_id: str) -> float | None:
+        """Return an explicit Gamma settlement price, never a live quote."""
+        try:
+            raw = self._get_json(f"{GAMMA_API_BASE}/markets/{market_id}")
+            if not raw.get("closed"):
+                return None
+            value = raw.get("resolutionPrice", raw.get("resolution_price"))
+            if value is None:
+                return None
+            price = float(value)
+            return price if 0.0 <= price <= 1.0 else None
+        except (TypeError, ValueError, OSError, requests.RequestException) as exc:
+            self._log_api_warning(
+                f"resolution:{market_id}", "fetch_resolution(%s) failed: %s", market_id, exc
+            )
+            return None
+
     def _get_json(self, url: str, params: dict[str, Any] | None = None) -> Any:
-        last_exc: Exception | None = None
-        for attempt in range(_REQUEST_RETRIES + 1):
-            try:
-                resp = self._session.get(
-                    url, params=params, timeout=_REQUEST_TIMEOUT_SECS
-                )
-                if (
-                    getattr(resp, "status_code", 200) in _TRANSIENT_HTTP_STATUSES
-                    and attempt < _REQUEST_RETRIES
-                ):
-                    time.sleep(_REQUEST_BACKOFF_SECS * (attempt + 1))
-                    continue
-                resp.raise_for_status()
-                return resp.json()
-            except requests.RequestException as exc:
-                last_exc = exc
-                if attempt >= _REQUEST_RETRIES:
-                    break
-                time.sleep(_REQUEST_BACKOFF_SECS * (attempt + 1))
-            except Exception:
-                raise
-        if last_exc is not None:
-            raise last_exc
-        raise RuntimeError(f"request failed: {url}")
+        resp = self._session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
 
     def _log_api_warning(self, key: str, msg: str, *args: object) -> None:
         now = time.time()

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -57,6 +58,10 @@ class Position:
     opened_at: str  # ISO 8601 UTC
     token_size: float = 0.0  # YES shares actually filled
     fill_confirmed: bool = False  # True once the order is confirmed filled
+    status: str = "open"  # "open" | "pending_redemption"
+    resolution_price: float | None = None
+    entry_fee_usd: float | None = None  # actual reconciled entry fee, when known
+    realized_exit_fees_usd: float = 0.0
     last_yes_price: float = 0.0  # last observed market YES price
     last_yes_price_at: str = ""  # ISO 8601 UTC for last observed market price
     last_bid: float = 0.0
@@ -109,6 +114,14 @@ class PositionManager:
 
     def all_positions(self) -> list[Position]:
         return list(self._positions.values())
+
+    def marked_equity(self) -> float:
+        """Current NAV including the latest persisted mark for each open claim."""
+        return self.current_nav + sum(
+            ((p.resolution_price if p.status == "pending_redemption" else p.last_bid or p.last_yes_price or p.entry_price) - p.entry_price)
+            * (p.token_size or p.size_usd / p.entry_price)
+            for p in self._positions.values()
+        )
 
     def kelly_size(
         self,
@@ -214,7 +227,13 @@ class PositionManager:
         return changed
 
     def close_position(
-        self, market_id: str, exit_price: float, reason: str = "edge_reversed", filled_shares: float | None = None
+        self,
+        market_id: str,
+        exit_price: float,
+        reason: str = "edge_reversed",
+        filled_shares: float | None = None,
+        *,
+        exit_fee_usd: float | None = None,
     ) -> tuple[Position | None, float]:
         """Close a position and return (position, realised_pnl).
 
@@ -231,8 +250,18 @@ class PositionManager:
                 return pos, 0.0
             gross_pnl = (exit_price - pos.entry_price) * closed_tokens
             close_ratio = closed_tokens / tokens if tokens > 0 else 1.0
-            entry_fee = pos.size_usd * close_ratio * TAKER_FEE_RATE
-            exit_fee = closed_tokens * exit_price * TAKER_FEE_RATE
+            entry_fee = (
+                pos.entry_fee_usd * close_ratio
+                if pos.entry_fee_usd is not None
+                else pos.size_usd * close_ratio * TAKER_FEE_RATE
+            )
+            exit_fee = (
+                exit_fee_usd
+                if exit_fee_usd is not None
+                else closed_tokens * exit_price * TAKER_FEE_RATE
+            )
+            if exit_fee < 0 or not math.isfinite(exit_fee):
+                raise ValueError("exit_fee_usd must be a finite non-negative number")
             pnl = gross_pnl - entry_fee - exit_fee
             self.current_nav += pnl
             self.total_pnl += pnl
@@ -241,6 +270,7 @@ class PositionManager:
             else:
                 pos.token_size = tokens - closed_tokens
                 pos.size_usd = max(0.0, pos.size_usd * (1.0 - close_ratio))
+                pos.realized_exit_fees_usd += exit_fee
                 pos.last_yes_price = exit_price
                 pos.last_yes_price_at = datetime.now(UTC).isoformat()
             logger.info(
@@ -269,6 +299,7 @@ class PositionManager:
         token_size: float | None = None,
         bid: float | None = None,
         ask: float | None = None,
+        fee_usd: float | None = None,
     ) -> None:
         pos = self._positions.get(market_id)
         if pos:
@@ -277,6 +308,10 @@ class PositionManager:
                 pos.size_usd = size_usd
             if token_size is not None and token_size > 0:
                 pos.token_size = token_size
+            if fee_usd is not None:
+                if fee_usd < 0 or not math.isfinite(fee_usd):
+                    raise ValueError("fee_usd must be a finite non-negative number")
+                pos.entry_fee_usd = fee_usd
             pos.fill_confirmed = True
             pos.last_yes_price = fill_price
             pos.last_yes_price_at = datetime.now(UTC).isoformat()
@@ -287,6 +322,16 @@ class PositionManager:
             if yes_token_id:
                 pos.yes_token_id = yes_token_id
             self._save()
+
+    def mark_pending_redemption(self, market_id: str, resolution_price: float) -> bool:
+        """Keep resolved claims accounted for until wallet redemption is reconciled."""
+        pos = self._positions.get(market_id)
+        if pos is None or not 0.0 <= resolution_price <= 1.0:
+            return False
+        pos.status = "pending_redemption"
+        pos.resolution_price = resolution_price
+        self._save()
+        return True
 
     def exit_decision(
         self,
@@ -323,26 +368,59 @@ class PositionManager:
         try:
             with self.positions_file.open() as f:
                 data = json.load(f)
-            nav = data.get("nav", self.current_nav)
-            if nav > 0:
-                self.current_nav = nav
-            self.total_pnl = data.get("total_pnl", 0.0)
-            for pos_data in data.get("positions", []):
-                if "token_size" not in pos_data:
-                    entry_price = pos_data.get("entry_price", 0.0)
-                    size_usd = pos_data.get("size_usd", 0.0)
-                    pos_data["token_size"] = size_usd / entry_price if entry_price > 0 else 0.0
-                pos_data.setdefault("last_bid", 0.0)
-                pos_data.setdefault("last_ask", 0.0)
-                pos = Position(**pos_data)
-                if pos.last_yes_price <= 0:
-                    pos.last_yes_price = pos.entry_price
-                if not pos.last_yes_price_at:
-                    pos.last_yes_price_at = pos.opened_at
-                self._positions[pos.market_id] = pos
+            self._load_validated(data)
             logger.info("Loaded %d open positions from %s", len(self._positions), self.positions_file)
-        except Exception as exc:
-            logger.warning("Could not load positions file: %s", exc)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            raise RuntimeError(f"unsafe position state: {self.positions_file}: {exc}") from exc
+
+    def _load_validated(self, data: object) -> None:
+        if not isinstance(data, dict):
+            raise ValueError("state must be an object")
+        nav = data.get("nav", self.current_nav)
+        total_pnl = data.get("total_pnl", 0.0)
+        positions = data.get("positions", [])
+        if not isinstance(nav, (int, float)) or not math.isfinite(nav) or nav <= 0:
+            raise ValueError("nav must be a positive finite number")
+        if not isinstance(total_pnl, (int, float)) or not math.isfinite(total_pnl):
+            raise ValueError("total_pnl must be finite")
+        if not isinstance(positions, list):
+            raise ValueError("positions must be a list")
+
+        loaded: dict[str, Position] = {}
+        for pos_data in positions:
+            if not isinstance(pos_data, dict):
+                raise TypeError("position must be an object")
+            pos_data = pos_data.copy()
+            if "token_size" not in pos_data:
+                entry_price = pos_data.get("entry_price", 0.0)
+                size_usd = pos_data.get("size_usd", 0.0)
+                pos_data["token_size"] = size_usd / entry_price if entry_price > 0 else 0.0
+            pos_data.setdefault("last_bid", 0.0)
+            pos_data.setdefault("last_ask", 0.0)
+            pos = Position(**pos_data)
+            if (
+                not pos.market_id
+                or pos.market_id in loaded
+                or not (0 < pos.entry_price < 1)
+                or not math.isfinite(pos.entry_price)
+                or not math.isfinite(pos.token_size)
+                or pos.token_size <= 0
+                or not math.isfinite(pos.size_usd)
+                or pos.size_usd <= 0
+            ):
+                raise ValueError(f"invalid position {pos.market_id!r}")
+            expiry = datetime.fromisoformat(pos.expiry_iso)
+            if expiry.tzinfo is None:
+                raise ValueError(f"position {pos.market_id!r} expiry must include a timezone")
+            if pos.last_yes_price <= 0:
+                pos.last_yes_price = pos.entry_price
+            if not pos.last_yes_price_at:
+                pos.last_yes_price_at = pos.opened_at
+            loaded[pos.market_id] = pos
+
+        self.current_nav = float(nav)
+        self.total_pnl = float(total_pnl)
+        self._positions = loaded
 
     def _save(self) -> None:
         try:
@@ -362,8 +440,8 @@ class PositionManager:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_file, self.positions_file)
-        except Exception as exc:
-            logger.warning("Could not save positions file: %s", exc)
+        except OSError as exc:
+            raise RuntimeError("position state was not persisted; halt trading") from exc
 
 
 def make_position(

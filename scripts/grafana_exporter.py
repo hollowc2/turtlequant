@@ -45,9 +45,11 @@ import statistics
 import time
 from datetime import datetime, timezone
 from http.server import HTTPServer
+from pathlib import Path
 
 from prometheus_client import REGISTRY, MetricsHandler
 from prometheus_client.core import GaugeMetricFamily
+from turtlequant.history import active_history_path, load_history
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -57,7 +59,6 @@ PORT = int(os.environ.get("EXPORTER_PORT", "8004"))
 
 STRATEGY = "turtlequant"
 POSITIONS_FILE = "turtlequant-positions.json"
-HISTORY_FILE = "turtlequant-history.json"
 BOT_LOG_FILE = "turtlequant-bot.log"
 
 # Keep this aligned with turtlequant.position_manager.TAKER_FEE_RATE. The
@@ -517,9 +518,9 @@ class TurtleQuantCollector:
             labels=["strategy"],
         )
 
-        strategy, pos_file, hist_file = STRATEGY, POSITIONS_FILE, HISTORY_FILE
+        strategy, pos_file = STRATEGY, POSITIONS_FILE
         pos_path = os.path.join(self.state_dir, pos_file)
-        hist_path = os.path.join(self.state_dir, hist_file)
+        hist_path = active_history_path(Path(self.state_dir))
         nav: float | None = None
         total_pnl: float | None = None
         positions: list[dict] = []
@@ -595,7 +596,11 @@ class TurtleQuantCollector:
             bot_log_age_g.add_metric([strategy], log_age)
 
         # ---- History file ----
-        hist_data = _load_json(hist_path)
+        try:
+            hist_data = load_history(Path(self.state_dir))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            log.warning("could not read history in %s: %s", self.state_dir, exc)
+            hist_data = None
         if isinstance(hist_data, list):
             close_events = [e for e in hist_data if e.get("event") == "close"]
             open_events = [e for e in hist_data if e.get("event") == "open"]
@@ -605,7 +610,7 @@ class TurtleQuantCollector:
             signal_evaluation_events = [e for e in hist_data if e.get("event") == "signal_evaluation"]
             scan_summary_events = [e for e in hist_data if e.get("event") == "scan_summary"]
             effective_close_events = _effective_close_events(hist_data)
-            hist_age = _file_age_sec(hist_path)
+            hist_age = _file_age_sec(str(hist_path))
             if hist_age is not None:
                 state_file_age_g.add_metric([strategy, "history"], hist_age)
             scrape_success_g.add_metric([strategy], 1.0 if isinstance(pos_data, dict) else 0.0)

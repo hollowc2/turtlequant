@@ -18,6 +18,8 @@ from datetime import UTC, datetime
 import numpy as np
 import requests
 
+from turtlequant.http import REQUEST_TIMEOUT, retrying_session
+
 logger = logging.getLogger(__name__)
 
 DERIBIT_API_BASE = "https://www.deribit.com/api/v2/public"
@@ -27,10 +29,6 @@ _DERIBIT_FAILURE_RETRY_SECS = 60
 _DERIBIT_WARNING_COOLDOWN_SECS = 300
 _REALIZED_LOOKBACK_DAYS = 30
 _TOKEN_EXPIRY_SECS = 850  # Deribit tokens last ~900s; refresh before expiry
-_REQUEST_TIMEOUT_SECS = 10
-_REQUEST_RETRIES = 2
-_REQUEST_BACKOFF_SECS = 0.5
-_TRANSIENT_HTTP_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
 
 _ASSET_TO_DERIBIT_CCY: dict[str, str] = {
     "btc": "BTC",
@@ -54,6 +52,7 @@ class IVPoint:
     strike: float  # USD
     expiry: datetime  # UTC
     mark_iv: float  # annualized (e.g., 0.65 = 65%)
+    option_type: str  # "C" or "P"
     moneyness: float = 0.0  # K / S0 at time of fetch
 
 
@@ -74,7 +73,7 @@ class VolSurface:
     _iv_points: list[IVPoint] = field(default_factory=list, repr=False)
     _last_deribit_fetch: float = field(default=0.0, repr=False)
     _realized_vol_cache: dict[str, float] = field(default_factory=dict, repr=False)
-    _session: requests.Session = field(default_factory=requests.Session, repr=False)
+    _session: requests.Session = field(default_factory=retrying_session, repr=False)
     _access_token: str | None = field(default=None, repr=False)
     _token_fetched_at: float = field(default=0.0, repr=False)
     _last_deribit_attempt: float = field(default=0.0, repr=False)
@@ -185,13 +184,14 @@ class VolSurface:
                 parsed = _parse_deribit_instrument(instr)
                 if parsed is None:
                     continue
-                strike_d, expiry_d = parsed
+                strike_d, expiry_d, option_type = parsed
                 moneyness = strike_d / spot if spot > 0 else 1.0
                 points.append(
                     IVPoint(
                         strike=strike_d,
                         expiry=expiry_d,
                         mark_iv=iv / 100.0,  # Deribit returns percent
+                        option_type=option_type,
                         moneyness=moneyness,
                     )
                 )
@@ -215,25 +215,7 @@ class VolSurface:
             )
 
     def _get(self, url: str, **kwargs: object) -> requests.Response:
-        last_exc: Exception | None = None
-        for attempt in range(_REQUEST_RETRIES + 1):
-            try:
-                resp = self._session.get(url, timeout=_REQUEST_TIMEOUT_SECS, **kwargs)
-                if (
-                    getattr(resp, "status_code", 200) in _TRANSIENT_HTTP_STATUSES
-                    and attempt < _REQUEST_RETRIES
-                ):
-                    time.sleep(_REQUEST_BACKOFF_SECS * (attempt + 1))
-                    continue
-                return resp
-            except requests.RequestException as exc:
-                last_exc = exc
-                if attempt >= _REQUEST_RETRIES:
-                    break
-                time.sleep(_REQUEST_BACKOFF_SECS * (attempt + 1))
-        if last_exc is not None:
-            raise last_exc
-        raise RuntimeError(f"request failed: {url}")
+        return self._session.get(url, timeout=REQUEST_TIMEOUT, **kwargs)
 
     def _log_warning(self, key: str, msg: str, *args: object) -> None:
         now = time.time()
@@ -247,8 +229,13 @@ class VolSurface:
     def _interpolate(
         self, spot: float, strike: float, expiry: datetime
     ) -> float | None:
-        """Log-linear interpolation in moneyness + linear in sqrt(T)."""
-        points = self._iv_points
+        """Log-linear interpolation in moneyness + linear total variance in T."""
+        points = [
+            p
+            for p in self._iv_points
+            if (p.strike >= spot and p.option_type == "C")
+            or (p.strike < spot and p.option_type == "P")
+        ]
         if not points:
             return None
 
@@ -256,25 +243,20 @@ class VolSurface:
         target_expiry_ts = expiry.timestamp()
         now_ts = datetime.now(UTC).timestamp()
         target_T = max((target_expiry_ts - now_ts) / (365 * 86400), 1e-6)
-        target_sqrtT = np.sqrt(target_T)
-
-        # Group points by expiry bucket (within 3-day tolerance)
+        # Group points by exact expiry to avoid mixing distinct maturities.
         expiry_buckets: dict[float, list[IVPoint]] = {}
         for p in points:
-            T_p = max((p.expiry.timestamp() - now_ts) / (365 * 86400), 1e-6)
-            sqrtT_p = np.sqrt(T_p)
-            # Round to nearest 0.01 in sqrt(T) space for bucketing
-            bucket = round(sqrtT_p, 2)
+            bucket = p.expiry.timestamp()
             expiry_buckets.setdefault(bucket, []).append(p)
 
         if not expiry_buckets:
             return None
 
-        sqrtT_keys = sorted(expiry_buckets.keys())
+        expiry_keys = sorted(expiry_buckets.keys())
 
         # Find the two bracketing expiry buckets
-        below = [k for k in sqrtT_keys if k <= target_sqrtT]
-        above = [k for k in sqrtT_keys if k > target_sqrtT]
+        below = [k for k in expiry_keys if k <= target_expiry_ts]
+        above = [k for k in expiry_keys if k > target_expiry_ts]
 
         if not below and not above:
             return None
@@ -315,13 +297,16 @@ class VolSurface:
         if len(iv_at_T) == 1:
             return list(iv_at_T.values())[0]
 
-        # Linear interpolation in sqrt(T)
+        # Linear interpolation in total variance, σ²T.
         k0, k1 = sorted(iv_at_T.keys())
         if k1 == k0:
             return iv_at_T[k0]
-        w = (target_sqrtT - k0) / (k1 - k0)
+        T0 = max((k0 - now_ts) / (365 * 86400), 1e-6)
+        T1 = max((k1 - now_ts) / (365 * 86400), 1e-6)
+        w = (target_T - T0) / (T1 - T0)
         w = max(0.0, min(1.0, w))
-        return iv_at_T[k0] + w * (iv_at_T[k1] - iv_at_T[k0])
+        total_variance = (1.0 - w) * iv_at_T[k0] ** 2 * T0 + w * iv_at_T[k1] ** 2 * T1
+        return float(np.sqrt(max(total_variance, 0.0) / target_T))
 
     # ------------------------------------------------------------------
     # Realized vol fallback
@@ -365,17 +350,16 @@ class VolSurface:
 # ---------------------------------------------------------------------------
 
 
-def _parse_deribit_instrument(name: str) -> tuple[float, datetime] | None:
-    """Parse 'BTC-30MAR25-75000-C' → (75000.0, datetime(2025, 3, 30, UTC)).
-
-    Handles calls and puts (we only care about strike + expiry).
-    """
+def _parse_deribit_instrument(name: str) -> tuple[float, datetime, str] | None:
+    """Parse 'BTC-30MAR25-75000-C' → (75000.0, expiry, "C")."""
     # Format: ASSET-DDMMMYY-STRIKE-TYPE
     # e.g.: BTC-30MAR25-75000-C
     parts = name.split("-")
     if len(parts) != 4:
         return None
-    _asset, date_str, strike_str, _option_type = parts
+    _asset, date_str, strike_str, option_type = parts
+    if option_type not in {"C", "P"}:
+        return None
 
     # Parse strike
     try:
@@ -391,7 +375,7 @@ def _parse_deribit_instrument(name: str) -> tuple[float, datetime] | None:
                 dt = datetime.strptime(date_str.upper(), fmt)
                 # Deribit options expire at 08:00 UTC
                 dt = dt.replace(hour=8, tzinfo=UTC)
-                return strike, dt
+                return strike, dt, option_type
             except ValueError:
                 continue
     except Exception:

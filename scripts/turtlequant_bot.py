@@ -33,7 +33,6 @@ Configuration (env vars or CLI):
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import signal
@@ -44,12 +43,17 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from turtlequant.discord_trades import DiscordTrades
-from turtlequant.data.binance import fetch_klines
-from turtlequant.clob_execution import ExecutionClient, estimate_buy_fill
+from turtlequant.data.binance import fetch_klines, fetch_latest_closes
+from turtlequant.clob_execution import ExecutionClient, estimate_buy_fill, taker_fee
 from turtlequant.market_parser import parse_market
 from turtlequant.market_scanner import MarketScanner
+from turtlequant.notifications import NotificationQueue
+from turtlequant.order_intents import OrderIntentLedger
+from turtlequant.order_reconciliation import ReconciliationError, reconcile_outstanding
 from turtlequant.position_manager import PositionManager, make_position
 from turtlequant.probability_engine import compute_probability
+from turtlequant.history import append_history
+from turtlequant.risk_controls import RiskControls
 from turtlequant.vol_surface import VolSurface
 
 # ---------------------------------------------------------------------------
@@ -95,8 +99,8 @@ ASSET_TO_SYMBOL: dict[str, str] = {
 DEFAULT_ENTRY_THRESHOLD = 0.05  # 5% minimum edge
 DEFAULT_KELLY_FRACTION = 0.25
 DEFAULT_STARTING_NAV = 1000.0
+DEFAULT_CALIBRATION_RMSE = 0.05
 DEFAULT_STATE_DIR = Path("state/turtlequant")
-HISTORY_FILE_NAME = "turtlequant-history.json"
 
 SCAN_INTERVAL_SECS = 60
 REPRICE_INTERVAL_SECS = 30
@@ -141,28 +145,6 @@ def fetch_spot(asset: str) -> float | None:
 # ---------------------------------------------------------------------------
 # History tracking
 # ---------------------------------------------------------------------------
-
-
-def append_history(state_dir: Path, entry: dict) -> None:
-    """Append a trade event to turtlequant-history.json."""
-    history_file = state_dir / HISTORY_FILE_NAME
-    try:
-        state_dir.mkdir(parents=True, exist_ok=True)
-        if history_file.exists():
-            with history_file.open() as f:
-                history: list[dict] = json.load(f)
-        else:
-            history = []
-        history.append(entry)
-        tmp_file = history_file.with_name(f".{history_file.name}.{os.getpid()}.tmp")
-        with tmp_file.open("w") as f:
-            f.write(json.dumps(history, indent=2))
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_file, history_file)
-    except Exception as exc:
-        logger.warning("Failed to append history: %s", exc)
 
 
 def trade_chart(
@@ -299,6 +281,27 @@ def main() -> None:
         help="Fractional Kelly multiplier",
     )
     parser.add_argument(
+        "--calibration-rmse",
+        type=float,
+        default=float(os.getenv("CALIBRATION_RMSE", str(DEFAULT_CALIBRATION_RMSE))),
+        metavar="FLOAT",
+        help="One-sigma model calibration error deducted before entry",
+    )
+    parser.add_argument(
+        "--max-daily-loss",
+        type=float,
+        default=float(os.getenv("MAX_DAILY_LOSS", "50")),
+        metavar="USD",
+        help="Block new entries after this much realised UTC-day loss",
+    )
+    parser.add_argument(
+        "--max-market-data-age-secs",
+        type=float,
+        default=float(os.getenv("MAX_MARKET_DATA_AGE_SECS", "90")),
+        metavar="SECONDS",
+        help="Block entries when scan data is older than this",
+    )
+    parser.add_argument(
         "--starting-nav",
         type=float,
         default=float(os.getenv("STARTING_NAV", str(DEFAULT_STARTING_NAV))),
@@ -341,6 +344,9 @@ def main() -> None:
     if args.live and not args.i_accept_live_risk:
         logger.error("Live trading requires --i-accept-live-risk")
         sys.exit(1)
+    if args.live:
+        logger.error("Live trading is disabled pending supervised broker acceptance")
+        sys.exit(1)
     execution_mode = "live" if args.live else "shadow" if args.shadow else "paper"
 
     # Parse assets
@@ -368,10 +374,19 @@ def main() -> None:
         kelly_fraction=args.kelly_fraction,
         positions_file=state_dir / "turtlequant-positions.json",
     )
+    risk_controls = RiskControls.load(state_dir, pos_mgr.current_nav)
     executor = ExecutionClient.from_env(
         mode=execution_mode, allow_live=args.i_accept_live_risk
     )
+    intent_ledger = OrderIntentLedger(state_dir / "turtlequant-order-intents.sqlite3")
+    if execution_mode == "live" and intent_ledger.outstanding():
+        try:
+            reconcile_outstanding(intent_ledger, executor, pos_mgr)
+        except ReconciliationError as exc:
+            logger.error("Live trading blocked: unresolved order intent: %s", exc)
+            sys.exit(1)
     discord = DiscordTrades(state_dir, execution_mode)
+    notifier = NotificationQueue()
 
     logger.info("=== TurtleQuant Bot ===")
     logger.info(
@@ -399,47 +414,48 @@ def main() -> None:
 
         # ── Reprice open positions every 30s ─────────────────────────────────
         if now - last_reprice_time >= REPRICE_INTERVAL_SECS:
+            latest_spots = fetch_latest_closes(
+                [ASSET_TO_SYMBOL[pos.asset] for pos in pos_mgr.all_positions()]
+            )
+            position_spots = {
+                asset: latest_spots.get(symbol)
+                for asset, symbol in ASSET_TO_SYMBOL.items()
+            }
             for pos in pos_mgr.all_positions():
                 try:
                     # Auto-close positions whose expiry has passed
                     if datetime.now(UTC) >= pos.expiry:
-                        # Fetch resolved settlement price (1.0=YES, 0.0=NO)
-                        resolved_price = scanner.fetch_market_price(pos.market_id)
+                        # Expiry is not settlement. Keep the claim accounted for
+                        # until Gamma explicitly confirms its final resolution.
+                        resolved_price = scanner.fetch_resolution(pos.market_id)
                         if resolved_price is None:
                             logger.warning(
-                                "[EXPIRED] Could not fetch resolved price for %s — using entry price (no P&L)",
+                                "[EXPIRED_PENDING] Awaiting confirmed resolution for %s",
                                 pos.market_id[:16],
                             )
-                            resolved_price = pos.entry_price
+                            continue
                         logger.info(
-                            "[EXPIRED] %s K=%.0f exp=%s resolved=%.4f — closing",
+                            "[PENDING_REDEMPTION] %s K=%.0f exp=%s resolved=%.4f",
                             pos.asset.upper(),
                             pos.strike,
                             pos.expiry_iso[:10],
                             resolved_price,
                         )
-                        _pos, pnl = pos_mgr.close_position(
-                            pos.market_id, exit_price=resolved_price, reason="expired"
-                        )
-                        recently_closed[pos.market_id] = datetime.now(UTC)
+                        pos_mgr.mark_pending_redemption(pos.market_id, resolved_price)
                         append_history(
                             state_dir,
                             {
-                                "event": "close",
+                                "event": "pending_redemption",
                                 "market_id": pos.market_id,
                                 "asset": pos.asset,
                                 "strike": pos.strike,
-                                "reason": "expired",
-                                "exit_price": resolved_price,
-                                "pnl": pnl,
+                                "resolution_price": resolved_price,
                                 "ts": datetime.now(UTC).isoformat(),
                             },
                         )
-                        if _pos and _pos.fill_confirmed:
-                            notify_exit(discord, _pos, resolved_price, pnl, "expired")
                         continue
 
-                    spot = fetch_spot(pos.asset)
+                    spot = position_spots.get(pos.asset)
                     if spot is None:
                         continue
                     vs = vol_surfaces.get(pos.asset)
@@ -492,9 +508,15 @@ def main() -> None:
                                 if pos.token_size > 0
                                 else pos.size_usd / pos.entry_price
                             )
+                            exit_intent_id = (
+                                intent_ledger.pending(pos.market_id, pos.yes_token_id, "SELL", shares)
+                                if execution_mode == "live" else None
+                            )
                             exit_result = executor.sell_yes(
                                 pos.yes_token_id, shares, book
                             )
+                            if exit_intent_id is not None:
+                                intent_ledger.submitted(exit_intent_id, exit_result.order_id, exit_result.raw)
                             append_history(
                                 state_dir,
                                 {
@@ -507,6 +529,9 @@ def main() -> None:
                                 },
                             )
                             if not exit_result.success:
+                                risk_controls.record_failure(
+                                    exit_result.error or exit_result.status
+                                )
                                 append_history(
                                     state_dir,
                                     {
@@ -538,6 +563,10 @@ def main() -> None:
                             reason=decision.reason or "edge_reversed",
                             filled_shares=filled_shares,
                         )
+                        if exit_result is not None and execution_mode == "live":
+                            intent_ledger.reconcile(exit_intent_id)
+                        risk_controls.record_realized_pnl(pnl)
+                        risk_controls.record_success(pos_mgr.marked_equity())
                         if exit_result is None or exit_result.complete:
                             recently_closed[pos.market_id] = datetime.now(UTC)
                         append_history(
@@ -575,7 +604,8 @@ def main() -> None:
                             and _pos.fill_confirmed
                             and (exit_result is None or exit_result.complete)
                         ):
-                            notify_exit(
+                            notifier.submit(
+                                notify_exit,
                                 discord,
                                 _pos,
                                 filled_price,
@@ -596,6 +626,7 @@ def main() -> None:
                         )
                 except Exception as exc:
                     logger.warning("Reprice failed for %s: %s", pos.market_id[:16], exc)
+                    risk_controls.record_failure(str(exc))
 
             last_reprice_time = now
 
@@ -607,6 +638,7 @@ def main() -> None:
                 logger.info("Scan: %d markets found", len(markets))
             except Exception as exc:
                 logger.warning("Market scan failed: %s", exc)
+                risk_controls.record_failure(str(exc))
                 time.sleep(5)
                 continue
 
@@ -635,8 +667,9 @@ def main() -> None:
                 if isinstance(bucket, dict):
                     bucket[subkey] = int(bucket.get(subkey, 0)) + 1
 
-            # Fetch spot prices once per scan
-            spots: dict[str, float | None] = {a: fetch_spot(a) for a in assets}
+            # Independent asset marks are bounded and fetched concurrently.
+            latest_spots = fetch_latest_closes(ASSET_TO_SYMBOL[a] for a in assets)
+            spots = {asset: latest_spots.get(ASSET_TO_SYMBOL[asset]) for asset in assets}
 
             for market in markets:
                 if not running:
@@ -711,9 +744,15 @@ def main() -> None:
                                         if pos.token_size > 0
                                         else pos.size_usd / pos.entry_price
                                     )
+                                    exit_intent_id = (
+                                        intent_ledger.pending(market.market_id, token_id, "SELL", shares)
+                                        if execution_mode == "live" else None
+                                    )
                                     exit_result = executor.sell_yes(
                                         token_id, shares, book
                                     )
+                                    if exit_intent_id is not None:
+                                        intent_ledger.submitted(exit_intent_id, exit_result.order_id, exit_result.raw)
                                     append_history(
                                         state_dir,
                                         {
@@ -727,6 +766,9 @@ def main() -> None:
                                         },
                                     )
                                     if not exit_result.success:
+                                        risk_controls.record_failure(
+                                            exit_result.error or exit_result.status
+                                        )
                                         append_history(
                                             state_dir,
                                             {
@@ -759,6 +801,10 @@ def main() -> None:
                                 reason=decision.reason or "edge_reversed",
                                 filled_shares=filled_shares,
                             )
+                            if exit_result is not None and execution_mode == "live":
+                                intent_ledger.reconcile(exit_intent_id)
+                            risk_controls.record_realized_pnl(pnl)
+                            risk_controls.record_success(pos_mgr.marked_equity())
                             if exit_result is None or exit_result.complete:
                                 recently_closed[market.market_id] = datetime.now(UTC)
                             append_history(
@@ -796,7 +842,8 @@ def main() -> None:
                                 and _pos.fill_confirmed
                                 and (exit_result is None or exit_result.complete)
                             ):
-                                notify_exit(
+                                notifier.submit(
+                                    notify_exit,
                                     discord,
                                     _pos,
                                     filled_price,
@@ -819,41 +866,21 @@ def main() -> None:
                         )
                         continue
 
+                    entries_allowed, halt_reason = risk_controls.entries_allowed(
+                        pos_mgr.marked_equity(),
+                        max_daily_loss=args.max_daily_loss,
+                        market_data_at=scan_started_at,
+                        max_market_data_age_secs=args.max_market_data_age_secs,
+                    )
+                    if not entries_allowed:
+                        logger.warning("[ENTRY_HALTED] %s", halt_reason)
+                        continue
+
                     if edge < args.entry_threshold:
                         continue
                     _inc_scan_stat("mid_edge_candidates")
                     if yes_price <= 0.02 or yes_price >= 0.98:
                         continue  # near-certain markets — skip
-
-                    size_usd = pos_mgr.kelly_size(edge, model_prob, yes_price)
-                    if size_usd < 1.0:
-                        logger.debug(
-                            "Size too small ($%.2f) for %s — skip",
-                            size_usd,
-                            market.market_id[:16],
-                        )
-                        continue
-
-                    # Per-expiry exposure check
-                    if not pos_mgr.has_expiry_headroom(params.expiry, size_usd):
-                        logger.info(
-                            "Per-expiry cap reached for %s — skip",
-                            params.expiry.strftime("%Y-%m-%d"),
-                        )
-                        continue
-
-                    logger.info(
-                        "[SIGNAL] %s %s K=%.0f exp=%s model_p=%.4f mkt_p=%.4f edge=+%.4f size=$%.2f σ=%.3f",
-                        params.asset.upper(),
-                        params.option_type.value,
-                        params.strike,
-                        params.expiry.strftime("%Y-%m-%d"),
-                        model_prob,
-                        yes_price,
-                        edge,
-                        size_usd,
-                        sigma,
-                    )
 
                     if args.dry_run:
                         continue
@@ -865,9 +892,35 @@ def main() -> None:
                         fallback_ask=market.ask,
                     )
                     _inc_scan_stat("book_sources", book.source)
-                    executable_entry_price = book.best_ask or market.ask or yes_price
-                    entry_edge = model_prob - executable_entry_price
+                    preliminary_size = pos_mgr.kelly_size(edge, model_prob, book.best_ask)
+                    fill_estimate = estimate_buy_fill(book, preliminary_size)
+                    fee_rate = executor.get_market_fee_rate(market.condition_id)
+                    if execution_mode == "live" and fee_rate is None:
+                        logger.warning("[ENTRY_REJECTED] Missing CLOB fee rate for %s", market.market_id[:16])
+                        continue
+                    estimated_fee = taker_fee(
+                        fill_estimate.filled_shares,
+                        fill_estimate.avg_price,
+                        fee_rate or 0.0,
+                    )
+                    executable_entry_price = (
+                        (fill_estimate.filled_usd + estimated_fee) / fill_estimate.filled_shares
+                        if fill_estimate.filled_shares > 0
+                        else 0.0
+                    )
+                    conservative_prob = max(
+                        0.0, model_prob - 1.645 * args.calibration_rmse
+                    )
+                    entry_edge = conservative_prob - executable_entry_price
+                    size_usd = pos_mgr.kelly_size(
+                        entry_edge, conservative_prob, executable_entry_price
+                    )
                     fill_estimate = estimate_buy_fill(book, size_usd)
+                    if size_usd < 1.0 or not fill_estimate.complete:
+                        continue
+                    if not pos_mgr.has_expiry_headroom(params.expiry, size_usd):
+                        logger.info("Per-expiry cap reached for %s — skip", params.expiry.strftime("%Y-%m-%d"))
+                        continue
                     fill_ratio = (
                         min(1.0, fill_estimate.filled_usd / size_usd)
                         if size_usd > 0
@@ -884,6 +937,7 @@ def main() -> None:
                             "expiry": params.expiry.isoformat(),
                             "option_type": params.option_type.value,
                             "model_prob": model_prob,
+                            "conservative_prob": conservative_prob,
                             "mid_price": yes_price,
                             "executable_price": executable_entry_price,
                             "mid_edge": edge,
@@ -897,6 +951,8 @@ def main() -> None:
                             if fill_estimate.avg_price > 0
                             else 0.0,
                             "estimated_complete": fill_estimate.complete,
+                            "fee_rate": fee_rate,
+                            "estimated_fee": estimated_fee,
                             "vol_source": vol_source,
                             "sigma": sigma,
                             "book_source": book.source,
@@ -931,7 +987,28 @@ def main() -> None:
                         _inc_scan_stat("ask_erased_edge")
                         continue
                     _inc_scan_stat("executable_edge_candidates")
-                    entry_result = executor.buy_yes(market.yes_token_id, size_usd, book)
+                    intent_id = (
+                        intent_ledger.pending(
+                            market.market_id, market.yes_token_id, "BUY", size_usd,
+                            {
+                                "question": market.question, "asset": params.asset,
+                                "strike": params.strike, "expiry_iso": params.expiry.isoformat(),
+                                "option_type": params.option_type.value, "model_prob": model_prob,
+                            },
+                        )
+                        if execution_mode == "live"
+                        else None
+                    )
+                    entry_result = executor.buy_yes(
+                        market.yes_token_id,
+                        size_usd,
+                        book,
+                        max_price=min(0.99, model_prob - args.entry_threshold),
+                    )
+                    if intent_id is not None:
+                        intent_ledger.submitted(
+                            intent_id, entry_result.order_id, entry_result.raw
+                        )
                     append_history(
                         state_dir,
                         {
@@ -943,6 +1020,9 @@ def main() -> None:
                         },
                     )
                     if not entry_result.success:
+                        risk_controls.record_failure(
+                            entry_result.error or entry_result.status
+                        )
                         append_history(
                             state_dir,
                             {
@@ -978,7 +1058,11 @@ def main() -> None:
                         token_size=entry_result.filled_shares,
                         bid=book.best_bid,
                         ask=book.best_ask,
+                        fee_usd=entry_result.fee_usd,
                     )
+                    if intent_id is not None:
+                        intent_ledger.reconcile(intent_id)
+                    risk_controls.record_success(pos_mgr.marked_equity())
                     append_history(
                         state_dir,
                         {
@@ -1008,7 +1092,8 @@ def main() -> None:
                             "ts": datetime.now(UTC).isoformat(),
                         },
                     )
-                    notify_entry(
+                    notifier.submit(
+                        notify_entry,
                         discord,
                         pos,
                         model_prob=model_prob,
@@ -1021,12 +1106,14 @@ def main() -> None:
                     logger.warning(
                         "Market processing error (%s): %s", market.market_id[:16], exc
                     )
+                    risk_controls.record_failure(str(exc))
 
             append_history(state_dir, scan_stats)
 
         # Sleep until next event
         time.sleep(5)
 
+    notifier.close()
     logger.info("TurtleQuant bot stopped.")
 
 

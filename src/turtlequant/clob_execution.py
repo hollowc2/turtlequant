@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from dataclasses import asdict, dataclass, field
+from decimal import Decimal, InvalidOperation
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
@@ -14,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 POLYMARKET_CLOB_HOST = "https://clob.polymarket.com"
 _BOOK_RETRIES = 2
+_AMOUNT_SCALE = Decimal("1000000")
+_BPS = Decimal("10000")
 
 
 def _polymarket_env() -> tuple[str, str, str, str, int, str]:
@@ -131,6 +135,7 @@ class ExecutionResult:
     filled_usd: float = 0.0
     filled_shares: float = 0.0
     avg_price: float = 0.0
+    fee_usd: float | None = None
     complete: bool = False
     success: bool = False
     status: str = "not_sent"
@@ -148,6 +153,7 @@ class ExecutionResult:
             "filled_usd": self.filled_usd,
             "filled_shares": self.filled_shares,
             "avg_fill_price": self.avg_price,
+            "fee_usd": self.fee_usd,
             "complete": self.complete,
             "success": self.success,
             "status": self.status,
@@ -266,6 +272,44 @@ class ExecutionClient:
                 self._log_book_warning(token_id, "CLOB order book fetch failed for %s: %s", token_id[:16], last_exc)
         return synthetic_book(token_id, fallback_bid, fallback_ask)
 
+    def get_market_fee_rate(self, market_id: str) -> float | None:
+        """Return the market's taker fee rate as a fraction, or None if unknown.
+
+        SDK releases expose this either as ``get_fee_rate`` (basis points) or
+        market-info data.  Unknown fees must be handled by the entry gate, not
+        replaced with an old global default.
+        """
+        if self._client is None:
+            return None
+        for method_name in ("get_fee_rate", "get_clob_market_info", "getClobMarketInfo"):
+            method = getattr(self._client, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                raw = method(market_id)
+                rate = _fee_rate_fraction(raw)
+            except Exception as exc:
+                logger.warning("CLOB fee-rate lookup failed for %s via %s: %s", market_id[:16], method_name, exc)
+                continue
+            if rate is not None:
+                return rate
+        return None
+
+    def get_order(self, order_id: str) -> Any:
+        if self._client is None:
+            raise RuntimeError("CLOB client is unavailable")
+        return self._client.get_order(order_id)
+
+    def get_trades(self, token_id: str) -> Any:
+        """Expose trade history for operator investigation; recovery remains order-evidence only."""
+        if self._client is None:
+            raise RuntimeError("CLOB client is unavailable")
+        try:
+            from py_clob_client_v2 import TradeParams
+            return self._client.get_trades(TradeParams(asset_id=token_id))
+        except ImportError:
+            return self._client.get_trades(token_id)
+
     def _log_book_warning(self, token_id: str, msg: str, *args: object) -> None:
         now = time.time()
         last = self._last_book_warning_at.get(token_id, 0.0)
@@ -275,17 +319,27 @@ class ExecutionClient:
         else:
             logger.debug(msg, *args)
 
-    def buy_yes(self, token_id: str, amount_usd: float, book: OrderBook) -> ExecutionResult:
+    def buy_yes(
+        self, token_id: str, amount_usd: float, book: OrderBook, *, max_price: float | None = None
+    ) -> ExecutionResult:
         estimate = estimate_buy_fill(book, amount_usd)
         if self.mode != "live":
             return _paper_result(token_id, estimate, "shadow" if self.mode == "shadow" else "paper", book)
-        return self._post_market_order(token_id, OrderSide.BUY, amount_usd=amount_usd, shares=0.0, estimate=estimate, book=book)
+        return self._post_market_order(
+            token_id, OrderSide.BUY, amount_usd=amount_usd, shares=0.0,
+            estimate=estimate, book=book, limit_price=max_price,
+        )
 
-    def sell_yes(self, token_id: str, shares: float, book: OrderBook) -> ExecutionResult:
+    def sell_yes(
+        self, token_id: str, shares: float, book: OrderBook, *, min_price: float | None = None
+    ) -> ExecutionResult:
         estimate = estimate_sell_fill(book, shares)
         if self.mode != "live":
             return _paper_result(token_id, estimate, "shadow" if self.mode == "shadow" else "paper", book)
-        return self._post_market_order(token_id, OrderSide.SELL, amount_usd=0.0, shares=shares, estimate=estimate, book=book)
+        return self._post_market_order(
+            token_id, OrderSide.SELL, amount_usd=0.0, shares=shares,
+            estimate=estimate, book=book, limit_price=min_price or estimate.avg_price,
+        )
 
     def _build_clob_client(self) -> Any | None:
         try:
@@ -331,16 +385,21 @@ class ExecutionClient:
         shares: float,
         estimate: FillEstimate,
         book: OrderBook,
+        limit_price: float | None,
     ) -> ExecutionResult:
         if not self.allow_live:
             return _failed_result(token_id, estimate, book, "live execution requires --i-accept-live-risk")
         if self._client is None:
             return _failed_result(token_id, estimate, book, "py_clob_client_v2 is not installed or configured")
+        if book.source != "clob":
+            return _failed_result(token_id, estimate, book, "live orders require a real CLOB book")
         if estimate.filled_shares <= 0 or estimate.avg_price <= 0:
             return _failed_result(token_id, estimate, book, "no executable depth")
+        if limit_price is None or not 0.0 < limit_price < 1.0:
+            return _failed_result(token_id, estimate, book, "live order requires a valid worst-price limit")
 
         try:
-            from py_clob_client_v2 import MarketOrderArgs, OrderType, PartialCreateOrderOptions, Side
+            from py_clob_client_v2 import MarketOrderArgs, OrderType, Side
         except ImportError as exc:
             return _failed_result(token_id, estimate, book, str(exc))
 
@@ -352,15 +411,18 @@ class ExecutionClient:
                     token_id=token_id,
                     amount=amount,
                     side=clob_side,
+                    price=limit_price,
                     order_type=OrderType.FAK,
                 ),
-                options=PartialCreateOrderOptions(tick_size=os.getenv("POLYMARKET_TICK_SIZE", "0.01")),
                 order_type=OrderType.FAK,
             )
         except Exception as exc:
             return _failed_result(token_id, estimate, book, str(exc))
 
-        parsed = _parse_order_response(raw, side, amount_usd, shares, estimate)
+        try:
+            parsed = _parse_order_response(raw, side, amount_usd, shares)
+        except RuntimeError as exc:
+            return _failed_result(token_id, estimate, book, str(exc), status="pending_reconciliation", raw=raw)
         return ExecutionResult(
             side=side,
             token_id=token_id,
@@ -394,7 +456,9 @@ def _paper_result(token_id: str, estimate: FillEstimate, status: str, book: Orde
     )
 
 
-def _failed_result(token_id: str, estimate: FillEstimate, book: OrderBook, error: str) -> ExecutionResult:
+def _failed_result(
+    token_id: str, estimate: FillEstimate, book: OrderBook, error: str, *, status: str = "failed", raw: Any = None
+) -> ExecutionResult:
     return ExecutionResult(
         side=estimate.side,
         token_id=token_id,
@@ -405,9 +469,10 @@ def _failed_result(token_id: str, estimate: FillEstimate, book: OrderBook, error
         avg_price=0.0,
         complete=False,
         success=False,
-        status="failed",
+        status=status,
         error=error,
         quote=book.to_dict(),
+        raw=raw if isinstance(raw, dict) else {},
     )
 
 
@@ -436,17 +501,18 @@ def _parse_order_response(
     side: OrderSide,
     requested_usd: float,
     requested_shares: float,
-    estimate: FillEstimate,
 ) -> FillEstimate:
-    taking = _safe_float(_dict_get(raw, "takingAmount", _dict_get(raw, "taking_amount", None)))
-    making = _safe_float(_dict_get(raw, "makingAmount", _dict_get(raw, "making_amount", None)))
+    if _dict_get(raw, "success") is not True or str(_dict_get(raw, "status", "")).lower() != "matched":
+        raise RuntimeError(_dict_get(raw, "errorMsg", "") or f"unconfirmed status={_dict_get(raw, 'status', None)}")
+    making = _scaled_amount(_dict_get(raw, "makingAmount", _dict_get(raw, "making_amount", None)))
+    taking = _scaled_amount(_dict_get(raw, "takingAmount", _dict_get(raw, "taking_amount", None)))
     if taking <= 0 or making <= 0:
-        return estimate
+        raise RuntimeError("matched order response has no positive fill amounts")
     if side == OrderSide.BUY:
-        filled_usd = min(requested_usd, taking)
-        filled_shares = making
+        filled_usd = making
+        filled_shares = taking
     else:
-        filled_shares = min(requested_shares, making)
+        filled_shares = making
         filled_usd = taking
     avg_price = filled_usd / filled_shares if filled_shares > 0 else 0.0
     return FillEstimate(
@@ -460,14 +526,64 @@ def _parse_order_response(
     )
 
 
+def confirmed_fill(raw: Any, side: OrderSide, requested: float) -> FillEstimate:
+    """Parse a terminal broker lookup; estimates are deliberately never accepted."""
+    status = str(_dict_get(raw, "status", "")).lower()
+    if status != "matched":
+        raise RuntimeError(_dict_get(raw, "errorMsg", "") or f"unconfirmed status={status or None}")
+    normalized = dict(raw) if isinstance(raw, dict) else raw
+    if isinstance(normalized, dict):
+        normalized.setdefault("success", True)
+    return _parse_order_response(
+        normalized, side, requested if side == OrderSide.BUY else 0.0, requested if side == OrderSide.SELL else 0.0
+    )
+
+
 def _dict_get(obj: Any, key: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
         return obj.get(key, default)
     return getattr(obj, key, default)
 
 
-def _safe_float(value: Any) -> float:
+def _scaled_amount(value: Any) -> float:
     try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
+        return float(Decimal(str(value)) / _AMOUNT_SCALE)
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise RuntimeError("invalid fixed-point fill amount") from exc
+
+
+def taker_fee(shares: float, price: float, fee_rate: float) -> float:
+    """Return the CLOB taker fee in USDC for a confirmed fill."""
+    if not all(math.isfinite(value) for value in (shares, price, fee_rate)):
+        raise ValueError("fee inputs must be finite")
+    if shares < 0 or fee_rate < 0 or not 0 <= price <= 1:
+        raise ValueError("invalid fee inputs")
+    return shares * fee_rate * price * (1.0 - price)
+
+
+def _fee_rate_fraction(raw: Any) -> float | None:
+    """Normalize SDK fee data (usually basis points) to a rate fraction."""
+    fee_data = _dict_get(raw, "fd", None)
+    if fee_data is not None:
+        try:
+            rate = Decimal(str(_dict_get(fee_data, "r"))) * (Decimal(10) ** -int(_dict_get(fee_data, "e")))
+            result = float(rate)
+            return result if 0 <= result <= 1 else None
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+    if isinstance(raw, (int, float, Decimal, str)):
+        value = raw
+        is_bps = True
+    else:
+        value = _dict_get(raw, "base_fee", _dict_get(raw, "fee_rate_bps", None))
+        is_bps = value is not None
+        if value is None:
+            value = _dict_get(raw, "feeRate", _dict_get(raw, "fee_rate", None))
+    try:
+        rate = Decimal(str(value))
+        if is_bps or rate > 1:
+            rate /= _BPS
+        result = float(rate)
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return result if 0 <= result <= 1 else None

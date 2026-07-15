@@ -10,6 +10,7 @@ from turtlequant.clob_execution import (
     _polymarket_env,
     estimate_buy_fill,
     estimate_sell_fill,
+    taker_fee,
 )
 
 
@@ -147,10 +148,11 @@ def test_live_sell_records_actual_partial_fill_from_clob_response():
     )
     fake_client = MagicMock()
     fake_client.create_and_post_market_order.return_value = {
+        "success": True,
         "status": "matched",
         "orderID": "order-1",
-        "takingAmount": "4.00",
-        "makingAmount": "10.00",
+        "takingAmount": "4000000",
+        "makingAmount": "10000000",
     }
     client = ExecutionClient(mode="live", allow_live=True, clob_client=fake_client)
 
@@ -164,3 +166,70 @@ def test_live_sell_records_actual_partial_fill_from_clob_response():
     assert result.avg_price == 0.4
     assert result.order_id == "order-1"
     fake_client.create_and_post_market_order.assert_called_once()
+
+
+def test_live_buy_uses_confirmed_fixed_point_amounts_and_price_limit():
+    book = OrderBook(token_id="yes", bids=[BookLevel(0.40, 100)], asks=[BookLevel(0.45, 100)])
+    fake_client = MagicMock()
+    fake_client.create_and_post_market_order.return_value = {
+        "success": True, "status": "matched", "orderID": "order-2",
+        "makingAmount": "9000000", "takingAmount": "20000000",
+    }
+
+    result = ExecutionClient(mode="live", allow_live=True, clob_client=fake_client).buy_yes(
+        "yes", 10.0, book, max_price=0.50
+    )
+
+    assert (result.success, result.filled_usd, result.filled_shares, result.avg_price) == (True, 9.0, 20.0, 0.45)
+    assert fake_client.create_and_post_market_order.call_args.kwargs["order_args"].price == 0.50
+
+
+def test_live_ambiguous_response_never_uses_estimated_fill():
+    book = OrderBook(token_id="yes", bids=[BookLevel(0.40, 100)], asks=[BookLevel(0.45, 100)])
+    fake_client = MagicMock()
+    fake_client.create_and_post_market_order.return_value = {"success": True, "status": "delayed"}
+
+    result = ExecutionClient(mode="live", allow_live=True, clob_client=fake_client).buy_yes(
+        "yes", 10.0, book, max_price=0.50
+    )
+
+    assert result.status == "pending_reconciliation"
+    assert result.success is False
+    assert result.filled_usd == result.filled_shares == 0.0
+
+
+def test_live_rejects_synthetic_book_before_order_submission():
+    book = OrderBook(token_id="yes", asks=[BookLevel(0.45, 100)], source="synthetic")
+    fake_client = MagicMock()
+
+    result = ExecutionClient(mode="live", allow_live=True, clob_client=fake_client).buy_yes(
+        "yes", 10.0, book, max_price=0.50
+    )
+
+    assert result.success is False
+    assert "real CLOB book" in result.error
+    fake_client.create_and_post_market_order.assert_not_called()
+
+
+def test_market_fee_rate_uses_sdk_bps_and_taker_fee_formula():
+    fake_client = MagicMock()
+    fake_client.get_fee_rate.return_value = 700
+
+    rate = ExecutionClient(mode="paper", clob_client=fake_client).get_market_fee_rate("yes")
+
+    assert rate == 0.07
+    assert abs(taker_fee(20.0, 0.45, rate) - 0.3465) < 1e-9
+
+
+def test_market_fee_rate_supports_market_info_sdk_shape():
+    fake_client = MagicMock(spec=[])
+    fake_client.getClobMarketInfo = lambda _token_id: {"feeRate": "1000"}
+
+    assert ExecutionClient(mode="paper", clob_client=fake_client).get_market_fee_rate("yes") == 0.1
+
+
+def test_market_fee_rate_supports_documented_market_info_fd_shape():
+    fake_client = MagicMock(spec=[])
+    fake_client.getClobMarketInfo = lambda _condition_id: {"fd": {"r": "700", "e": 4}}
+
+    assert ExecutionClient(mode="paper", clob_client=fake_client).get_market_fee_rate("condition") == 0.07

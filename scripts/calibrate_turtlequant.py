@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""TurtleQuant calibration — validate digital option pricing on historical BTC/ETH data.
+"""TurtleQuant calibration — validate option-model probabilities on historical OHLCV.
 
 Simulates 100+ (strike, expiry) combinations as if they were Polymarket markets
 and measures whether the model probability is well-calibrated against actual outcomes.
+This is model calibration, not evidence of executable Polymarket alpha.
 
 Calibration test:
-  - Pull historical daily closes (configurable lookback, default 3 years)
+  - Pull historical daily OHLCV (configurable lookback, default 3 years)
   - For each simulated entry: compute model_probability using digital_probability()
     with 30d realized vol at that time
-  - Record actual outcome: did price exceed strike at expiry?
+  - Record non-overlapping expiry, up-touch, and down-touch outcomes
   - Group by probability bucket (0.0–0.1, 0.1–0.2, …, 0.9–1.0)
   - Report: calibration RMSE, Brier score
 
@@ -32,7 +33,11 @@ import numpy as np
 import pandas as pd
 
 from turtlequant.data.binance import fetch_klines
-from turtlequant.probability_engine import digital_probability
+from turtlequant.probability_engine import (
+    barrier_down_probability,
+    barrier_probability,
+    digital_probability,
+)
 
 ASSET_TO_SYMBOL = {
     "btc": "BTCUSDT",
@@ -53,59 +58,54 @@ RMSE_THRESHOLD = 0.05
 BUCKET_EDGES = np.linspace(0.0, 1.0, 11)  # 10 buckets: [0,0.1), [0.1,0.2), ...
 
 
-def fetch_daily_closes(symbol: str, years: int) -> pd.Series:
+def fetch_daily_prices(symbol: str, years: int) -> pd.DataFrame:
     end_ms = int(datetime.now(UTC).timestamp() * 1000)
     start_ms = end_ms - years * 365 * 86_400_000
     df = fetch_klines(symbol, "1d", start_ms, end_ms)
     if df.empty:
         raise RuntimeError(f"No data returned for {symbol}")
     df = df.set_index("open_time").sort_index()
-    closes = df["close"].astype(float)
-    print(f"Fetched {len(closes)} daily closes for {symbol} ({closes.index[0].date()} – {closes.index[-1].date()})")
-    return closes
+    prices = df[["close", "high", "low"]].astype(float)
+    print(f"Fetched {len(prices)} daily OHLCV rows for {symbol} ({prices.index[0].date()} – {prices.index[-1].date()})")
+    return prices
 
 
-def compute_realized_vol(closes: pd.Series, idx: int, lookback: int = REALIZED_VOL_LOOKBACK_DAYS) -> float:
+def compute_realized_vol(prices: pd.DataFrame, idx: int, lookback: int = REALIZED_VOL_LOOKBACK_DAYS) -> float:
     start = max(0, idx - lookback)
-    window = closes.iloc[start : idx + 1].values
+    window = prices["close"].iloc[start : idx + 1].values
     if len(window) < 5:
         return 0.80
     log_returns = np.log(window[1:] / window[:-1])
     return float(np.std(log_returns) * np.sqrt(365))
 
 
-def simulate_entries(closes: pd.Series) -> list[dict]:
-    """Generate all simulated (entry_idx, expiry_idx, K, model_p, outcome) rows."""
-    dates = closes.index
-    n = len(dates)
+def simulate_entries(prices: pd.DataFrame) -> list[dict]:
+    """Generate non-overlapping simulated European and barrier contracts."""
+    dates = prices.index
+    n = len(prices)
     rows: list[dict] = []
 
     for days_to_exp in DAYS_TO_EXPIRY:
-        for entry_i in range(REALIZED_VOL_LOOKBACK_DAYS, n - days_to_exp):
-            S0 = float(closes.iloc[entry_i])
-            sigma = compute_realized_vol(closes, entry_i)
+        for entry_i in range(REALIZED_VOL_LOOKBACK_DAYS, n - days_to_exp, days_to_exp):
+            S0 = float(prices["close"].iloc[entry_i])
+            sigma = compute_realized_vol(prices, entry_i)
             expiry_i = min(entry_i + days_to_exp, n - 1)
-            S_T = float(closes.iloc[expiry_i])
+            future = prices.iloc[entry_i + 1 : expiry_i + 1]
+            S_T = float(future["close"].iloc[-1])
             T = days_to_exp / 365.0
 
             for moneyness in STRIKE_MONEYNESS:
                 K = S0 * moneyness
-                model_p = digital_probability(S0, K, T, sigma, RISK_FREE_RATE)
-                outcome = 1 if S_T > K else 0
-                rows.append(
-                    {
-                        "entry_date": dates[entry_i],
-                        "expiry_date": dates[expiry_i],
-                        "days_to_exp": days_to_exp,
-                        "moneyness": moneyness,
-                        "S0": S0,
-                        "K": K,
-                        "S_T": S_T,
-                        "sigma": sigma,
-                        "model_p": model_p,
-                        "outcome": outcome,
-                    }
-                )
+                base = {
+                    "entry_date": dates[entry_i], "expiry_date": dates[expiry_i],
+                    "days_to_exp": days_to_exp, "moneyness": moneyness,
+                    "S0": S0, "K": K, "S_T": S_T, "sigma": sigma,
+                }
+                rows.append({**base, "contract_type": "european", "model_p": digital_probability(S0, K, T, sigma, RISK_FREE_RATE), "outcome": int(S_T > K)})
+                if K > S0:
+                    rows.append({**base, "contract_type": "barrier_up", "model_p": barrier_probability(S0, K, T, sigma, RISK_FREE_RATE), "outcome": int(future["high"].max() >= K)})
+                elif K < S0:
+                    rows.append({**base, "contract_type": "barrier_down", "model_p": barrier_down_probability(S0, K, T, sigma, RISK_FREE_RATE), "outcome": int(future["low"].min() <= K)})
 
     return rows
 
@@ -145,13 +145,13 @@ def print_results(asset: str, brier: float, rmse: float, bucket_df: pd.DataFrame
     print(f"\n{'=' * 60}")
     print(f"TurtleQuant Calibration — {asset.upper()}")
     print(f"{'=' * 60}")
-    print(f"Total simulated trades: {n_trades:,}")
+    print(f"Total simulated contracts: {n_trades:,}")
     print(f"Brier score:            {brier:.4f}  (threshold: < {BRIER_THRESHOLD})")
     print(f"Calibration RMSE:       {rmse:.4f}  (threshold: < {RMSE_THRESHOLD})")
     brier_ok = brier < BRIER_THRESHOLD
     rmse_ok = rmse < RMSE_THRESHOLD
     verdict = "PASS" if (brier_ok and rmse_ok) else "FAIL"
-    print(f"Deploy verdict:         {verdict}")
+    print(f"Model-calibration verdict: {verdict}")
     print()
 
     print(f"{'Bucket':<10} {'Count':>7} {'Model P':>9} {'Actual WR':>10} {'Error':>8}")
@@ -203,12 +203,12 @@ def main() -> None:
     args = parser.parse_args()
 
     symbol = ASSET_TO_SYMBOL[args.asset]
-    print(f"Fetching {args.years} years of {symbol} daily closes...")
-    closes = fetch_daily_closes(symbol, args.years)
+    print(f"Fetching {args.years} years of {symbol} daily OHLCV...")
+    prices = fetch_daily_prices(symbol, args.years)
 
     print(f"Simulating entries (horizons={DAYS_TO_EXPIRY}, strikes={len(STRIKE_MONEYNESS)})...")
-    rows = simulate_entries(closes)
-    print(f"Generated {len(rows):,} simulated trades")
+    rows = simulate_entries(prices)
+    print(f"Generated {len(rows):,} simulated contracts")
 
     brier, rmse, bucket_df = calibration_metrics(rows)
     print_results(args.asset, brier, rmse, bucket_df, len(rows))
@@ -218,10 +218,10 @@ def main() -> None:
 
     # Exit non-zero if calibration fails
     if brier >= BRIER_THRESHOLD or rmse >= RMSE_THRESHOLD:
-        print("WARNING: Calibration did not pass thresholds. Review before deploying paper bot.")
+        print("WARNING: Model calibration did not pass thresholds.")
         sys.exit(1)
     else:
-        print("Calibration passed. Safe to deploy paper bot.")
+        print("Model calibration passed; this does not establish executable trading alpha.")
         sys.exit(0)
 
 

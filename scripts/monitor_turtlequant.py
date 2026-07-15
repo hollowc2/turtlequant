@@ -28,6 +28,7 @@ from rich.live import Live  # type: ignore[import-untyped]
 from rich.panel import Panel  # type: ignore[import-untyped]
 from rich.table import Table  # type: ignore[import-untyped]
 from rich.text import Text  # type: ignore[import-untyped]
+from turtlequant.history import load_history as _load_history
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -50,11 +51,8 @@ def load_positions(state_dir: Path) -> tuple[float, list[dict]]:
 
 
 def load_history(state_dir: Path) -> list[dict]:
-    path = state_dir / "turtlequant-history.json"
-    if not path.exists():
-        return []
     try:
-        return json.loads(path.read_text())
+        return _load_history(state_dir)
     except Exception:
         return []
 

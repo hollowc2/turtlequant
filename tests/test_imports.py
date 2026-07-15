@@ -25,3 +25,11 @@ def test_digital_probability_known_value():
     from turtlequant.probability_engine import digital_probability
 
     assert digital_probability(100, 100, 1, 0.2) == pytest.approx(0.5596176924)
+
+
+def test_down_barrier_known_value():
+    from turtlequant.probability_engine import barrier_down_probability
+
+    assert barrier_down_probability(3000, 1500, 0.47, 0.70) == pytest.approx(
+        0.1935560612
+    )

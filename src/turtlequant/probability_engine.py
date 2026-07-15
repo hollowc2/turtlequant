@@ -159,7 +159,7 @@ def barrier_down_probability(
     log_S0_K = -log_K_S0  # positive
     reflection_factor = exp(-2 * mu * log_S0_K / sigma**2)
 
-    p = _NORMAL.cdf(d_plus) + reflection_factor * _NORMAL.cdf(d_minus)
+    p = _NORMAL.cdf(d_minus) + reflection_factor * _NORMAL.cdf(d_plus)
     return max(1e-6, min(1.0 - 1e-6, p))
 
 

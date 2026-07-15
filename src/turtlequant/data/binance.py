@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Iterable
 
 import pandas as pd
 import requests
+
+from turtlequant.http import REQUEST_TIMEOUT, retrying_session
 
 # DATA_SOURCE controls which exchange is used for OHLCV fetching.
 # auto    — try Binance; on 451 geo-block fall back to OKX, then Gate.io
@@ -81,6 +86,15 @@ SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 INTERVALS = ["5m", "15m", "1h", "4h"]
 START = datetime(2022, 1, 1, tzinfo=UTC)
 MAX_LIMIT = 1000
+_THREAD_LOCAL = threading.local()
+
+
+def _get(url: str, **kwargs: object) -> requests.Response:
+    """Use one retrying session per worker; requests sessions are not thread-safe."""
+    session = getattr(_THREAD_LOCAL, "session", None)
+    if session is None:
+        session = _THREAD_LOCAL.session = retrying_session()
+    return session.get(url, timeout=REQUEST_TIMEOUT, **kwargs)
 
 
 def _bybit_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> pd.DataFrame:
@@ -108,7 +122,7 @@ def _bybit_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> pd.
             "end": page_end_ms,
             "limit": BYBIT_MAX_LIMIT,
         }
-        resp = requests.get(BYBIT_BASE_URL, params=params, timeout=30)
+        resp = _get(BYBIT_BASE_URL, params=params)
         resp.raise_for_status()
         payload = resp.json()
         if payload.get("retCode") != 0:
@@ -191,7 +205,7 @@ def _okx_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> pd.Da
             "after": str(after_ms),
             "limit": str(OKX_MAX_LIMIT),
         }
-        resp = requests.get(OKX_BASE_URL, params=params, timeout=30)
+        resp = _get(OKX_BASE_URL, params=params)
         resp.raise_for_status()
         payload = resp.json()
         if payload.get("code") != "0":
@@ -301,7 +315,7 @@ def _gateio_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> pd
             "to": page_end,
             "limit": GATEIO_MAX_LIMIT,
         }
-        resp = requests.get(GATEIO_BASE_URL, params=params, timeout=30)
+        resp = _get(GATEIO_BASE_URL, params=params)
         resp.raise_for_status()
         data = resp.json()
 
@@ -386,7 +400,7 @@ def fetch_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> pd.D
             "limit": MAX_LIMIT,
         }
         try:
-            resp = requests.get(BASE_URL, params=params, timeout=30)
+            resp = _get(BASE_URL, params=params)
             resp.raise_for_status()
         except requests.exceptions.HTTPError as exc:
             if exc.response is not None and exc.response.status_code == 451:
@@ -449,6 +463,33 @@ def fetch_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> pd.D
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
     df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
     return df
+
+
+def fetch_latest_closes(symbols: Iterable[str], interval: str = "5m") -> dict[str, float]:
+    """Fetch independent spot marks concurrently; failed symbols are omitted."""
+    symbols = list(dict.fromkeys(symbols))
+    if not symbols:
+        return {}
+    seconds = _INTERVAL_SECONDS[interval]
+    end_ms = int(datetime.now(UTC).timestamp() * 1000)
+    start_ms = end_ms - 2 * seconds * 1000
+
+    def fetch(symbol: str) -> tuple[str, float | None]:
+        try:
+            frame = fetch_klines(symbol, interval, start_ms, end_ms)
+            if frame.empty:
+                return symbol, None
+            value = float(frame["close"].iloc[-1])
+            return symbol, value if value > 0 else None
+        except (OSError, RuntimeError, ValueError, requests.RequestException):
+            return symbol, None
+
+    with ThreadPoolExecutor(max_workers=min(8, len(symbols))) as pool:
+        return {
+            symbol: price
+            for symbol, price in (future.result() for future in as_completed([pool.submit(fetch, s) for s in symbols]))
+            if price is not None
+        }
 
 
 def main() -> None:

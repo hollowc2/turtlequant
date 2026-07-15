@@ -82,18 +82,23 @@ class _ResolutionFailureSession:
         return _ResolutionFailureResponse()
 
 
+class _ResolvedSession:
+    def get(self, *_args, **_kwargs):
+        return _Response({"closed": True, "resolutionPrice": "1"})
+
+
 def test_fetch_all_pages_handles_api_outage():
     scanner = MarketScanner(session=_FailingSession())
 
     assert scanner._fetch_all_pages() == []
 
 
-def test_fetch_all_pages_retries_transient_status():
+def test_fetch_all_pages_handles_transient_status():
     session = _FlakySession()
     scanner = MarketScanner(session=session)
 
     assert scanner._fetch_all_pages() == []
-    assert session.calls == 2
+    assert session.calls == 1
 
 
 def test_fetch_all_pages_uses_recent_cache_on_outage():
@@ -110,3 +115,8 @@ def test_fetch_market_price_handles_resolution_failure():
     scanner = MarketScanner(session=_ResolutionFailureSession())
 
     assert scanner.fetch_market_price("market-1") is None
+
+
+def test_fetch_resolution_requires_closed_market_and_valid_settlement():
+    assert MarketScanner(session=_ResolvedSession()).fetch_resolution("market-1") == 1.0
+    assert MarketScanner(session=_ResolutionFailureSession()).fetch_resolution("market-1") is None

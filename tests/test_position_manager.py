@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from turtlequant.position_manager import PositionManager, make_position
 
@@ -110,6 +113,65 @@ def test_partial_close_keeps_remaining_position(tmp_path):
     assert remaining.size_usd == 30.0
 
 
+def test_marked_equity_uses_last_bid(tmp_path):
+    mgr = PositionManager(positions_file=tmp_path / "positions.json")
+    pos = make_position(
+        market_id="m-mark",
+        question="Question",
+        asset="btc",
+        strike=100_000,
+        expiry=datetime.now(UTC) + timedelta(days=30),
+        option_type="european",
+        yes_token_id="token",
+        yes_price=0.50,
+        size_usd=50.0,
+        model_prob=0.60,
+        token_size=100.0,
+    )
+    mgr.open_position(pos)
+    mgr.record_market_data("m-mark", bid=0.40)
+
+    assert mgr.marked_equity() == 990.0
+
+
+def test_resolution_remains_accounted_until_redemption(tmp_path):
+    mgr = PositionManager(positions_file=tmp_path / "positions.json")
+    pos = make_position(
+        market_id="m-resolution", question="Question", asset="btc", strike=100_000,
+        expiry=datetime.now(UTC) + timedelta(days=1), option_type="european",
+        yes_token_id="token", yes_price=0.5, size_usd=50, model_prob=0.6,
+    )
+    mgr.open_position(pos)
+
+    assert mgr.mark_pending_redemption("m-resolution", 1.0)
+    saved = PositionManager(positions_file=tmp_path / "positions.json").get_position("m-resolution")
+    assert saved is not None
+    assert (saved.status, saved.resolution_price) == ("pending_redemption", 1.0)
+
+
+def test_confirmed_fees_are_stored_and_used_for_pnl(tmp_path):
+    mgr = PositionManager(positions_file=tmp_path / "positions.json")
+    pos = make_position(
+        market_id="m-fee",
+        question="Will BTC be above $100k?",
+        asset="btc",
+        strike=100_000,
+        expiry=datetime.now(UTC) + timedelta(days=30),
+        option_type="european",
+        yes_token_id="token-fee",
+        yes_price=0.50,
+        size_usd=50.0,
+        model_prob=0.60,
+        token_size=100.0,
+    )
+    mgr.open_position(pos)
+    mgr.confirm_fill("m-fee", 0.50, fee_usd=1.25)
+
+    _, pnl = mgr.close_position("m-fee", 0.60, exit_fee_usd=1.50)
+
+    assert pnl == pytest.approx(7.25)
+
+
 def test_load_legacy_position_backfills_stale_quote_fields(tmp_path):
     positions_file = tmp_path / "positions.json"
     positions_file.write_text(
@@ -169,3 +231,67 @@ def test_save_replaces_positions_file_atomically(tmp_path):
 
     reloaded = PositionManager(positions_file=positions_file)
     assert reloaded.get_position("m-6") is not None
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "{not json",
+        '{"nav": 1000, "positions": [{"market_id": "bad"}]}',
+        '{"nav": 0, "positions": []}',
+    ],
+)
+def test_load_rejects_unsafe_position_state(tmp_path, state):
+    positions_file = tmp_path / "positions.json"
+    positions_file.write_text(state)
+
+    with pytest.raises(RuntimeError, match="unsafe position state"):
+        PositionManager(positions_file=positions_file)
+
+
+def test_load_rejects_duplicate_market_ids(tmp_path):
+    positions_file = tmp_path / "positions.json"
+    pos = {
+        "market_id": "m-duplicate",
+        "question": "Question",
+        "asset": "btc",
+        "strike": 100_000,
+        "expiry_iso": "2026-12-31T00:00:00+00:00",
+        "option_type": "european",
+        "yes_token_id": "token",
+        "entry_price": 0.5,
+        "size_usd": 50,
+        "token_size": 100,
+        "model_prob_at_entry": 0.6,
+        "edge_at_entry": 0.1,
+        "opened_at": "2026-05-01T00:00:00+00:00",
+    }
+    positions_file.write_text(json.dumps({"nav": 1000, "positions": [pos, pos]}))
+
+    with pytest.raises(RuntimeError, match="unsafe position state"):
+        PositionManager(positions_file=positions_file)
+
+
+def test_save_raises_when_state_cannot_be_persisted(tmp_path, monkeypatch):
+    mgr = PositionManager(positions_file=tmp_path / "positions.json")
+
+    def fail_replace(*_):
+        raise OSError("disk error")
+
+    monkeypatch.setattr("turtlequant.position_manager.os.replace", fail_replace)
+
+    with pytest.raises(RuntimeError, match="position state was not persisted"):
+        mgr.open_position(
+            make_position(
+                market_id="m-save-error",
+                question="Question",
+                asset="btc",
+                strike=100_000,
+                expiry=datetime.now(UTC) + timedelta(days=1),
+                option_type="european",
+                yes_token_id="token",
+                yes_price=0.5,
+                size_usd=10,
+                model_prob=0.6,
+            )
+        )
