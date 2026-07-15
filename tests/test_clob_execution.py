@@ -221,6 +221,19 @@ def test_market_fee_rate_uses_sdk_bps_and_taker_fee_formula():
     assert abs(taker_fee(20.0, 0.45, rate) - 0.3465) < 1e-9
 
 
+def test_shadow_fill_records_current_sdk_fee():
+    fake_client = MagicMock(spec=[])
+    fake_client.get_fee_rate_bps = lambda _token_id: 700
+    client = ExecutionClient(mode="shadow", clob_client=fake_client)
+    book = OrderBook(token_id="yes", asks=[BookLevel(0.50, 100)])
+    rate = client.get_market_fee_rate("condition", "yes")
+
+    result = client.buy_yes("yes", 10.0, book, fee_rate=rate or 0.0)
+
+    assert rate == 0.07
+    assert abs((result.fee_usd or 0.0) - 0.35) < 1e-9
+
+
 def test_market_fee_rate_supports_market_info_sdk_shape():
     fake_client = MagicMock(spec=[])
     fake_client.getClobMarketInfo = lambda _token_id: {"feeRate": "1000"}

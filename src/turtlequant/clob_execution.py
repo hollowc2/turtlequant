@@ -15,6 +15,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 POLYMARKET_CLOB_HOST = "https://clob.polymarket.com"
+DEFAULT_CRYPTO_TAKER_FEE_RATE = 0.07
 _BOOK_RETRIES = 2
 _AMOUNT_SCALE = Decimal("1000000")
 _BPS = Decimal("10000")
@@ -272,7 +273,7 @@ class ExecutionClient:
                 self._log_book_warning(token_id, "CLOB order book fetch failed for %s: %s", token_id[:16], last_exc)
         return synthetic_book(token_id, fallback_bid, fallback_ask)
 
-    def get_market_fee_rate(self, market_id: str) -> float | None:
+    def get_market_fee_rate(self, market_id: str, token_id: str = "") -> float | None:
         """Return the market's taker fee rate as a fraction, or None if unknown.
 
         SDK releases expose this either as ``get_fee_rate`` (basis points) or
@@ -281,12 +282,20 @@ class ExecutionClient:
         """
         if self._client is None:
             return None
-        for method_name in ("get_fee_rate", "get_clob_market_info", "getClobMarketInfo"):
+        lookups = (
+            ("get_fee_rate_bps", token_id or market_id),
+            ("get_fee_rate", token_id or market_id),
+            ("get_clob_market_info", market_id),
+            ("getClobMarketInfo", market_id),
+        )
+        for method_name, identifier in lookups:
+            if not identifier:
+                continue
             method = getattr(self._client, method_name, None)
             if not callable(method):
                 continue
             try:
-                raw = method(market_id)
+                raw = method(identifier)
                 rate = _fee_rate_fraction(raw)
             except Exception as exc:
                 logger.warning("CLOB fee-rate lookup failed for %s via %s: %s", market_id[:16], method_name, exc)
@@ -320,22 +329,24 @@ class ExecutionClient:
             logger.debug(msg, *args)
 
     def buy_yes(
-        self, token_id: str, amount_usd: float, book: OrderBook, *, max_price: float | None = None
+        self, token_id: str, amount_usd: float, book: OrderBook, *,
+        max_price: float | None = None, fee_rate: float = 0.0,
     ) -> ExecutionResult:
         estimate = estimate_buy_fill(book, amount_usd)
         if self.mode != "live":
-            return _paper_result(token_id, estimate, "shadow" if self.mode == "shadow" else "paper", book)
+            return _paper_result(token_id, estimate, "shadow" if self.mode == "shadow" else "paper", book, fee_rate)
         return self._post_market_order(
             token_id, OrderSide.BUY, amount_usd=amount_usd, shares=0.0,
             estimate=estimate, book=book, limit_price=max_price,
         )
 
     def sell_yes(
-        self, token_id: str, shares: float, book: OrderBook, *, min_price: float | None = None
+        self, token_id: str, shares: float, book: OrderBook, *,
+        min_price: float | None = None, fee_rate: float = 0.0,
     ) -> ExecutionResult:
         estimate = estimate_sell_fill(book, shares)
         if self.mode != "live":
-            return _paper_result(token_id, estimate, "shadow" if self.mode == "shadow" else "paper", book)
+            return _paper_result(token_id, estimate, "shadow" if self.mode == "shadow" else "paper", book, fee_rate)
         return self._post_market_order(
             token_id, OrderSide.SELL, amount_usd=0.0, shares=shares,
             estimate=estimate, book=book, limit_price=min_price or estimate.avg_price,
@@ -440,7 +451,9 @@ class ExecutionClient:
         )
 
 
-def _paper_result(token_id: str, estimate: FillEstimate, status: str, book: OrderBook) -> ExecutionResult:
+def _paper_result(
+    token_id: str, estimate: FillEstimate, status: str, book: OrderBook, fee_rate: float
+) -> ExecutionResult:
     return ExecutionResult(
         side=estimate.side,
         token_id=token_id,
@@ -449,6 +462,7 @@ def _paper_result(token_id: str, estimate: FillEstimate, status: str, book: Orde
         filled_usd=estimate.filled_usd,
         filled_shares=estimate.filled_shares,
         avg_price=estimate.avg_price,
+        fee_usd=taker_fee(estimate.filled_shares, estimate.avg_price, fee_rate),
         complete=estimate.complete,
         success=estimate.filled_shares > 0,
         status=status,

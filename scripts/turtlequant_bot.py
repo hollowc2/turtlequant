@@ -44,7 +44,7 @@ from pathlib import Path
 
 from turtlequant.discord_trades import DiscordTrades
 from turtlequant.data.binance import fetch_klines, fetch_latest_closes
-from turtlequant.clob_execution import ExecutionClient, estimate_buy_fill, taker_fee
+from turtlequant.clob_execution import DEFAULT_CRYPTO_TAKER_FEE_RATE, ExecutionClient, estimate_buy_fill, taker_fee
 from turtlequant.market_parser import parse_market
 from turtlequant.market_scanner import MarketScanner
 from turtlequant.notifications import NotificationQueue
@@ -513,7 +513,9 @@ def main() -> None:
                                 if execution_mode == "live" else None
                             )
                             exit_result = executor.sell_yes(
-                                pos.yes_token_id, shares, book
+                                pos.yes_token_id, shares, book,
+                                fee_rate=executor.get_market_fee_rate("", pos.yes_token_id)
+                                or DEFAULT_CRYPTO_TAKER_FEE_RATE,
                             )
                             if exit_intent_id is not None:
                                 intent_ledger.submitted(exit_intent_id, exit_result.order_id, exit_result.raw)
@@ -562,6 +564,7 @@ def main() -> None:
                             exit_price=filled_price,
                             reason=decision.reason or "edge_reversed",
                             filled_shares=filled_shares,
+                            exit_fee_usd=exit_result.fee_usd if exit_result else None,
                         )
                         if exit_result is not None and execution_mode == "live":
                             intent_ledger.reconcile(exit_intent_id)
@@ -749,7 +752,9 @@ def main() -> None:
                                         if execution_mode == "live" else None
                                     )
                                     exit_result = executor.sell_yes(
-                                        token_id, shares, book
+                                        token_id, shares, book,
+                                        fee_rate=executor.get_market_fee_rate(market.condition_id, token_id)
+                                        or DEFAULT_CRYPTO_TAKER_FEE_RATE,
                                     )
                                     if exit_intent_id is not None:
                                         intent_ledger.submitted(exit_intent_id, exit_result.order_id, exit_result.raw)
@@ -800,6 +805,7 @@ def main() -> None:
                                 exit_price=filled_price,
                                 reason=decision.reason or "edge_reversed",
                                 filled_shares=filled_shares,
+                                exit_fee_usd=exit_result.fee_usd if exit_result else None,
                             )
                             if exit_result is not None and execution_mode == "live":
                                 intent_ledger.reconcile(exit_intent_id)
@@ -894,14 +900,15 @@ def main() -> None:
                     _inc_scan_stat("book_sources", book.source)
                     preliminary_size = pos_mgr.kelly_size(edge, model_prob, book.best_ask)
                     fill_estimate = estimate_buy_fill(book, preliminary_size)
-                    fee_rate = executor.get_market_fee_rate(market.condition_id)
+                    fee_rate = executor.get_market_fee_rate(market.condition_id, market.yes_token_id)
                     if execution_mode == "live" and fee_rate is None:
                         logger.warning("[ENTRY_REJECTED] Missing CLOB fee rate for %s", market.market_id[:16])
                         continue
+                    fee_rate = fee_rate if fee_rate is not None else DEFAULT_CRYPTO_TAKER_FEE_RATE
                     estimated_fee = taker_fee(
                         fill_estimate.filled_shares,
                         fill_estimate.avg_price,
-                        fee_rate or 0.0,
+                        fee_rate,
                     )
                     executable_entry_price = (
                         (fill_estimate.filled_usd + estimated_fee) / fill_estimate.filled_shares
@@ -1004,6 +1011,7 @@ def main() -> None:
                         size_usd,
                         book,
                         max_price=min(0.99, model_prob - args.entry_threshold),
+                        fee_rate=fee_rate,
                     )
                     if intent_id is not None:
                         intent_ledger.submitted(

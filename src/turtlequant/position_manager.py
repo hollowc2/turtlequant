@@ -23,6 +23,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .clob_execution import DEFAULT_CRYPTO_TAKER_FEE_RATE, taker_fee
+
 logger = logging.getLogger(__name__)
 
 # Default NAV limits
@@ -30,10 +32,6 @@ DEFAULT_MAX_PER_MARKET_PCT = 0.10
 DEFAULT_MAX_PER_EXPIRY_PCT = 0.15
 DEFAULT_MAX_TOTAL_EXPOSURE_PCT = 0.40
 DEFAULT_KELLY_FRACTION = 0.25
-
-# Conservative flat taker fee applied to both entry and exit contract premium.
-# Polymarket charges 30 bps on all crypto markets as of March 2026.
-TAKER_FEE_RATE = 0.003
 
 # Default state directory (overridden by --state-dir CLI arg or env)
 DEFAULT_STATE_DIR = Path("state/turtlequant")
@@ -253,12 +251,14 @@ class PositionManager:
             entry_fee = (
                 pos.entry_fee_usd * close_ratio
                 if pos.entry_fee_usd is not None
-                else pos.size_usd * close_ratio * TAKER_FEE_RATE
+                # ponytail: legacy state lacks fee metadata; use the current
+                # crypto schedule until those positions have closed.
+                else taker_fee(closed_tokens, pos.entry_price, DEFAULT_CRYPTO_TAKER_FEE_RATE)
             )
             exit_fee = (
                 exit_fee_usd
                 if exit_fee_usd is not None
-                else closed_tokens * exit_price * TAKER_FEE_RATE
+                else taker_fee(closed_tokens, exit_price, DEFAULT_CRYPTO_TAKER_FEE_RATE)
             )
             if exit_fee < 0 or not math.isfinite(exit_fee):
                 raise ValueError("exit_fee_usd must be a finite non-negative number")

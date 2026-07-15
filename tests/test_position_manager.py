@@ -106,7 +106,7 @@ def test_partial_close_keeps_remaining_position(tmp_path):
     closed, pnl = mgr.close_position("m-4", exit_price=0.60, reason="partial_exit", filled_shares=40.0)
 
     assert closed is not None
-    assert pnl > 0
+    assert pnl == pytest.approx(2.628)
     remaining = mgr.get_position("m-4")
     assert remaining is not None
     assert remaining.token_size == 60.0
