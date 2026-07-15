@@ -78,6 +78,7 @@ services:
     environment:
       EXPORTER_PORT: "8004"
       STATE_DIR: "/opt/turtlequant/state"
+      PYTHONPATH: "/app/src"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/metrics', timeout=3)\""]
       interval: 30s
