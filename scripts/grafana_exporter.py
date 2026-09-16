@@ -65,6 +65,7 @@ BOT_LOG_FILE = "turtlequant-bot.log"
 # exporter uses it only to normalize legacy history rows that recorded flat
 # closes as zero before fee-adjusted P&L was persisted.
 TAKER_FEE_RATE = 0.003
+QUALITY_WINDOW_SEC = 15 * 60
 
 
 def _load_json(path: str) -> object:
@@ -94,6 +95,12 @@ def _safe_float(value: object, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _events_since(events: list[dict], window_sec: float, now: float | None = None) -> list[dict]:
+    """Return timestamped events from the recent quality-monitoring window."""
+    cutoff = (time.time() if now is None else now) - window_sec
+    return [event for event in events if (_parse_ts(event.get("ts")) or -1) >= cutoff]
 
 
 def _label_text(value: object) -> str:
@@ -421,6 +428,11 @@ class TurtleQuantCollector:
             "Fraction of shadow quote events where executable ask erased the model edge",
             labels=["strategy"],
         )
+        ask_erased_edge_ratio_recent_g = GaugeMetricFamily(
+            "turtlequant_ask_erased_edge_ratio_recent",
+            "Fraction of recent shadow quote events where executable ask erased model edge",
+            labels=["strategy"],
+        )
         order_book_source_g = GaugeMetricFamily(
             "turtlequant_order_book_source_total",
             "Count of history events by nested quote.source order book source",
@@ -439,6 +451,16 @@ class TurtleQuantCollector:
         parser_hit_rate_g = GaugeMetricFamily(
             "turtlequant_parser_hit_rate",
             "Fraction of scan-summary parse attempts that were classified",
+            labels=["strategy"],
+        )
+        parser_hit_rate_recent_g = GaugeMetricFamily(
+            "turtlequant_parser_hit_rate_recent",
+            "Fraction of recent scan-summary parse attempts that were classified",
+            labels=["strategy"],
+        )
+        mid_edge_candidates_g = GaugeMetricFamily(
+            "turtlequant_mid_edge_candidates_total",
+            "Cumulative scan candidates whose midpoint edge met the entry threshold",
             labels=["strategy"],
         )
         signal_book_source_g = GaugeMetricFamily(
@@ -724,6 +746,15 @@ class TurtleQuantCollector:
             if shadow_quote_events:
                 erased = shadow_counts.get("ask_erased_edge", 0)
                 ask_erased_edge_ratio_g.add_metric([strategy], erased / len(shadow_quote_events))
+            recent_shadow_quote_events = _events_since(shadow_quote_events, QUALITY_WINDOW_SEC)
+            if recent_shadow_quote_events:
+                recent_erased = sum(
+                    1 for event in recent_shadow_quote_events
+                    if event.get("reason") == "ask_erased_edge"
+                )
+                ask_erased_edge_ratio_recent_g.add_metric(
+                    [strategy], recent_erased / len(recent_shadow_quote_events)
+                )
 
             book_source_counts: dict[str, int] = {}
             for event in hist_data:
@@ -757,6 +788,15 @@ class TurtleQuantCollector:
             for event in scan_summary_events:
                 parse_attempted += int(_safe_float(event.get("parse_attempted")))
                 parsed_markets += int(_safe_float(event.get("parsed_markets")))
+            recent_scan_summaries = _events_since(scan_summary_events, QUALITY_WINDOW_SEC)
+            recent_parse_attempted = sum(
+                int(_safe_float(event.get("parse_attempted")))
+                for event in recent_scan_summaries
+            )
+            recent_parsed_markets = sum(
+                int(_safe_float(event.get("parsed_markets")))
+                for event in recent_scan_summaries
+            )
             for event in signal_evaluation_events:
                 if "parsed" in event:
                     parsed = "true" if bool(event.get("parsed")) else "false"
@@ -773,6 +813,17 @@ class TurtleQuantCollector:
                 signal_evaluation_g.add_metric([strategy, parsed], float(count))
             if parse_attempted > 0:
                 parser_hit_rate_g.add_metric([strategy], parsed_markets / parse_attempted)
+            if recent_parse_attempted > 0:
+                parser_hit_rate_recent_g.add_metric(
+                    [strategy], recent_parsed_markets / recent_parse_attempted
+                )
+            mid_edge_candidates_g.add_metric(
+                [strategy],
+                sum(
+                    int(_safe_float(event.get("mid_edge_candidates")))
+                    for event in scan_summary_events
+                ),
+            )
             for source, count in signal_book_counts.items():
                 signal_book_source_g.add_metric([strategy, source], float(count))
             for source, count in signal_vol_counts.items():
@@ -861,10 +912,13 @@ class TurtleQuantCollector:
         yield exit_reason_g
         yield shadow_quote_g
         yield ask_erased_edge_ratio_g
+        yield ask_erased_edge_ratio_recent_g
         yield order_book_source_g
         yield order_book_source_ratio_g
         yield signal_evaluation_g
         yield parser_hit_rate_g
+        yield parser_hit_rate_recent_g
+        yield mid_edge_candidates_g
         yield signal_book_source_g
         yield parser_scanner_vol_source_g
         yield vol_source_g
