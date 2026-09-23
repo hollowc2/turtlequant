@@ -421,8 +421,17 @@ def main() -> None:
                 asset: latest_spots.get(symbol)
                 for asset, symbol in ASSET_TO_SYMBOL.items()
             }
-            for pos in pos_mgr.all_positions():
+            open_positions = pos_mgr.all_positions()
+            if open_positions:
+                logger.info("Repricing %d open position(s)", len(open_positions))
+            for pos in open_positions:
                 try:
+                    logger.info(
+                        "[REPRICE] %s K=%.0f exp=%s",
+                        pos.asset.upper(),
+                        pos.strike,
+                        pos.expiry_iso[:10],
+                    )
                     # Auto-close positions whose expiry has passed
                     if datetime.now(UTC) >= pos.expiry:
                         # Expiry is not settlement. Keep the claim accounted for
