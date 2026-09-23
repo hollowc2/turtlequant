@@ -243,6 +243,220 @@ def _drawdown_stats(points: list[tuple[float, float]]) -> dict[str, float]:
 class TurtleQuantCollector:
     def __init__(self, state_dir: str):
         self.state_dir = state_dir
+        self._history_groups: dict | None = None  # pre-filtered event lists
+        # Incremental JSONL reading: static legacy JSON is cached forever;
+        # JSONL is read incrementally by tracking byte offset.
+        self._legacy_events: list[dict] | None = None
+        self._jsonl_offset: int = 0
+        self._jsonl_events: list[dict] = []
+
+    def _read_legacy_once(self) -> list[dict]:
+        """Parse the legacy .json file exactly once; return cached result thereafter."""
+        if self._legacy_events is not None:
+            return self._legacy_events
+        path = Path(self.state_dir) / "turtlequant-history.json"
+        if not path.exists():
+            self._legacy_events = []
+            return self._legacy_events
+        try:
+            data = json.loads(path.read_text())
+            self._legacy_events = data if isinstance(data, list) else []
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("could not read legacy history %s: %s", path, exc)
+            self._legacy_events = []
+        return self._legacy_events
+
+    def _read_jsonl_incremental(self, path: Path) -> list[dict]:
+        """Append only new lines from the JSONL journal since the last read."""
+        if not path.exists():
+            return self._jsonl_events
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return self._jsonl_events
+        if size == self._jsonl_offset:
+            return self._jsonl_events  # nothing new
+        try:
+            with path.open("rb") as f:
+                f.seek(self._jsonl_offset)
+                new_bytes = f.read()
+            self._jsonl_offset = size
+            for line in new_bytes.decode().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                    if isinstance(event, dict):
+                        self._jsonl_events.append(event)
+                except json.JSONDecodeError:
+                    pass
+        except OSError as exc:
+            log.warning("could not read JSONL %s: %s", path, exc)
+        return self._jsonl_events
+
+    def _get_history_groups(self, hist_path: Path) -> dict | None:
+        """Return pre-filtered event groups, recomputing only when JSONL grows."""
+        jsonl_path = Path(self.state_dir) / "turtlequant-history.jsonl"
+        prev_offset = self._jsonl_offset
+        legacy = self._read_legacy_once()
+        jsonl = self._read_jsonl_incremental(jsonl_path)
+        # Only recompute when new JSONL data arrived or cache is cold.
+        if self._jsonl_offset == prev_offset and self._history_groups is not None:
+            return self._history_groups
+        data = legacy + jsonl
+        if not data:
+            return None
+        close = [e for e in data if e.get("event") == "close"]
+        open_ev = [e for e in data if e.get("event") == "open"]
+        order_ev = [e for e in data if e.get("event") == "order"]
+        failed_ev = [e for e in data if e.get("event") == "failed_order"]
+        shadow_ev = [e for e in data if e.get("event") == "shadow_quote"]
+        signal_ev = [e for e in data if e.get("event") == "signal_evaluation"]
+        scan_ev = [e for e in data if e.get("event") == "scan_summary"]
+        effective_close = _effective_close_events(data)
+
+        # Pre-aggregate counts that would otherwise iterate all events on every scrape.
+        book_source_counts: dict[str, int] = {}
+        vol_source_counts: dict[str, int] = {}
+        for event in data:
+            src = _history_source(event)
+            if src is None and event.get("book_source") is not None:
+                src = str(event.get("book_source")) or "unknown"
+            if src is not None:
+                book_source_counts[src] = book_source_counts.get(src, 0) + 1
+            vs = event.get("vol_source")
+            if vs is not None:
+                key = str(vs) or "unknown"
+                vol_source_counts[key] = vol_source_counts.get(key, 0) + 1
+        for event in scan_ev:
+            srcs = event.get("book_sources")
+            if isinstance(srcs, dict):
+                for s, c in srcs.items():
+                    k = str(s) or "unknown"
+                    book_source_counts[k] = book_source_counts.get(k, 0) + int(_safe_float(c))
+            vsrcs = event.get("vol_sources")
+            if isinstance(vsrcs, dict):
+                for s, c in vsrcs.items():
+                    k = str(s) or "unknown"
+                    vol_source_counts[k] = vol_source_counts.get(k, 0) + int(_safe_float(c))
+
+        shadow_counts: dict[str, int] = {}
+        for e in shadow_ev:
+            r = str(e.get("reason", "unknown"))
+            shadow_counts[r] = shadow_counts.get(r, 0) + 1
+
+        recent_shadow_ev = _events_since(shadow_ev, QUALITY_WINDOW_SEC)
+        recent_scan_ev = _events_since(scan_ev, QUALITY_WINDOW_SEC)
+        recent_shadow_erased = sum(
+            1 for event in recent_shadow_ev if event.get("reason") == "ask_erased_edge"
+        )
+        recent_parse_attempted = sum(
+            int(_safe_float(event.get("parse_attempted"))) for event in recent_scan_ev
+        )
+        recent_parsed_markets = sum(
+            int(_safe_float(event.get("parsed_markets"))) for event in recent_scan_ev
+        )
+        mid_edge_candidates = sum(
+            int(_safe_float(event.get("mid_edge_candidates"))) for event in scan_ev
+        )
+
+        failed_counts: dict[str, int] = {}
+        for e in failed_ev:
+            s = str(e.get("side", "unknown"))
+            failed_counts[s] = failed_counts.get(s, 0) + 1
+
+        order_counts: dict[tuple[str, str], int] = {}
+        fill_ratios: list[float] = []
+        for e in order_ev:
+            side = str(e.get("side", "unknown"))
+            status = str(e.get("status", "unknown"))
+            order_counts[(side, status)] = order_counts.get((side, status), 0) + 1
+            req_usd = _safe_float(e.get("requested_usd"))
+            req_sh = _safe_float(e.get("requested_shares"))
+            fill_usd = _safe_float(e.get("filled_usd"))
+            fill_sh = _safe_float(e.get("filled_shares"))
+            if req_usd > 0:
+                fill_ratios.append(min(1.0, fill_usd / req_usd))
+            elif req_sh > 0:
+                fill_ratios.append(min(1.0, fill_sh / req_sh))
+
+        parsed_counts: dict[str, int] = {}
+        signal_book_counts: dict[str, int] = {}
+        signal_vol_counts: dict[str, int] = {}
+        parse_attempted = 0
+        parsed_markets = 0
+        for e in scan_ev:
+            parse_attempted += int(_safe_float(e.get("parse_attempted")))
+            parsed_markets += int(_safe_float(e.get("parsed_markets")))
+        for e in signal_ev:
+            if "parsed" in e:
+                p = "true" if bool(e.get("parsed")) else "false"
+                parsed_counts[p] = parsed_counts.get(p, 0) + 1
+            bs = e.get("book_source")
+            if bs is not None:
+                k = str(bs) or "unknown"
+                signal_book_counts[k] = signal_book_counts.get(k, 0) + 1
+            vs = e.get("vol_source")
+            if vs is not None:
+                k = str(vs) or "unknown"
+                signal_vol_counts[k] = signal_vol_counts.get(k, 0) + 1
+
+        pnls = [_safe_float(e.get("_effective_pnl", e.get("pnl"))) for e in effective_close]
+        slippages = [_safe_float(e.get("slippage")) for e in open_ev if e.get("slippage") is not None]
+        edges = [_safe_float(e.get("edge")) for e in open_ev if e.get("edge") is not None]
+        reason_counts: dict[str, int] = {}
+        pnl_by_asset: dict[str, float] = {}
+        pnl_by_weekday: dict[str, float] = {}
+        for e in effective_close:
+            r = str(e.get("reason", "unknown"))
+            reason_counts[r] = reason_counts.get(r, 0) + 1
+            pnl = _safe_float(e.get("_effective_pnl", e.get("pnl")))
+            asset = str(e.get("asset", "unknown"))
+            pnl_by_asset[asset] = pnl_by_asset.get(asset, 0.0) + pnl
+            ts = _parse_ts(e.get("ts"))
+            if ts is not None:
+                weekday = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%a")
+                pnl_by_weekday[weekday] = pnl_by_weekday.get(weekday, 0.0) + pnl
+
+        groups = {
+            "all": data,
+            "close": close,
+            "open": open_ev,
+            "order": order_ev,
+            "failed_order": failed_ev,
+            "shadow_quote": shadow_ev,
+            "signal_evaluation": signal_ev,
+            "scan_summary": scan_ev,
+            "effective_close": effective_close,
+            "recent_close": effective_close[-50:],
+            # pre-computed aggregations
+            "book_source_counts": book_source_counts,
+            "vol_source_counts": vol_source_counts,
+            "shadow_counts": shadow_counts,
+            "failed_counts": failed_counts,
+            "order_counts": order_counts,
+            "fill_ratios": fill_ratios,
+            "parsed_counts": parsed_counts,
+            "signal_book_counts": signal_book_counts,
+            "signal_vol_counts": signal_vol_counts,
+            "parse_attempted": parse_attempted,
+            "parsed_markets": parsed_markets,
+            "recent_shadow_count": len(recent_shadow_ev),
+            "recent_shadow_erased": recent_shadow_erased,
+            "recent_parse_attempted": recent_parse_attempted,
+            "recent_parsed_markets": recent_parsed_markets,
+            "mid_edge_candidates": mid_edge_candidates,
+            "pnls": pnls,
+            "slippages": slippages,
+            "edges": edges,
+            "reason_counts": reason_counts,
+            "pnl_by_asset": pnl_by_asset,
+            "pnl_by_weekday": pnl_by_weekday,
+        }
+        self._history_groups = groups
+        log.info("history cache refreshed: %d total events, %d close events", len(data), len(close))
+        return groups
 
     def collect(self):
         # --- Portfolio gauges ---
@@ -543,6 +757,7 @@ class TurtleQuantCollector:
         strategy, pos_file = STRATEGY, POSITIONS_FILE
         pos_path = os.path.join(self.state_dir, pos_file)
         hist_path = active_history_path(Path(self.state_dir))
+        history_groups = self._get_history_groups(hist_path)
         nav: float | None = None
         total_pnl: float | None = None
         positions: list[dict] = []
@@ -618,20 +833,9 @@ class TurtleQuantCollector:
             bot_log_age_g.add_metric([strategy], log_age)
 
         # ---- History file ----
-        try:
-            hist_data = load_history(Path(self.state_dir))
-        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-            log.warning("could not read history in %s: %s", self.state_dir, exc)
-            hist_data = None
-        if isinstance(hist_data, list):
-            close_events = [e for e in hist_data if e.get("event") == "close"]
-            open_events = [e for e in hist_data if e.get("event") == "open"]
-            order_events = [e for e in hist_data if e.get("event") == "order"]
-            failed_events = [e for e in hist_data if e.get("event") == "failed_order"]
-            shadow_quote_events = [e for e in hist_data if e.get("event") == "shadow_quote"]
-            signal_evaluation_events = [e for e in hist_data if e.get("event") == "signal_evaluation"]
-            scan_summary_events = [e for e in hist_data if e.get("event") == "scan_summary"]
-            effective_close_events = _effective_close_events(hist_data)
+        if history_groups is not None:
+            close_events = history_groups["close"]
+            effective_close_events = history_groups["effective_close"]
             hist_age = _file_age_sec(str(hist_path))
             if hist_age is not None:
                 state_file_age_g.add_metric([strategy, "history"], hist_age)
@@ -646,12 +850,12 @@ class TurtleQuantCollector:
             longest_drawdown_g.add_metric([strategy], drawdown["longest_sec"])
             max_drawdown_recovery_g.add_metric([strategy], drawdown["max_recovery_sec"])
 
-            # Trade statistics
+            # Trade statistics — all aggregations pre-computed in cache
             n_closed = len(close_events)
             closed_trades_g.add_metric([strategy], float(n_closed))
 
             if n_closed > 0:
-                pnls = [_safe_float(e.get("_effective_pnl", e.get("pnl"))) for e in effective_close_events]
+                pnls = history_groups["pnls"]
                 wins = sum(1 for p in pnls if p > 0)
                 winning_pnls = [p for p in pnls if p > 0]
                 losing_pnls = [p for p in pnls if p < 0]
@@ -673,187 +877,86 @@ class TurtleQuantCollector:
                 elif gross_wins > 0:
                     profit_factor_g.add_metric([strategy], gross_wins)
 
-                # Last trade age
                 last_ts = _parse_ts(close_events[-1].get("ts"))
                 if last_ts is not None:
                     last_trade_age_g.add_metric([strategy], time.time() - last_ts)
 
-                # Exit reasons
-                reason_counts: dict[str, int] = {}
-                for e in close_events:
-                    reason = str(e.get("reason", "unknown"))
-                    reason_counts[reason] = reason_counts.get(reason, 0) + 1
-                for reason, count in reason_counts.items():
+                for reason, count in history_groups["reason_counts"].items():
                     exit_reason_g.add_metric([strategy, reason], float(count))
-
-                pnl_by_asset: dict[str, float] = {}
-                pnl_by_weekday: dict[str, float] = {}
-                for e in effective_close_events:
-                    pnl = _safe_float(e.get("_effective_pnl", e.get("pnl")))
-                    asset = str(e.get("asset", "unknown"))
-                    pnl_by_asset[asset] = pnl_by_asset.get(asset, 0.0) + pnl
-                    ts = _parse_ts(e.get("ts"))
-                    if ts is not None:
-                        weekday = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%a")
-                        pnl_by_weekday[weekday] = pnl_by_weekday.get(weekday, 0.0) + pnl
-                for asset, pnl in pnl_by_asset.items():
+                for asset, pnl in history_groups["pnl_by_asset"].items():
                     pnl_by_asset_g.add_metric([strategy, asset], pnl)
-                for weekday, pnl in pnl_by_weekday.items():
+                for weekday, pnl in history_groups["pnl_by_weekday"].items():
                     pnl_by_weekday_g.add_metric([strategy, weekday], pnl)
 
-            # Avg edge at entry
-            edges = [e.get("edge") for e in open_events if e.get("edge") is not None]
+            edges = history_groups["edges"]
             if edges:
-                numeric_edges = [_safe_float(e) for e in edges]
-                avg_edge_g.add_metric([strategy], sum(numeric_edges) / len(numeric_edges))
+                avg_edge_g.add_metric([strategy], sum(edges) / len(edges))
 
-            slippages = [_safe_float(e.get("slippage")) for e in open_events if e.get("slippage") is not None]
+            slippages = history_groups["slippages"]
             if slippages:
                 avg_entry_slippage_g.add_metric([strategy], sum(slippages) / len(slippages))
 
-            fill_ratios: list[float] = []
-            order_counts: dict[tuple[str, str], int] = {}
-            for event in order_events:
-                side = str(event.get("side", "unknown"))
-                status = str(event.get("status", "unknown"))
-                order_counts[(side, status)] = order_counts.get((side, status), 0) + 1
-                requested_usd = _safe_float(event.get("requested_usd"))
-                requested_shares = _safe_float(event.get("requested_shares"))
-                filled_usd = _safe_float(event.get("filled_usd"))
-                filled_shares = _safe_float(event.get("filled_shares"))
-                if requested_usd > 0:
-                    fill_ratios.append(min(1.0, filled_usd / requested_usd))
-                elif requested_shares > 0:
-                    fill_ratios.append(min(1.0, filled_shares / requested_shares))
+            fill_ratios = history_groups["fill_ratios"]
             if fill_ratios:
                 avg_fill_ratio_g.add_metric([strategy], sum(fill_ratios) / len(fill_ratios))
-            for (side, status), count in order_counts.items():
+            for (side, status), count in history_groups["order_counts"].items():
                 order_count_g.add_metric([strategy, side, status], float(count))
 
-            failed_counts: dict[str, int] = {}
-            for event in failed_events:
-                side = str(event.get("side", "unknown"))
-                failed_counts[side] = failed_counts.get(side, 0) + 1
-            for side, count in failed_counts.items():
+            for side, count in history_groups["failed_counts"].items():
                 failed_orders_g.add_metric([strategy, side], float(count))
 
-            shadow_counts: dict[str, int] = {}
-            for event in shadow_quote_events:
-                reason = str(event.get("reason", "unknown"))
-                shadow_counts[reason] = shadow_counts.get(reason, 0) + 1
+            shadow_counts = history_groups["shadow_counts"]
             for reason, count in shadow_counts.items():
                 shadow_quote_g.add_metric([strategy, reason], float(count))
-            if shadow_quote_events:
+            if shadow_counts:
                 erased = shadow_counts.get("ask_erased_edge", 0)
-                ask_erased_edge_ratio_g.add_metric([strategy], erased / len(shadow_quote_events))
-            recent_shadow_quote_events = _events_since(shadow_quote_events, QUALITY_WINDOW_SEC)
-            if recent_shadow_quote_events:
-                recent_erased = sum(
-                    1 for event in recent_shadow_quote_events
-                    if event.get("reason") == "ask_erased_edge"
-                )
+                ask_erased_edge_ratio_g.add_metric([strategy], erased / sum(shadow_counts.values()))
+            recent_shadow_count = history_groups["recent_shadow_count"]
+            if recent_shadow_count > 0:
                 ask_erased_edge_ratio_recent_g.add_metric(
-                    [strategy], recent_erased / len(recent_shadow_quote_events)
+                    [strategy], history_groups["recent_shadow_erased"] / recent_shadow_count
                 )
 
-            book_source_counts: dict[str, int] = {}
-            for event in hist_data:
-                source = _history_source(event)
-                if source is None and event.get("book_source") is not None:
-                    source = str(event.get("book_source")) or "unknown"
-                if source is None:
-                    continue
-                book_source_counts[source] = book_source_counts.get(source, 0) + 1
-            for event in scan_summary_events:
-                sources = event.get("book_sources")
-                if not isinstance(sources, dict):
-                    continue
-                for source, count in sources.items():
-                    key = str(source) or "unknown"
-                    book_source_counts[key] = book_source_counts.get(key, 0) + int(_safe_float(count))
+            book_source_counts = history_groups["book_source_counts"]
             book_source_total = sum(book_source_counts.values())
             for source, count in book_source_counts.items():
                 order_book_source_g.add_metric([strategy, source], float(count))
                 if book_source_total > 0:
                     order_book_source_ratio_g.add_metric([strategy, source], count / book_source_total)
             if book_source_total > 0:
-                synthetic_count = sum(count for source, count in book_source_counts.items() if _is_synthetic_book_source(source))
+                synthetic_count = sum(c for s, c in book_source_counts.items() if _is_synthetic_book_source(s))
                 synthetic_book_ratio_g.add_metric([strategy], synthetic_count / book_source_total)
 
-            parsed_counts: dict[str, int] = {}
-            signal_book_counts: dict[str, int] = {}
-            signal_vol_counts: dict[str, int] = {}
-            parse_attempted = 0
-            parsed_markets = 0
-            for event in scan_summary_events:
-                parse_attempted += int(_safe_float(event.get("parse_attempted")))
-                parsed_markets += int(_safe_float(event.get("parsed_markets")))
-            recent_scan_summaries = _events_since(scan_summary_events, QUALITY_WINDOW_SEC)
-            recent_parse_attempted = sum(
-                int(_safe_float(event.get("parse_attempted")))
-                for event in recent_scan_summaries
-            )
-            recent_parsed_markets = sum(
-                int(_safe_float(event.get("parsed_markets")))
-                for event in recent_scan_summaries
-            )
-            for event in signal_evaluation_events:
-                if "parsed" in event:
-                    parsed = "true" if bool(event.get("parsed")) else "false"
-                    parsed_counts[parsed] = parsed_counts.get(parsed, 0) + 1
-                book_source = event.get("book_source")
-                if book_source is not None:
-                    source = str(book_source) or "unknown"
-                    signal_book_counts[source] = signal_book_counts.get(source, 0) + 1
-                vol_source = event.get("vol_source")
-                if vol_source is not None:
-                    source = str(vol_source) or "unknown"
-                    signal_vol_counts[source] = signal_vol_counts.get(source, 0) + 1
-            for parsed, count in parsed_counts.items():
+            for parsed, count in history_groups["parsed_counts"].items():
                 signal_evaluation_g.add_metric([strategy, parsed], float(count))
+            parse_attempted = history_groups["parse_attempted"]
+            parsed_markets = history_groups["parsed_markets"]
             if parse_attempted > 0:
                 parser_hit_rate_g.add_metric([strategy], parsed_markets / parse_attempted)
+            recent_parse_attempted = history_groups["recent_parse_attempted"]
             if recent_parse_attempted > 0:
                 parser_hit_rate_recent_g.add_metric(
-                    [strategy], recent_parsed_markets / recent_parse_attempted
+                    [strategy], history_groups["recent_parsed_markets"] / recent_parse_attempted
                 )
             mid_edge_candidates_g.add_metric(
-                [strategy],
-                sum(
-                    int(_safe_float(event.get("mid_edge_candidates")))
-                    for event in scan_summary_events
-                ),
+                [strategy], float(history_groups["mid_edge_candidates"])
             )
-            for source, count in signal_book_counts.items():
+            for source, count in history_groups["signal_book_counts"].items():
                 signal_book_source_g.add_metric([strategy, source], float(count))
-            for source, count in signal_vol_counts.items():
+            for source, count in history_groups["signal_vol_counts"].items():
                 parser_scanner_vol_source_g.add_metric([strategy, source], float(count))
 
-            vol_source_counts: dict[str, int] = {}
-            for event in hist_data:
-                vol_source = event.get("vol_source")
-                if vol_source is None:
-                    continue
-                source = str(vol_source) or "unknown"
-                vol_source_counts[source] = vol_source_counts.get(source, 0) + 1
-            for event in scan_summary_events:
-                sources = event.get("vol_sources")
-                if not isinstance(sources, dict):
-                    continue
-                for source, count in sources.items():
-                    key = str(source) or "unknown"
-                    vol_source_counts[key] = vol_source_counts.get(key, 0) + int(_safe_float(count))
+            vol_source_counts = history_groups["vol_source_counts"]
             vol_source_total = sum(vol_source_counts.values())
             for source, count in vol_source_counts.items():
                 vol_source_g.add_metric([strategy, source], float(count))
             if vol_source_total > 0:
-                fallback_count = sum(count for source, count in vol_source_counts.items() if _is_fallback_source(source))
+                fallback_count = sum(c for s, c in vol_source_counts.items() if _is_fallback_source(s))
                 realized_vol_fallback_ratio_g.add_metric([strategy], fallback_count / vol_source_total)
 
-            # Closed trades from state.
-            # Use sequential idx as the unique label so the same market traded
-            # multiple times doesn't produce duplicate label sets.
-            for idx, e in enumerate(effective_close_events):
+            # Last 50 closed trades as per-trade labeled metrics.
+            # idx label ensures unique label sets even if the same market trades repeatedly.
+            for idx, e in enumerate(history_groups["recent_close"]):
                 market_id = str(e.get("market_id", ""))
                 asset = str(e.get("asset", ""))
                 reason = str(e.get("reason", "unknown"))
