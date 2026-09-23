@@ -49,7 +49,7 @@ from pathlib import Path
 
 from prometheus_client import REGISTRY, MetricsHandler
 from prometheus_client.core import GaugeMetricFamily
-from turtlequant.history import active_history_path, load_history
+from turtlequant.history import active_history_path, read_legacy_events
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -246,25 +246,21 @@ class TurtleQuantCollector:
         self._history_groups: dict | None = None  # pre-filtered event lists
         # Incremental JSONL reading: static legacy JSON is cached forever;
         # JSONL is read incrementally by tracking byte offset.
-        self._legacy_events: list[dict] | None = None
+        self._legacy_events_cache: list[dict] | None = None
         self._jsonl_offset: int = 0
         self._jsonl_events: list[dict] = []
 
     def _read_legacy_once(self) -> list[dict]:
         """Parse the legacy .json file exactly once; return cached result thereafter."""
-        if self._legacy_events is not None:
-            return self._legacy_events
+        if self._legacy_events_cache is not None:
+            return self._legacy_events_cache
         path = Path(self.state_dir) / "turtlequant-history.json"
-        if not path.exists():
-            self._legacy_events = []
-            return self._legacy_events
         try:
-            data = json.loads(path.read_text())
-            self._legacy_events = data if isinstance(data, list) else []
-        except (OSError, json.JSONDecodeError) as exc:
+            self._legacy_events_cache = read_legacy_events(path)
+        except (OSError, ValueError) as exc:
             log.warning("could not read legacy history %s: %s", path, exc)
-            self._legacy_events = []
-        return self._legacy_events
+            self._legacy_events_cache = []
+        return self._legacy_events_cache
 
     def _read_jsonl_incremental(self, path: Path) -> list[dict]:
         """Append only new lines from the JSONL journal since the last read."""

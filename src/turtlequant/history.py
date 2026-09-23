@@ -27,7 +27,8 @@ def active_history_path(state_dir: Path) -> Path:
     return journal if journal.exists() else state_dir / HISTORY_JSON
 
 
-def _legacy_events(path: Path) -> list[dict[str, Any]]:
+def read_legacy_events(path: Path) -> list[dict[str, Any]]:
+    """Parse a legacy JSON-array history file. Returns [] if it doesn't exist."""
     if not path.exists():
         return []
     data = json.loads(path.read_text())
@@ -51,4 +52,7 @@ def _journal_events(path: Path) -> Iterator[dict[str, Any]]:
 
 def load_history(state_dir: Path) -> list[dict[str, Any]]:
     """Read legacy events followed by the append-only journal, if either exists."""
-    return [*_legacy_events(state_dir / HISTORY_JSON), *_journal_events(state_dir / HISTORY_JSONL)]
+    return [
+        *read_legacy_events(state_dir / HISTORY_JSON),
+        *_journal_events(state_dir / HISTORY_JSONL),
+    ]

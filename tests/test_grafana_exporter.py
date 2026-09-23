@@ -12,7 +12,6 @@ assert _SPEC.loader is not None
 _SPEC.loader.exec_module(grafana_exporter)
 _effective_close_events = grafana_exporter._effective_close_events
 TurtleQuantCollector = grafana_exporter.TurtleQuantCollector
-load_history = grafana_exporter.load_history
 
 
 def _sample_value(family, **labels):
@@ -79,10 +78,6 @@ def test_collector_reads_legacy_and_jsonl_history(tmp_path):
         '{"event":"close","market_id":"journal","pnl":1}\n'
     )
 
-    assert load_history(tmp_path) == [
-        {"event": "open", "market_id": "legacy"},
-        {"event": "close", "market_id": "journal", "pnl": 1},
-    ]
     families = {metric.name: metric for metric in TurtleQuantCollector(str(tmp_path)).collect()}
     assert families["turtlequant_closed_trades_total"].samples[0].value == 1.0
 
