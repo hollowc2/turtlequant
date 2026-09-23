@@ -136,6 +136,29 @@ docker compose -f docker-compose.yml -f docker-compose.live.yml up -d --build tu
 | Parser hit rate low | `parser_hit_rate < 75%` for 15m |
 | Realized-vol fallback high | `realized_vol_fallback_ratio > 30%` for 15m |
 
+## Ops scripts
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/monitor_turtlequant.py` | Live terminal dashboard: open positions with reprice edge, recent events, closed-position summary |
+| `scripts/calibrate_turtlequant.py` | Validates `probability_engine` model calibration against historical OHLCV (Brier score / RMSE) — not live trading |
+| `scripts/migrate_pusd_v2.py` | One-time USDC.e → pUSD collateral migration (see [Live trading prep](#live-trading-prep-clob-v2)) |
+| `scripts/derive_clob_api_creds.py` | Derives CLOB API credentials from the wallet private key |
+| `scripts/reconcile_nav.py` | Compares bookkeeping NAV to actual CLOB balance (see [NAV reconciliation](#5-nav-reconciliation)) |
+
+```bash
+# Live dashboard, one-shot or auto-refreshing
+uv run --script scripts/monitor_turtlequant.py
+uv run --script scripts/monitor_turtlequant.py --live --interval 15
+uv run --script scripts/monitor_turtlequant.py --state-dir /opt/turtlequant/state/live-state
+
+# Calibration check before raising live risk or after a probability_engine change
+uv run python scripts/calibrate_turtlequant.py --asset btc --years 3
+uv run python scripts/calibrate_turtlequant.py --asset eth --years 5 --plot
+```
+
+Deploy threshold for calibration: Brier score < 0.25 **and** calibration RMSE < 0.05.
+
 ## Phase 1 shadow soak
 
 Before live trading, run TurtleQuant in shadow mode long enough to cover normal market discovery, pricing, and order-book paths:
