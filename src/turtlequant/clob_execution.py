@@ -530,10 +530,10 @@ def _parse_order_response(
     if taking <= 0 or making <= 0:
         raise RuntimeError("matched order response has no positive fill amounts")
     if side == OrderSide.BUY:
-        filled_usd = making
+        filled_usd = min(requested_usd, making)
         filled_shares = taking
     else:
-        filled_shares = making
+        filled_shares = min(requested_shares, making)
         filled_usd = taking
     avg_price = filled_usd / filled_shares if filled_shares > 0 else 0.0
     return FillEstimate(
