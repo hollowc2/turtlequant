@@ -16,6 +16,7 @@ from typing import Any
 import requests
 
 from turtlequant.http import REQUEST_TIMEOUT, retrying_session
+from turtlequant.market_parser import _ASSET_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -328,7 +329,10 @@ class MarketScanner:
         # Asset filter — only apply if assets list was provided
         if self.assets:
             q = market.question.lower()
-            if not any(a in q for a in self.assets):
+            if not any(
+                canonical in self.assets and alias in q
+                for alias, canonical in _ASSET_MAP.items()
+            ):
                 return False
         return True
 
