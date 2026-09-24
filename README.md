@@ -120,7 +120,7 @@ Runtime state is outside this repo:
 
 | Path | Meaning |
 |------|---------|
-| `/opt/polymarket/app/turtlequant` | Source and compose files |
+| `/opt/turtlequant-app` | Source and compose files (standalone checkout of this repo) |
 | `/opt/turtlequant/state` | Active shadow-mode positions, history, and bot log |
 | `/opt/turtlequant/state/live-state` | Separate live-mode state when `docker-compose.live.yml` is used |
 | `/opt/polymarket/state` | Other `crypto_up_or_down` bot state, not TurtleQuant runtime state |

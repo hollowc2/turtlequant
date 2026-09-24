@@ -3,10 +3,15 @@
 ## VPS layout
 
 ```bash
-# From this repo directory (/opt/polymarket/app/turtlequant)
+# First-time setup: a standalone checkout of this repo
+git clone https://github.com/hollowc2/turtlequant.git /opt/turtlequant-app
+cd /opt/turtlequant-app
 ./scripts/setup-vps.sh
 cp .env.example .env   # fill secrets on the VPS only
 docker compose up -d --build
+
+# Updating
+cd /opt/turtlequant-app && git pull --ff-only && docker compose up -d --build
 ```
 
 | Path | Purpose |
@@ -14,11 +19,12 @@ docker compose up -d --build
 | `/opt/turtlequant/state` | Positions, history, bot log (bind-mounted) |
 | `/opt/turtlequant/state/live-state` | Separate live positions, history, bot log |
 | `/opt/turtlequant/data` | Calibration / auxiliary data |
-| `/opt/polymarket/app/turtlequant` | Deploy source (compose file lives here) |
+| `/opt/turtlequant-app` | Deploy source: bot, exporter and performance-page cron (compose file lives here) |
 | `/opt/polymarket/state` | Other Polymarket bots; not TurtleQuant runtime state |
 
-Old repo-local samples under `/opt/polymarket/app/crypto_up_or_down/state/turtlequant`
-are not the active TurtleQuant state. Check `/opt/turtlequant/state` for the running
+`/opt/polymarket/app/turtlequant` is the retired monorepo copy the bot ran from until
+2026-09-24; it is no longer deployed. Old repo-local samples under
+`/opt/polymarket/app/crypto_up_or_down/state/turtlequant` are not the active TurtleQuant state. Check `/opt/turtlequant/state` for the running
 bot unless the live override is explicitly in use.
 
 `monitoring_net` must exist before `docker compose up` (created by `/opt/monitoring` stack or `setup-vps.sh`).
@@ -53,7 +59,7 @@ TurtleQuant uses `py-clob-client-v2` (pUSD collateral). Wallet USDC.e + V1 excha
 ### 2. Migrate collateral (USDC.e → pUSD)
 
 ```bash
-cd /opt/polymarket/app/turtlequant
+cd /opt/turtlequant-app
 set -a && source .env && set +a
 
 uv run scripts/migrate_pusd_v2.py --dry-run   # review plan
@@ -164,13 +170,10 @@ Deploy threshold for calibration: Brier score < 0.25 **and** calibration RMSE < 
 `scripts/generate_performance_page.py` renders <https://billybitcoin.cloud/turtlequant/>
 (equity curve, drawdown, return distribution, trade metrics, open positions, trade log)
 from the shadow state and writes it straight into the site's web root. It runs hourly
-from `billy`'s crontab, out of a dedicated checkout of this repo at `/opt/turtlequant-web`
-(the shadow bot itself still runs from the monorepo checkout at `/opt/polymarket/app/turtlequant`):
+from `billy`'s crontab, out of the same `/opt/turtlequant-app` checkout the bot runs from:
 
 ```bash
-# first-time setup / update
-git clone https://github.com/hollowc2/turtlequant.git /opt/turtlequant-web   # or: git -C /opt/turtlequant-web pull
-cd /opt/turtlequant-web && uv sync
+cd /opt/turtlequant-app
 crontab -l 2>/dev/null | grep -v generate_performance_page | cat - scripts/performance_page.cron | crontab -
 
 # one-off run / preview elsewhere
@@ -178,7 +181,7 @@ uv run python scripts/generate_performance_page.py
 uv run python scripts/generate_performance_page.py --output /tmp/turtlequant/index.html
 ```
 
-Output goes to `/opt/turtlequant-web/performance-page.log`, outside the web root
+Output goes to `/opt/turtlequant-app/performance-page.log`, outside the web root
 (`/opt/turtlequant/state` is root-owned, so the log cannot live there).
 
 `--mode` only changes the page's badge (`shadow` / `paper` / `live`); it must match
@@ -198,7 +201,7 @@ redeploy it. Otherwise the browser silently refuses the script and the charts va
 Before live trading, run TurtleQuant in shadow mode long enough to cover normal market discovery, pricing, and order-book paths:
 
 ```bash
-cd /opt/polymarket/app/turtlequant
+cd /opt/turtlequant-app
 docker compose up -d --build turtlequant-bot turtlequant-grafana-exporter
 docker compose logs -f turtlequant-bot
 ```
@@ -231,7 +234,7 @@ Promotion gate:
 ## Rollback
 
 ```bash
-cd /opt/polymarket/app/turtlequant
+cd /opt/turtlequant-app
 docker compose down
 
 # Restore last known-good positions snapshot
