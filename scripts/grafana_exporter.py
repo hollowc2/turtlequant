@@ -49,7 +49,7 @@ from pathlib import Path
 
 from prometheus_client import REGISTRY, MetricsHandler
 from prometheus_client.core import GaugeMetricFamily
-from turtlequant.history import active_history_path, read_legacy_events
+from turtlequant.history import active_history_path, effective_close_pnl, read_legacy_events
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -61,9 +61,7 @@ STRATEGY = "turtlequant"
 POSITIONS_FILE = "turtlequant-positions.json"
 BOT_LOG_FILE = "turtlequant-bot.log"
 
-# Keep this aligned with turtlequant.position_manager.TAKER_FEE_RATE. The
-# exporter uses it only to normalize legacy history rows that recorded flat
-# closes as zero before fee-adjusted P&L was persisted.
+# Flat taker rate used to discount open-position marks for an estimated exit fee.
 TAKER_FEE_RATE = 0.003
 QUALITY_WINDOW_SEC = 15 * 60
 
@@ -140,7 +138,6 @@ def _effective_close_events(history_events: list[dict]) -> list[dict]:
             continue
 
         close_event = dict(event)
-        recorded_pnl = _safe_float(close_event.get("pnl"))
         matching_open = None
         queue = open_queues.get(market_id)
         if queue:
@@ -148,20 +145,7 @@ def _effective_close_events(history_events: list[dict]) -> list[dict]:
             close_event["_opened_ts"] = matching_open.get("ts")
             close_event["_question"] = close_event.get("question") or matching_open.get("question")
 
-        if matching_open is not None and recorded_pnl == 0.0:
-            entry_price = _safe_float(matching_open.get("yes_price"))
-            exit_price = _safe_float(close_event.get("yes_price", close_event.get("exit_price")))
-            size_usd = _safe_float(matching_open.get("size_usd"))
-            if entry_price > 0 and exit_price >= 0 and size_usd > 0:
-                tokens = size_usd / entry_price
-                entry_fee = size_usd * TAKER_FEE_RATE
-                exit_fee = tokens * exit_price * TAKER_FEE_RATE
-                close_event["_effective_pnl"] = (exit_price - entry_price) * tokens - entry_fee - exit_fee
-            else:
-                close_event["_effective_pnl"] = recorded_pnl
-        else:
-            close_event["_effective_pnl"] = recorded_pnl
-
+        close_event["_effective_pnl"] = effective_close_pnl(matching_open, close_event)
         closes.append(close_event)
 
     return closes
