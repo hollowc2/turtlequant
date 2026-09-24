@@ -164,10 +164,13 @@ Deploy threshold for calibration: Brier score < 0.25 **and** calibration RMSE < 
 `scripts/generate_performance_page.py` renders <https://billybitcoin.cloud/turtlequant/>
 (equity curve, drawdown, return distribution, trade metrics, open positions, trade log)
 from the shadow state and writes it straight into the site's web root. It runs hourly
-from host cron:
+from `billy`'s crontab, out of a dedicated checkout of this repo at `/opt/turtlequant-web`
+(the shadow bot itself still runs from the monorepo checkout at `/opt/polymarket/app/turtlequant`):
 
 ```bash
-cd /opt/polymarket/app/turtlequant
+# first-time setup / update
+git clone https://github.com/hollowc2/turtlequant.git /opt/turtlequant-web   # or: git -C /opt/turtlequant-web pull
+cd /opt/turtlequant-web && uv sync
 crontab -l 2>/dev/null | grep -v generate_performance_page | cat - scripts/performance_page.cron | crontab -
 
 # one-off run / preview elsewhere
@@ -175,9 +178,8 @@ uv run python scripts/generate_performance_page.py
 uv run python scripts/generate_performance_page.py --output /tmp/turtlequant/index.html
 ```
 
-Install the cron as the user that can write `/var/www/billybitcoin.cloud/html/turtlequant/`
-and read `/opt/turtlequant/state`. Output goes to `/opt/turtlequant/state/performance-page.log`,
-outside the web root.
+Output goes to `/opt/turtlequant-web/performance-page.log`, outside the web root
+(`/opt/turtlequant/state` is root-owned, so the log cannot live there).
 
 `--mode` only changes the page's badge (`shadow` / `paper` / `live`); it must match
 `--state-dir`. To publish live results instead, point at `/opt/turtlequant/state/live-state`
