@@ -9,7 +9,7 @@ TurtleQuant uses py-clob-client-v2, which tracks pUSD balance/allowance — not 
 USDC.e on V1 exchange contracts. Run this once before live trading.
 
 Usage:
-    cd /opt/polymarket/app/turtlequant
+    cd /opt/turtlequant-app
     set -a && source .env && set +a
     uv run scripts/migrate_pusd_v2.py --dry-run
     uv run scripts/migrate_pusd_v2.py

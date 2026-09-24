@@ -1,11 +1,10 @@
 # TurtleQuant public performance page — hourly, at :07 past (crypto trades 24/7).
 # Writes https://billybitcoin.cloud/turtlequant/ from the shadow-mode state.
 #
-# Runs from its own checkout of this repo at /opt/turtlequant-web. The shadow bot
-# itself still runs from the Polymarket monorepo checkout at
-# /opt/polymarket/app/turtlequant; leave that one alone. The log lives in the
-# checkout, outside the web root, because /opt/turtlequant/state is root-owned.
+# Runs from /opt/turtlequant-app, the same checkout the bot's containers are built
+# from. The log lives in the checkout, outside the web root, because
+# /opt/turtlequant/state is root-owned.
 #
 # Install as billy (owns /var/www/billybitcoin.cloud/html; state files are world-readable):
 #   crontab -l 2>/dev/null | grep -v generate_performance_page | cat - scripts/performance_page.cron | crontab -
-7 * * * * cd /opt/turtlequant-web && /home/billy/.local/bin/uv run python scripts/generate_performance_page.py --state-dir /opt/turtlequant/state --mode shadow >> /opt/turtlequant-web/performance-page.log 2>&1
+7 * * * * cd /opt/turtlequant-app && /home/billy/.local/bin/uv run python scripts/generate_performance_page.py --state-dir /opt/turtlequant/state --mode shadow >> /opt/turtlequant-app/performance-page.log 2>&1
