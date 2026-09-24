@@ -276,17 +276,24 @@ class ExecutionClient:
     def get_market_fee_rate(self, market_id: str, token_id: str = "") -> float | None:
         """Return the market's taker fee rate as a fraction, or None if unknown.
 
-        SDK releases expose this either as ``get_fee_rate`` (basis points) or
-        market-info data.  Unknown fees must be handled by the entry gate, not
-        replaced with an old global default.
+        Prefer ``get_clob_market_info``/``getClobMarketInfo``: its ``fd`` block
+        (``rate * 10**-exponent``) is the documented fee representation and is
+        verified against the live CLOB API. ``get_fee_rate_bps``/``get_fee_rate``
+        return a raw ``base_fee`` scalar whose unit does not match ordinary
+        basis points (dividing by 10_000 was found to overstate real fees by
+        ~14x against the live API — e.g. base_fee=1000 there while the same
+        market's fd block reports a true rate of 0.007), so those are kept only
+        as a last-resort fallback for SDKs that don't expose market info.
+        Unknown fees must be handled by the entry gate, not replaced with an
+        old global default.
         """
         if self._client is None:
             return None
         lookups = (
-            ("get_fee_rate_bps", token_id or market_id),
-            ("get_fee_rate", token_id or market_id),
             ("get_clob_market_info", market_id),
             ("getClobMarketInfo", market_id),
+            ("get_fee_rate_bps", token_id or market_id),
+            ("get_fee_rate", token_id or market_id),
         )
         for method_name, identifier in lookups:
             if not identifier:

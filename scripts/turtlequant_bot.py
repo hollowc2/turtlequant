@@ -924,12 +924,17 @@ def main() -> None:
                         if fill_estimate.filled_shares > 0
                         else 0.0
                     )
+                    # Logged for diagnostics only — not used to gate or size entries.
+                    # A 1.645*RMSE haircut here (on top of entry_threshold, which
+                    # already encodes the required edge) was found to silently
+                    # raise the effective entry bar from 5% to ~13.25%, which is
+                    # what collapsed trade frequency starting 2026-07-15.
                     conservative_prob = max(
                         0.0, model_prob - 1.645 * args.calibration_rmse
                     )
-                    entry_edge = conservative_prob - executable_entry_price
+                    entry_edge = model_prob - executable_entry_price
                     size_usd = pos_mgr.kelly_size(
-                        entry_edge, conservative_prob, executable_entry_price
+                        entry_edge, model_prob, executable_entry_price
                     )
                     fill_estimate = estimate_buy_fill(book, size_usd)
                     if size_usd < 1.0 or not fill_estimate.complete:
