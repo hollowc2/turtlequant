@@ -56,3 +56,32 @@ def load_history(state_dir: Path) -> list[dict[str, Any]]:
         *read_legacy_events(state_dir / HISTORY_JSON),
         *_journal_events(state_dir / HISTORY_JSONL),
     ]
+
+
+# Legacy history rows recorded flat closes as zero P&L before fee-adjusted P&L
+# was persisted. Those rows predate the current crypto fee schedule, so they are
+# normalised with the flat taker rate that applied at the time.
+LEGACY_TAKER_FEE_RATE = 0.003
+
+
+def _float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def effective_close_pnl(open_event: dict[str, Any] | None, close_event: dict[str, Any]) -> float:
+    """Realised P&L of a close event, fee-adjusting legacy zero-P&L rows."""
+    recorded = _float(close_event.get("pnl"))
+    if open_event is None or recorded != 0.0:
+        return recorded
+    entry_price = _float(open_event.get("yes_price"))
+    exit_price = _float(close_event.get("yes_price", close_event.get("exit_price")))
+    size_usd = _float(open_event.get("size_usd"))
+    if entry_price <= 0 or exit_price < 0 or size_usd <= 0:
+        return recorded
+    tokens = size_usd / entry_price
+    entry_fee = size_usd * LEGACY_TAKER_FEE_RATE
+    exit_fee = tokens * exit_price * LEGACY_TAKER_FEE_RATE
+    return (exit_price - entry_price) * tokens - entry_fee - exit_fee

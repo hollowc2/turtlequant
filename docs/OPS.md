@@ -159,6 +159,38 @@ uv run python scripts/calibrate_turtlequant.py --asset eth --years 5 --plot
 
 Deploy threshold for calibration: Brier score < 0.25 **and** calibration RMSE < 0.05.
 
+## Public performance page
+
+`scripts/generate_performance_page.py` renders <https://billybitcoin.cloud/turtlequant/>
+(equity curve, drawdown, return distribution, trade metrics, open positions, trade log)
+from the shadow state and writes it straight into the site's web root. It runs hourly
+from host cron:
+
+```bash
+cd /opt/polymarket/app/turtlequant
+crontab -l 2>/dev/null | grep -v generate_performance_page | cat - scripts/performance_page.cron | crontab -
+
+# one-off run / preview elsewhere
+uv run python scripts/generate_performance_page.py
+uv run python scripts/generate_performance_page.py --output /tmp/turtlequant/index.html
+```
+
+Install the cron as the user that can write `/var/www/billybitcoin.cloud/html/turtlequant/`
+and read `/opt/turtlequant/state`. Output goes to `/opt/turtlequant/state/performance-page.log`,
+outside the web root.
+
+`--mode` only changes the page's badge (`shadow` / `paper` / `live`); it must match
+`--state-dir`. To publish live results instead, point at `/opt/turtlequant/state/live-state`
+with `--mode live`.
+
+The page's one inline script is allowed by its sha256 hash in the site's CSP
+(`deploy/nginx/snippets/security-headers.conf` in the billybitcoin.cloud repo). Data
+changes never affect that hash, but **any edit to `_PAGE_SCRIPT` in
+`src/turtlequant/performance_page.py` does**: regenerate the page, copy it into the site
+repo as `turtlequant/index.html` (render it from an empty `--state-dir` so no numbers
+are committed), run that repo's `tools/gen-csp-hashes.py`, update the snippet and
+redeploy it. Otherwise the browser silently refuses the script and the charts vanish.
+
 ## Phase 1 shadow soak
 
 Before live trading, run TurtleQuant in shadow mode long enough to cover normal market discovery, pricing, and order-book paths:
