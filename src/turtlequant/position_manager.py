@@ -38,6 +38,10 @@ DEFAULT_STATE_DIR = Path("state/turtlequant")
 DEFAULT_POSITIONS_FILE = DEFAULT_STATE_DIR / "turtlequant-positions.json"
 
 
+class StatePersistenceError(RuntimeError):
+    """State could not be written. Trading must stop rather than diverge from disk."""
+
+
 @dataclass
 class Position:
     """An open position on a Polymarket YES token."""
@@ -464,7 +468,7 @@ class PositionManager:
                 os.fsync(f.fileno())
             os.replace(tmp_file, self.positions_file)
         except OSError as exc:
-            raise RuntimeError("position state was not persisted; halt trading") from exc
+            raise StatePersistenceError("position state was not persisted; halt trading") from exc
 
 
 def make_position(

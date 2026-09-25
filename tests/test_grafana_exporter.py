@@ -291,3 +291,25 @@ def test_collector_exports_all_closed_trades(tmp_path):
         asset="btc",
         reason="stop",
     ) == 1.0
+
+
+def test_entry_gate_metrics_use_bounded_reason_labels(tmp_path):
+    (tmp_path / "turtlequant-risk.json").write_text(
+        '{"high_water":1000,"consecutive_failures":4,'
+        '"entry_halt":"4 consecutive broker failures (HTTP 500 for order abc)",'
+        '"entry_halt_since":"2026-09-24T00:00:00+00:00"}'
+    )
+
+    families = {family.name: family for family in TurtleQuantCollector(str(tmp_path)).collect()}
+
+    assert _sample_value(families["turtlequant_entries_halted"], reason="broker_failures") == 1.0
+    assert _sample_value(families["turtlequant_consecutive_broker_failures"]) == 4.0
+    assert _sample_value(families["turtlequant_entry_halt_age_sec"]) > 0
+
+
+def test_halt_category_maps_every_gate_reason():
+    assert grafana_exporter.halt_category("") == ""
+    assert grafana_exporter.halt_category("15% drawdown") == "drawdown"
+    assert grafana_exporter.halt_category("data errors in last scan (5/9 markets failed)") == "data_errors"
+    assert grafana_exporter.halt_category("stale market data") == "stale_data"
+    assert grafana_exporter.halt_category("something new") == "other"

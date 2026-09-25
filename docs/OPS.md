@@ -139,6 +139,7 @@ docker compose -f docker-compose.yml -f docker-compose.live.yml up -d --build tu
 | Bot stale | `turtlequant_bot_log_age_sec > 180` for 3m |
 | No scans | log age > 120s for 5m |
 | Failed orders | >3 `failed_order` events in 15m |
+| Entries halted | `turtlequant_entries_halted == 1` for 15m (label `reason`: broker_failures, data_errors, stale_data, drawdown, daily_loss, halt_file) |
 | NAV drawdown | `current_drawdown_pct > 15%` for 15m |
 | Exporter down | `exporter_scrape_success == 0` for 5m |
 | No shadow quotes | no `shadow_quote` events for 10m |
@@ -230,6 +231,25 @@ Promotion gate:
 3. Synthetic-book and realized-vol fallback ratios are understood and acceptable for the current market set.
 4. Parser misses are reviewed before raising live risk.
 5. Failed-order and stale-exporter alerts are quiet.
+
+## Entry gate and circuit breaker
+
+New entries are blocked (exits always run) by, in order: a `HALT` file in the state dir,
+a 15% drawdown from the high-water mark, the daily loss limit, the broker breaker, the
+data gate, and stale market data.
+
+- **Broker breaker:** counts only orders that reached the broker and failed or came
+  back ambiguous. Three in a row halts entries for 30 minutes; then one retry is
+  allowed, and another failure halts again. A filled order resets it. A sell with no
+  bids is a liquidity miss (`[EXIT_UNFILLED]`), not a broker failure.
+- **Data gate:** per-market or reprice exceptions never touch the broker counter. The
+  gate closes only when at least 3 markets, and at least half the markets attempted,
+  failed in the last scan. It reopens after one clean scan.
+- Gate changes are logged once (`[ENTRY_HALTED]` / `[ENTRY_RESUMED]`), written as an
+  `entry_gate` history event and persisted to `turtlequant-risk.json` (`entry_halt`),
+  which the exporter turns into `turtlequant_entries_halted{reason}` and the
+  `TurtleQuantEntriesHalted` alert. The dashboard shows it as **Entry Gate**.
+- A failure to write positions, risk or history state stops the bot (fail closed).
 
 ## Healthchecks
 

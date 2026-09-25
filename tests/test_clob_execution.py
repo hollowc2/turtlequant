@@ -307,3 +307,37 @@ def test_market_fee_supports_legacy_market_info_scalar():
     fake_client.getClobMarketInfo = lambda _condition_id: {"feeRate": "1000"}
 
     assert ExecutionClient(mode="paper", clob_client=fake_client).get_market_fee("condition") == FeeSchedule(0.1)
+
+
+def test_paper_sell_without_bids_is_not_a_broker_failure():
+    book = OrderBook(token_id="yes", asks=[BookLevel(0.45, 100)])
+
+    result = ExecutionClient(mode="paper", clob_client=MagicMock()).sell_yes("yes", 10.0, book)
+
+    assert result.success is False
+    assert result.broker_failure is False
+
+
+def test_live_pre_send_rejection_is_not_a_broker_failure():
+    book = OrderBook(token_id="yes", asks=[BookLevel(0.45, 100)], source="synthetic")
+
+    result = ExecutionClient(mode="live", allow_live=True, clob_client=MagicMock()).buy_yes(
+        "yes", 10.0, book, max_price=0.50
+    )
+
+    assert result.sent is False
+    assert result.broker_failure is False
+
+
+def test_live_submission_exception_is_an_ambiguous_broker_failure():
+    book = OrderBook(token_id="yes", bids=[BookLevel(0.40, 100)], asks=[BookLevel(0.45, 100)])
+    fake_client = MagicMock()
+    fake_client.create_and_post_market_order.side_effect = TimeoutError("read timed out")
+
+    result = ExecutionClient(mode="live", allow_live=True, clob_client=fake_client).buy_yes(
+        "yes", 10.0, book, max_price=0.50
+    )
+
+    assert result.status == "pending_reconciliation"
+    assert result.sent is True
+    assert result.broker_failure is True

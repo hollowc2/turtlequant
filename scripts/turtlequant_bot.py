@@ -50,7 +50,7 @@ from turtlequant.market_scanner import MarketScanner
 from turtlequant.notifications import NotificationQueue
 from turtlequant.order_intents import OrderIntentLedger
 from turtlequant.order_reconciliation import ReconciliationError, reconcile_outstanding
-from turtlequant.position_manager import PositionManager, make_position
+from turtlequant.position_manager import PositionManager, StatePersistenceError, make_position
 from turtlequant.probability_engine import compute_probability
 from turtlequant.history import append_history
 from turtlequant.risk_controls import RiskControls
@@ -385,7 +385,33 @@ def main() -> None:
 
     def record(entry: dict[str, object]) -> None:
         if persist:
-            append_history(state_dir, entry)
+            try:
+                append_history(state_dir, entry)
+            except OSError as exc:
+                raise StatePersistenceError(f"history was not persisted: {exc}") from exc
+
+    def check_entry_gate(market_data_at: datetime | None) -> bool:
+        """Evaluate the entry gate; log and record only when its state changes."""
+        allowed, reason = risk_controls.entries_allowed(
+            pos_mgr.marked_equity(),
+            max_daily_loss=args.max_daily_loss,
+            market_data_at=market_data_at,
+            max_market_data_age_secs=args.max_market_data_age_secs,
+        )
+        if risk_controls.record_entry_gate(reason):
+            if reason:
+                logger.warning("[ENTRY_HALTED] %s", reason)
+            else:
+                logger.info("[ENTRY_RESUMED] entry gate open")
+            record(
+                {
+                    "event": "entry_gate",
+                    "halted": bool(reason),
+                    "reason": reason,
+                    "ts": datetime.now(UTC).isoformat(),
+                }
+            )
+        return allowed
 
     set_corpus_file(state_dir / "unclassified_markets.jsonl" if persist else None)
 
@@ -420,6 +446,7 @@ def main() -> None:
 
     last_scan_time = 0.0
     last_reprice_time = 0.0
+    reprice_errors = 0  # data-plane errors since the last scan summary
     recently_closed: dict[
         str, datetime
     ] = {}  # market_id → close time (cooldown tracker)
@@ -585,17 +612,28 @@ def main() -> None:
                         )
                         if exit_intent_id is not None:
                             intent_ledger.submitted(exit_intent_id, exit_result.order_id, exit_result.raw)
-                        record(
-                            {
-                                "event": "order",
-                                "market_id": pos.market_id,
-                                "asset": pos.asset,
-                                "reason": decision.reason or "edge_reversed",
-                                **exit_result.to_history(),
-                                "ts": datetime.now(UTC).isoformat(),
-                            },
-                        )
+                        if exit_result.sent or exit_result.success:
+                            record(
+                                {
+                                    "event": "order",
+                                    "market_id": pos.market_id,
+                                    "asset": pos.asset,
+                                    "reason": decision.reason or "edge_reversed",
+                                    **exit_result.to_history(),
+                                    "ts": datetime.now(UTC).isoformat(),
+                                },
+                            )
                         if not exit_result.success:
+                            if not exit_result.broker_failure:
+                                # No bids to sell into: a liquidity outcome, not a broker fault.
+                                # Keep holding and retry on the next reprice.
+                                logger.info(
+                                    "[EXIT_UNFILLED] %s %s: %s",
+                                    pos.market_id[:16],
+                                    decision.reason,
+                                    exit_result.error or "no executable depth",
+                                )
+                                continue
                             risk_controls.record_failure(
                                 exit_result.error or exit_result.status
                             )
@@ -690,9 +728,12 @@ def main() -> None:
                             decision.entry_edge,
                             decision.hours_to_expiry or 0.0,
                         )
+                except StatePersistenceError:
+                    raise
                 except Exception as exc:
+                    # Data-plane error: logged and counted, never a broker failure.
                     logger.warning("Reprice failed for %s: %s", pos.market_id[:16], exc)
-                    risk_controls.record_failure(str(exc))
+                    reprice_errors += 1
 
             last_reprice_time = now
 
@@ -703,8 +744,8 @@ def main() -> None:
                 markets = scanner.get_active_markets()
                 logger.info("Scan: %d markets found", len(markets))
             except Exception as exc:
+                # No markets means no entries; the breaker is for broker faults.
                 logger.warning("Market scan failed: %s", exc)
-                risk_controls.record_failure(str(exc))
                 time.sleep(5)
                 continue
 
@@ -718,6 +759,7 @@ def main() -> None:
                 "asset_skipped": 0,
                 "spot_missing": 0,
                 "implausible_strike": 0,
+                "market_errors": 0,
                 "vol_sources": {},
                 "mid_edge_candidates": 0,
                 "executable_edge_candidates": 0,
@@ -737,6 +779,7 @@ def main() -> None:
             # Independent asset marks are bounded and fetched concurrently.
             latest_spots = fetch_latest_closes(ASSET_TO_SYMBOL[a] for a in assets)
             spots = {asset: latest_spots.get(ASSET_TO_SYMBOL[asset]) for asset in assets}
+            check_entry_gate(scan_started_at)
 
             for market in markets:
                 if not running:
@@ -840,18 +883,29 @@ def main() -> None:
                                 )
                                 if exit_intent_id is not None:
                                     intent_ledger.submitted(exit_intent_id, exit_result.order_id, exit_result.raw)
-                                record(
-                                    {
-                                        "event": "order",
-                                        "market_id": market.market_id,
-                                        "asset": params.asset,
-                                        "reason": decision.reason
-                                        or "edge_reversed",
-                                        **exit_result.to_history(),
-                                        "ts": datetime.now(UTC).isoformat(),
-                                    },
-                                )
+                                if exit_result.sent or exit_result.success:
+                                    record(
+                                        {
+                                            "event": "order",
+                                            "market_id": market.market_id,
+                                            "asset": params.asset,
+                                            "reason": decision.reason
+                                            or "edge_reversed",
+                                            **exit_result.to_history(),
+                                            "ts": datetime.now(UTC).isoformat(),
+                                        },
+                                    )
                                 if not exit_result.success:
+                                    if not exit_result.broker_failure:
+                                        # No bids to sell into: a liquidity outcome, not a broker fault.
+                                        # Keep holding and retry on the next reprice.
+                                        logger.info(
+                                            "[EXIT_UNFILLED] %s %s: %s",
+                                            pos.market_id[:16],
+                                            decision.reason,
+                                            exit_result.error or "no executable depth",
+                                        )
+                                        continue
                                     risk_controls.record_failure(
                                         exit_result.error or exit_result.status
                                     )
@@ -951,14 +1005,7 @@ def main() -> None:
                         )
                         continue
 
-                    entries_allowed, halt_reason = risk_controls.entries_allowed(
-                        pos_mgr.marked_equity(),
-                        max_daily_loss=args.max_daily_loss,
-                        market_data_at=scan_started_at,
-                        max_market_data_age_secs=args.max_market_data_age_secs,
-                    )
-                    if not entries_allowed:
-                        logger.warning("[ENTRY_HALTED] %s", halt_reason)
+                    if not check_entry_gate(scan_started_at):
                         continue
 
                     if edge < args.entry_threshold:
@@ -1117,9 +1164,10 @@ def main() -> None:
                         },
                     )
                     if not entry_result.success:
-                        risk_controls.record_failure(
-                            entry_result.error or entry_result.status
-                        )
+                        if entry_result.broker_failure:
+                            risk_controls.record_failure(
+                                entry_result.error or entry_result.status
+                            )
                         record(
                             {
                                 "event": "failed_order",
@@ -1198,12 +1246,20 @@ def main() -> None:
                         sigma=sigma,
                     )
 
+                except StatePersistenceError:
+                    raise
                 except Exception as exc:
                     logger.warning(
                         "Market processing error (%s): %s", market.market_id[:16], exc
                     )
-                    risk_controls.record_failure(str(exc))
+                    _inc_scan_stat("market_errors")
 
+            scan_stats["reprice_errors"] = reprice_errors
+            reprice_errors = 0
+            risk_controls.record_scan(
+                errors=int(scan_stats["market_errors"]),
+                attempted=int(scan_stats["parse_attempted"]),
+            )
             record(scan_stats)
 
         # Sleep until next event
