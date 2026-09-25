@@ -298,6 +298,20 @@ def main() -> None:
         metavar="PRICE",
         help="Max absolute bid-ask spread in price units (0.03 = 3 cents)",
     )
+    parser.add_argument(
+        "--pricing-model",
+        choices=("legacy", "smile"),
+        default=os.getenv("PRICING_MODEL", "legacy"),
+        help="legacy: N(d2)/reflection at the strike IV with spot and 5%% drift; "
+        "smile: Deribit forward, zero drift, plus the smile's skew term",
+    )
+    parser.add_argument(
+        "--max-iv-age-secs",
+        type=float,
+        default=float(os.getenv("MAX_IV_AGE_SECS", "0")),
+        metavar="SECONDS",
+        help="Ignore Deribit IV older than this and block entries (0 = no limit)",
+    )
     # Strategy knobs; defaults are the values that used to be hard-coded.
     for flag, env, default, help_text in (
         ("--min-entry-price", "MIN_ENTRY_PRICE", 0.02, "Skip entries with YES mid at or below this"),
@@ -351,7 +365,9 @@ def main() -> None:
         max_spread=args.max_spread,
         assets=assets,
     )
-    vol_surfaces: dict[str, VolSurface] = {a: VolSurface(asset=a) for a in assets}
+    vol_surfaces: dict[str, VolSurface] = {
+        a: VolSurface(asset=a, max_age_secs=args.max_iv_age_secs) for a in assets
+    }
 
     # Dry-run evaluates signals against the real state but never writes it:
     # no position/NAV/risk saves, no history events, no intent journal.
@@ -404,6 +420,7 @@ def main() -> None:
             min_entry_price=args.min_entry_price,
             max_entry_price=args.max_entry_price,
             reentry_cooldown_secs=args.reentry_cooldown_hours * 3600,
+            pricing_model=args.pricing_model,
         ),
         state_dir=state_dir,
         scanner=scanner,
@@ -430,6 +447,7 @@ def main() -> None:
         "Entry thresh: %.3f (%.1f%%)", args.entry_threshold, args.entry_threshold * 100
     )
     logger.info("Kelly frac  : %.2f", args.kelly_fraction)
+    logger.info("Pricing     : %s", args.pricing_model)
     logger.info("Starting NAV: $%.2f", args.starting_nav)
     logger.info("State dir   : %s", state_dir)
     logger.info("")

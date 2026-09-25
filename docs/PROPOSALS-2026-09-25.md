@@ -35,6 +35,11 @@ barrier types in shadow, or accept that shadow P&L on them measures the artifact
 
 ## #7 Pricing: skew, forward, IV age, calibration
 
+**Status: implemented behind flags, all off by default:** `--pricing-model smile`
+(items 1–3) and `--max-iv-age-secs` (item 4). Legacy lookups are numerically unchanged,
+checked against the previous code on the live surface. On live data a dry-run would have
+bought 8 markets with legacy pricing and 2 with smile pricing.
+
 **Change** (`--pricing-model legacy|smile`, default `legacy`):
 1. **Digitals:** `P(S_T > K) = N(d2) − vega·∂σ/∂K`, with ∂σ/∂K taken from the
    interpolated smile (a finite difference on the vol surface). `below` types use the

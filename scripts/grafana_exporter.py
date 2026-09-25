@@ -134,7 +134,9 @@ def _history_source(event: dict) -> str | None:
 
 def _is_fallback_source(source: str) -> bool:
     normalized = source.lower()
-    return "fallback" in normalized or normalized in {"default", "proxy", "realized", "unknown"}
+    return "fallback" in normalized or normalized in {
+        "default", "proxy", "realized", "unknown", "stale", "smile_unavailable"
+    }
 
 
 def _is_synthetic_book_source(source: str) -> bool:
