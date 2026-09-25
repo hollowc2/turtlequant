@@ -83,6 +83,8 @@ State persists to JSON across restarts. Positions close on three triggers:
 - **Time cleanup**: <= 6h remaining (`--cleanup-hours`) and edge <= 5% (`--cleanup-edge`)
 - **Resolved**: paper/shadow positions settle at the Gamma payout once the market resolves
 
+`--exit-rule ev` (off by default) replaces the first three triggers. It sells only when the bid, net of the taker fee, beats the model's value by `--exit-margin` (default 1pp); otherwise it holds to resolution. It also holds while the vol source is degraded (anything but live Deribit IV). `scripts/exit_counterfactual.py` compares every past exit with what holding to resolution would have paid.
+
 The bot also persists the last observed YES quote per open position so exits do not fall back to entry price if a market drops out of the active scan set.
 
 ### 7. Execution

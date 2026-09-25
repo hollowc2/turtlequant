@@ -501,3 +501,33 @@ def test_no_position_exits_on_the_no_book_and_settles_on_the_no_payout(tmp_path)
     resolved = [e for e in events(tmp_path / "s") if e["event"] == "close"][0]
     assert resolved["resolution_price"] == 0.0  # YES won, so the NO token pays 0
     assert resolved["pnl"] == pytest.approx(-30.0 - 100 * 0.07 * 0.30 * 0.70)  # stake plus modelled entry fee
+
+
+def test_ev_exit_rule_holds_decayed_edges_and_sells_rich_bids(tmp_path):
+    decayed = FakeClob(bids=((0.45, 500),), asks=((0.47, 500),))  # model ~0.52: edge 0.07 of entry 0.5
+    legacy = make_trader(tmp_path / "legacy", clob=decayed)
+    ev = make_trader(tmp_path / "ev", clob=decayed, exit_rule="ev")
+    for trader in (legacy, ev):
+        hold(trader, model_prob=0.9)
+        trader.reprice_positions()
+
+    assert not legacy.positions.has_position("m-1")  # edge_decayed sold at 0.45 < model
+    assert ev.positions.has_position("m-1")
+
+    rich = make_trader(tmp_path / "rich", clob=FakeClob(bids=((0.70, 500),), asks=((0.72, 500),)), exit_rule="ev")
+    hold(rich)
+    rich.reprice_positions()
+    close = [e for e in events(tmp_path / "rich") if e["event"] == "close"][0]
+    assert close["reason"] == "ev_exit" and close["yes_price"] == 0.70
+
+
+def test_ev_exit_rule_holds_when_the_vol_source_is_degraded(tmp_path):
+    trader = make_trader(
+        tmp_path, vol=FakeVol(source="realized"), clob=FakeClob(bids=((0.70, 500),), asks=((0.72, 500),)),
+        exit_rule="ev",
+    )
+    hold(trader)
+
+    trader.reprice_positions()
+
+    assert trader.positions.has_position("m-1")

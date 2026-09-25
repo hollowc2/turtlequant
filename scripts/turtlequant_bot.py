@@ -312,6 +312,20 @@ def main() -> None:
         help="Outcome tokens to buy: 'yes' (default) or 'yes,no' to also buy NO when the model is below the market",
     )
     parser.add_argument(
+        "--exit-rule",
+        choices=("legacy", "ev"),
+        default=os.getenv("EXIT_RULE", "legacy"),
+        help="legacy: edge reversed/decayed/time cleanup; ev: sell only when bid - fee >= model + "
+        "--exit-margin, otherwise hold to resolution",
+    )
+    parser.add_argument(
+        "--exit-margin",
+        type=float,
+        default=float(os.getenv("EXIT_MARGIN", "0.01")),
+        metavar="FLOAT",
+        help="ev exit rule: required excess of the net bid over the model value",
+    )
+    parser.add_argument(
         "--max-iv-age-secs",
         type=float,
         default=float(os.getenv("MAX_IV_AGE_SECS", "0")),
@@ -448,6 +462,8 @@ def main() -> None:
             max_asset_delta_pct=args.max_asset_delta_pct,
             kelly_shrink=args.kelly_shrink,
             sides=sides,
+            exit_rule=args.exit_rule,
+            exit_margin=args.exit_margin,
         ),
         state_dir=state_dir,
         scanner=scanner,
@@ -476,6 +492,7 @@ def main() -> None:
     logger.info("Kelly frac  : %.2f", args.kelly_fraction)
     logger.info("Pricing     : %s", args.pricing_model)
     logger.info("Sides       : %s", ",".join(sides))
+    logger.info("Exit rule   : %s", args.exit_rule)
     logger.info("Starting NAV: $%.2f", args.starting_nav)
     logger.info("State dir   : %s", state_dir)
     logger.info("")

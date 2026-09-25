@@ -121,6 +121,14 @@ count blocked entries. No backtest needed; this is risk limiting, not alpha.
 
 ## #5 Exits
 
+**Status: implemented, off by default** (`--exit-rule ev`, `--exit-margin`), plus
+`scripts/exit_counterfactual.py` for the validation below. One deliberate change from
+the proposal: with degraded inputs (vol source not live Deribit) `ev` **holds** rather
+than exits. Without a trustworthy model there is no evidence the bid beats holding, and
+selling pays the spread and fee. Live dry-run on a seven-position shadow state under
+smile pricing: legacy exits would sell 5 (3 of them `edge_decayed`, below model value),
+`ev` sells none.
+
 **Correction to the review:** `edge_at_entry = model − fill` is measured against the
 ask, and `current_edge = model − bid` against the bid. Since bid < ask, the current edge
 starts about one spread *above* the entry edge, not below. The asymmetry delays
