@@ -357,3 +357,21 @@ def test_order_book_404_is_not_retried(monkeypatch):
 
     assert fake_client.get_order_book.call_count == 1
     assert book.source == "synthetic"
+
+
+def test_book_contract_on_a_real_clob_response():
+    # Real /book response (trimmed to the 5 best levels per side). The CLOB
+    # lists bids ascending and asks descending: the best levels come last.
+    import json
+    from pathlib import Path
+
+    raw = json.loads((Path(__file__).parent / "fixtures" / "clob_book.json").read_text())
+    client = MagicMock()
+    client.get_order_book.return_value = raw
+
+    book = ExecutionClient(mode="paper", clob_client=client).get_order_book(raw["asset_id"])
+
+    assert book.source == "clob"
+    assert book.best_bid == max(float(level["price"]) for level in raw["bids"])
+    assert book.best_ask == min(float(level["price"]) for level in raw["asks"])
+    assert book.best_bid < book.best_ask
