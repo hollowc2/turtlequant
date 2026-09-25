@@ -333,10 +333,16 @@ cp /opt/turtlequant/state/turtlequant-positions.json \
 
 ## Credential rotation (Deribit leak)
 
-Plaintext Deribit keys were removed from `crypto_up_or_down/docs/turtlequant_plan.md` but exist in git history (`a8513e1`). **Rotate keys in the Deribit console**, update VPS `.env`, then optionally purge history:
+Plaintext Deribit keys were once committed to the monorepo in
+`crypto_up_or_down/docs/turtlequant_plan.md`. History checked on 2026-09-24:
 
-```bash
-# After rotation — rewrite history (coordinate with team; force-push required)
-git filter-repo --path crypto_up_or_down/docs/turtlequant_plan.md --invert-paths
-# or use BFG Repo-Cleaner on the leaked strings
-```
+- **This repo** (`hollowc2/turtlequant`, linked from the public performance page): no
+  revision contains `turtlequant_plan.md`, and a scan of every revision for credential
+  patterns found only test placeholders.
+- **Monorepo:** the file's content in history already shows `REDACTED_…` placeholders,
+  and the commit `a8513e1` cited earlier no longer exists. The history appears to have
+  been rewritten. Forks or clones made before the rewrite may still hold the originals.
+
+Rotating the keys in the Deribit console is still the only real fix, since anyone may
+have copied them. The bot no longer needs them: public IV data works unauthenticated.
+If the keys are kept, they are sent only in a POST body.

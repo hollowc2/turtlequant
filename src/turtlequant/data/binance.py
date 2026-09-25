@@ -14,7 +14,7 @@ import requests
 from turtlequant.http import REQUEST_TIMEOUT, retrying_session
 
 # DATA_SOURCE controls which exchange is used for OHLCV fetching.
-# auto    — try Binance; on 451 geo-block fall back to OKX, then Gate.io
+# auto    — try Binance; on a 451 geo-block (only) fall back to OKX
 # binance — always Binance (use when your server is not geo-blocked)
 # bybit   — always Bybit  (globally accessible on most hosts, years of history)
 # okx     — always OKX    (EU-accessible, full history back to 2022)

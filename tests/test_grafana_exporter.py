@@ -117,7 +117,8 @@ def test_collector_exports_live_readiness_metrics(tmp_path):
 
     families = {metric.name: metric for metric in TurtleQuantCollector(str(tmp_path)).collect()}
 
-    assert families["turtlequant_open_unrealized_pnl_usd"].samples[0].value > 4.0
+    # (0.45 - 0.40) * 100 shares, less the 0.07 * p(1-p) taker fee to sell at 0.45.
+    assert abs(families["turtlequant_open_unrealized_pnl_usd"].samples[0].value - (5.0 - 100 * 0.07 * 0.45 * 0.55)) < 1e-9
     assert families["turtlequant_avg_entry_slippage"].samples[0].value == 0.02
     assert families["turtlequant_avg_fill_ratio"].samples[0].value == 0.8
     assert families["turtlequant_failed_orders_total"].samples[0].labels["side"] == "SELL"
