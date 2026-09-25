@@ -17,16 +17,17 @@ class RiskControls:
     halt_reason: str = ""
     daily_loss_date: str = ""
     daily_realized_loss: float = 0.0
+    persist: bool = True  # False (dry-run) never writes the risk file
 
     @property
     def path(self) -> Path:
         return self.state_dir / "turtlequant-risk.json"
 
     @classmethod
-    def load(cls, state_dir: Path, equity: float) -> "RiskControls":
+    def load(cls, state_dir: Path, equity: float, *, persist: bool = True) -> "RiskControls":
         path = state_dir / "turtlequant-risk.json"
         if not path.exists():
-            return cls(state_dir, equity)
+            return cls(state_dir, equity, persist=persist)
         try:
             raw = json.loads(path.read_text())
             return cls(
@@ -36,6 +37,7 @@ class RiskControls:
                 str(raw.get("halt_reason", "")),
                 str(raw.get("daily_loss_date", "")),
                 float(raw.get("daily_realized_loss", 0.0)),
+                persist=persist,
             )
         except (OSError, ValueError, TypeError, KeyError) as exc:
             raise RuntimeError(f"unsafe risk state: {path}: {exc}") from exc
@@ -92,9 +94,12 @@ class RiskControls:
             self.daily_realized_loss = 0.0
 
     def save(self) -> None:
+        if not self.persist:
+            return
         self.state_dir.mkdir(parents=True, exist_ok=True)
         payload = {**asdict(self), "updated_at": datetime.now(UTC).isoformat()}
         payload.pop("state_dir")
+        payload.pop("persist")
         tmp = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
         with tmp.open("w") as handle:
             json.dump(payload, handle, separators=(",", ":"))
