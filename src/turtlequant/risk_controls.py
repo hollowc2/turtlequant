@@ -41,6 +41,8 @@ class RiskControls:
     last_failure_at: str = ""  # ISO 8601 UTC of the last broker failure
     entry_halt: str = ""  # last evaluated entry-gate reason ("" = open), for the exporter
     entry_halt_since: str = ""
+    # Per-asset {"gross_usd", "delta_usd"} of open positions, for the exporter.
+    asset_risk: dict[str, dict[str, float]] = field(default_factory=dict)
     persist: bool = True  # False (dry-run) never writes the risk file
     max_broker_failures: int = DEFAULT_MAX_BROKER_FAILURES
     broker_cooldown_secs: float = DEFAULT_BROKER_COOLDOWN_SECS
@@ -82,6 +84,7 @@ class RiskControls:
                 str(raw.get("last_failure_at") or raw.get("updated_at") or ""),
                 str(raw.get("entry_halt", "")),
                 str(raw.get("entry_halt_since", "")),
+                dict(raw.get("asset_risk") or {}),
                 **config,
             )
         except (OSError, ValueError, TypeError, KeyError) as exc:
@@ -160,6 +163,10 @@ class RiskControls:
         self.entry_halt_since = (now or datetime.now(UTC)).isoformat() if reason else ""
         self.save()
         return True
+
+    def record_asset_risk(self, asset_risk: dict[str, dict[str, float]]) -> None:
+        self.asset_risk = {asset: dict(values) for asset, values in asset_risk.items()}
+        self.save()
 
     def record_realized_pnl(self, pnl: float, now: datetime | None = None) -> None:
         """Accumulate realised losses for the UTC day; exits are never gated."""

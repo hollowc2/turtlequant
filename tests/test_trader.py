@@ -372,3 +372,65 @@ def test_stale_iv_blocks_entries_but_not_exits(tmp_path):
     hold(trader)
     trader.reprice_positions()  # model ~0.52 < 0.70 bid: exits still run
     assert not trader.positions.has_position("m-1")
+
+
+def test_delta_headroom_limits_adding_and_allows_reducing():
+    from turtlequant.trader import delta_headroom_usd
+
+    assert delta_headroom_usd(0.0, 2.0, 0.5, 100.0) == pytest.approx(25.0)  # 50 shares * 2 = 100
+    assert delta_headroom_usd(120.0, 2.0, 0.5, 100.0) == 0.0  # already past the cap
+    assert delta_headroom_usd(120.0, -2.0, 0.5, 100.0) == pytest.approx(55.0)  # down to -100
+    assert delta_headroom_usd(0.0, 2.0, 0.5, 0.0) == float("inf")  # off
+
+
+def test_dollar_delta_sign_follows_the_bet(tmp_path):
+    from turtlequant.market_parser import MarketParams, OptionType
+
+    trader = make_trader(tmp_path)
+    expiry = datetime.now(UTC) + timedelta(days=30)
+    above = MarketParams("btc", 85_000.0, expiry, OptionType.EUROPEAN)
+    dip = MarketParams("btc", 75_000.0, expiry, OptionType.BARRIER_DOWN)
+
+    assert trader.dollar_delta_per_share(above, 84_000.0, trader.price(above, 84_000.0)) > 0
+    assert trader.dollar_delta_per_share(dip, 84_000.0, trader.price(dip, 84_000.0)) < 0
+
+
+def test_asset_caps_are_off_by_default_and_shrink_when_set(tmp_path):
+    uncapped = make_trader(tmp_path / "a")
+    uncapped.scan()
+    full = uncapped.positions.get_position("m-1").size_usd
+    assert full > 20
+
+    capped = make_trader(tmp_path / "b", max_asset_exposure_pct=0.02)  # $20 of $1000 NAV
+    capped.scan()
+    assert capped.positions.get_position("m-1").size_usd == pytest.approx(20.0, rel=1e-6)
+    assert capped.asset_risk["btc"]["gross_usd"] == pytest.approx(20.0, rel=1e-6)
+
+
+def test_delta_cap_blocks_adding_to_a_full_book(tmp_path):
+    trader = make_trader(tmp_path, max_asset_delta_pct=0.05)  # +-$50 of dollar delta
+    trader.positions.open_position(make_position(
+        market_id="held", question="q", asset="btc", strike=84_000.0,
+        expiry=datetime.now(UTC) + timedelta(days=5), option_type="european", yes_token_id="t",
+        yes_price=0.5, size_usd=100.0, model_prob=0.6, token_size=200.0,
+    ))
+
+    stats = trader.scan()
+
+    assert trader.asset_risk["btc"]["delta_usd"] > 50  # the held ATM digital alone exceeds the cap
+    assert not trader.positions.has_position("m-1")  # same-direction entry refused
+    assert stats["asset_capped"] == 1
+    saved = RiskControls.load(tmp_path, 1000.0).asset_risk
+    assert saved["btc"]["delta_usd"] == pytest.approx(trader.asset_risk["btc"]["delta_usd"])
+
+
+def test_kelly_shrink_sizes_toward_the_market(tmp_path):
+    raw = make_trader(tmp_path / "raw")
+    shrunk = make_trader(tmp_path / "half", kelly_shrink=0.5)
+    at_market = make_trader(tmp_path / "zero", kelly_shrink=0.0)
+
+    for trader in (raw, shrunk, at_market):
+        trader.scan()
+
+    assert shrunk.positions.get_position("m-1").size_usd < raw.positions.get_position("m-1").size_usd
+    assert not at_market.positions.has_position("m-1")  # the mid has no edge over the ask

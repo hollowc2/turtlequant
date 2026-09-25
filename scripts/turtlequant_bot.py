@@ -330,6 +330,10 @@ def main() -> None:
         ("--max-per-market-pct", "MAX_PER_MARKET_PCT", 0.10, "Per-market cap as a fraction of NAV"),
         ("--max-per-expiry-pct", "MAX_PER_EXPIRY_PCT", 0.15, "Per-expiry-date cap as a fraction of NAV"),
         ("--max-total-exposure-pct", "MAX_TOTAL_EXPOSURE_PCT", 0.40, "Total exposure cap as a fraction of NAV"),
+        ("--max-asset-exposure-pct", "MAX_ASSET_EXPOSURE_PCT", 0.0, "Gross USD cap per asset as a fraction of NAV (0 = off)"),
+        ("--max-asset-delta-pct", "MAX_ASSET_DELTA_PCT", 0.0,
+         "Net dollar-delta cap per asset (shares * dp/dS * S) as a fraction of NAV (0 = off)"),
+        ("--kelly-shrink", "KELLY_SHRINK", 1.0, "Kelly sizes on w*model + (1-w)*mid (1 = raw model)"),
     ):
         parser.add_argument(
             flag, type=float, default=float(os.getenv(env, str(default))), metavar="FLOAT", help=help_text
@@ -429,6 +433,9 @@ def main() -> None:
             reentry_cooldown_secs=args.reentry_cooldown_hours * 3600,
             pricing_model=args.pricing_model,
             marks_interval_secs=args.marks_interval_secs,
+            max_asset_exposure_pct=args.max_asset_exposure_pct,
+            max_asset_delta_pct=args.max_asset_delta_pct,
+            kelly_shrink=args.kelly_shrink,
         ),
         state_dir=state_dir,
         scanner=scanner,
