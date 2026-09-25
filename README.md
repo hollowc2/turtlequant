@@ -77,9 +77,9 @@ TurtleQuant supports four runtime modes:
 | `--dry-run` | Evaluates entries and exits against the current state and logs `[DRY_RUN]` would-buy / would-exit lines. Writes nothing: no position, risk, history or corpus files. |
 | `--paper` | Simulated fills using executable bid/ask depth. |
 | `--shadow` | Same as paper, plus explicit CLOB/Gamma quote and order events for live-readiness review. |
-| `--live --i-accept-live-risk` | Sends FAK market orders through `py_clob_client_v2` and records actual/partial fills. |
+| `--live --i-accept-live-risk` | **Currently hard-disabled in code** pending supervised broker acceptance. When enabled: FAK market orders through `py_clob_client_v2`, with actual/partial fills journaled and reconciled. |
 
-Live mode expects `POLYMARKET_PRIVATE_KEY` plus API credentials (`POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, `POLYMARKET_API_PASSPHRASE`) in the environment. Optional `POLYMARKET_SIGNATURE_TYPE` and `POLYMARKET_FUNDER` are passed through for proxy-wallet setups.
+Paper and shadow mode read only public CLOB endpoints and never load a wallet key. Live mode expects `POLYMARKET_PRIVATE_KEY` plus API credentials (`POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, `POLYMARKET_API_PASSPHRASE`) in the environment. Optional `POLYMARKET_SIGNATURE_TYPE` and `POLYMARKET_FUNDER` are passed through for proxy-wallet setups.
 
 ---
 
@@ -102,9 +102,9 @@ Gamma API → MarketScanner → MarketParser → ProbabilityEngine → Execution
 |--------|-----|
 | Polymarket Gamma API | Market prices & discovery |
 | Deribit Options API | Implied volatility surface |
-| Binance / Bybit / OKX / Gate.io | Spot price and realized vol |
+| Binance (OKX on geo-block) | Spot price and realized vol |
 
-Binance data falls back through Bybit → OKX → Gate.io for geo-resilience.
+Spot and realized vol come from Binance. Only a 451 geo-block response falls back, and only to OKX. `DATA_SOURCE=okx|bybit|gateio` pins a single exchange instead.
 
 ---
 
@@ -136,3 +136,5 @@ For Phase 1 promotion, run a shadow soak first and review the Grafana `Phase 1 S
 ## Calibration
 
 Backtested on 5 years of BTC and ETH data. Brier loss: **0.178–0.199** (lower is better; 0.25 = random).
+
+Caveat: `scripts/calibrate_turtlequant.py` prices with 30-day realized vol, while the live bot prices with Deribit implied vol. The score therefore describes a related model, not the one that trades, and it does not test whether "model − market ≥ threshold" trades win. See review item 7 in [docs/REVIEW-2026-09-24.md](docs/REVIEW-2026-09-24.md).

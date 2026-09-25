@@ -8,7 +8,7 @@ Portfolio gauges (from *-positions.json):
   turtlequant_total_pnl_usd             — total realized P&L from positions file
   turtlequant_open_positions_count      — number of open positions
   turtlequant_total_exposure_usd        — sum of open position sizes in USD
-  turtlequant_open_unrealized_pnl_usd   — mark-to-bid unrealized P&L on open positions
+  turtlequant_open_unrealized_pnl_usd   — mark-to-bid unrealized P&L on open positions, net of exit fee
   turtlequant_avg_entry_slippage        — average open-entry slippage versus signal mid
   turtlequant_avg_fill_ratio            — average order fill ratio
   turtlequant_failed_orders_total       — failed-order events recorded by the bot
@@ -56,6 +56,7 @@ from pathlib import Path
 
 from prometheus_client import REGISTRY, MetricsHandler
 from prometheus_client.core import GaugeMetricFamily
+from turtlequant.clob_execution import DEFAULT_CRYPTO_FEE
 from turtlequant.history import (
     DIAGNOSTICS_JSONL,
     HISTORY_JSONL,
@@ -88,8 +89,6 @@ _HALT_CATEGORIES = (
     ("stale market data", "stale_data"),
 )
 
-# Flat taker rate used to discount open-position marks for an estimated exit fee.
-TAKER_FEE_RATE = 0.003
 QUALITY_WINDOW_SEC = 15 * 60
 RECENT_TRADES = 50  # bounded idx series for the recent-trade gauges
 
@@ -883,7 +882,9 @@ class TurtleQuantCollector:
                     tokens = size_usd / entry if entry > 0 else 0.0
                 mark = _safe_float(pos.get("last_bid")) or _safe_float(pos.get("last_yes_price"))
                 entry = _safe_float(pos.get("entry_price"))
-                unrealized = (mark - entry) * tokens - (tokens * mark * TAKER_FEE_RATE if mark > 0 else 0.0)
+                # Discount the bid mark by the taker fee a sale would pay (r * p(1-p)).
+                exit_fee = DEFAULT_CRYPTO_FEE.fee(tokens, mark) if 0.0 < mark <= 1.0 else 0.0
+                unrealized = (mark - entry) * tokens - exit_fee
                 unrealized_total += unrealized
                 unrealized_by_asset[asset] = unrealized_by_asset.get(asset, 0.0) + unrealized
             for asset, value in by_asset.items():

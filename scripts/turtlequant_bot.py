@@ -158,7 +158,7 @@ def trade_chart(
     exit_price: float | None = None,
     pnl: float | None = None,
 ) -> bytes | None:
-    interval = os.getenv("DISCORD_CHART_INTERVAL", "4h")
+    interval = os.getenv("DISCORD_CHART_INTERVAL", "1h")
     end_ms = exit_ms or int(time.time() * 1000)
     start_ms = end_ms - (90 if interval == "1d" else 30) * 86_400_000
     try:
