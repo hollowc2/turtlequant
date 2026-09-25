@@ -1100,7 +1100,7 @@ def main() -> None:
                             "reason": quote_reason,
                             "book_source": book.source,
                             "vol_source": vol_source,
-                            "quote": book.to_dict(),
+                            # Book depth is already on the signal_evaluation event.
                             "ts": datetime.now(UTC).isoformat(),
                         },
                     )

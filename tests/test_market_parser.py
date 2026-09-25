@@ -70,3 +70,23 @@ def test_strike_plausibility_band_rejects_misparsed_strikes():
     assert not strike_is_plausible(1_000_000, 84_000)
     assert not strike_is_plausible(2, 84_000)
     assert not strike_is_plausible(80_000, 0)
+
+
+def test_unclassified_corpus_records_each_question_once(tmp_path):
+    import json
+
+    import turtlequant.market_parser as market_parser
+
+    corpus = tmp_path / "state" / "unclassified_markets.jsonl"
+    corpus.parent.mkdir()
+    corpus.write_text(json.dumps({"question": "Will it rain in Paris?", "ts": "old"}) + "\n")
+    market_parser.set_corpus_file(corpus)
+    try:
+        for _ in range(3):
+            parse_market("Will it rain in Paris?")
+            parse_market("Who wins the 2028 election?")
+    finally:
+        market_parser.set_corpus_file(None)
+
+    questions = [json.loads(line)["question"] for line in corpus.read_text().splitlines()]
+    assert questions == ["Will it rain in Paris?", "Who wins the 2028 election?"]

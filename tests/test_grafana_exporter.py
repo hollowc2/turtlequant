@@ -261,36 +261,11 @@ def test_collector_exports_all_closed_trades(tmp_path):
     pnl_samples = families["turtlequant_closed_position_pnl_usd"].samples
     hold_samples = families["turtlequant_closed_position_holding_hours"].samples
 
-    assert len(pnl_samples) == 2
-    assert len(hold_samples) == 2
-    assert {sample.labels["idx"] for sample in pnl_samples} == {"0", "1"}
-    assert pnl_samples[0].labels["opened_at"] == "2026-05-01T00:00:00+00:00"
-    assert pnl_samples[0].labels["closed_at"] == "2026-05-01T01:00:00+00:00"
-    assert pnl_samples[0].labels["question"] == "Will BTC test close?"
-    assert _sample_value(
-        families["turtlequant_closed_position_pnl_usd"],
-        strategy="turtlequant",
-        idx="0",
-        market_id="m-1",
-        asset="btc",
-        reason="stop",
-    ) == 1.0
-    assert _sample_value(
-        families["turtlequant_closed_position_pnl_usd"],
-        strategy="turtlequant",
-        idx="1",
-        market_id="m-2",
-        asset="eth",
-        reason="target",
-    ) == 2.0
-    assert _sample_value(
-        families["turtlequant_closed_position_holding_hours"],
-        strategy="turtlequant",
-        idx="0",
-        market_id="m-1",
-        asset="btc",
-        reason="stop",
-    ) == 1.0
+    # Only strategy + idx labels: no per-trade label values (cardinality).
+    assert {tuple(sorted(sample.labels)) for sample in pnl_samples + hold_samples} == {("idx", "strategy")}
+    assert _sample_value(families["turtlequant_closed_position_pnl_usd"], idx="0") == 2.0  # most recent
+    assert _sample_value(families["turtlequant_closed_position_pnl_usd"], idx="1") == 1.0
+    assert _sample_value(families["turtlequant_closed_position_holding_hours"], idx="1") == 1.0
 
 
 def test_entry_gate_metrics_use_bounded_reason_labels(tmp_path):
@@ -313,3 +288,53 @@ def test_halt_category_maps_every_gate_reason():
     assert grafana_exporter.halt_category("data errors in last scan (5/9 markets failed)") == "data_errors"
     assert grafana_exporter.halt_category("stale market data") == "stale_data"
     assert grafana_exporter.halt_category("something new") == "other"
+
+
+def _closed_trades(collector):
+    families = {family.name: family for family in collector.collect()}
+    return families["turtlequant_closed_trades_total"].samples[0].value
+
+
+def _shadow_total(collector, reason="ask_erased_edge"):
+    families = {family.name: family for family in collector.collect()}
+    return _sample_value(families["turtlequant_shadow_quotes_total"], reason=reason)
+
+
+def test_collector_waits_for_a_partially_written_line(tmp_path):
+    journal = tmp_path / "turtlequant-history.jsonl"
+    journal.write_text('{"event":"close","market_id":"a","pnl":1}\n{"event":"clo')
+    collector = TurtleQuantCollector(str(tmp_path))
+
+    assert _closed_trades(collector) == 1.0
+
+    with journal.open("a") as handle:
+        handle.write('se","market_id":"b","pnl":2}\n')
+    assert _closed_trades(collector) == 2.0
+
+
+def test_collector_rebuilds_after_history_truncation(tmp_path):
+    journal = tmp_path / "turtlequant-history.jsonl"
+    journal.write_text("".join(f'{{"event":"close","market_id":"m{i}","pnl":1}}\n' for i in range(3)))
+    collector = TurtleQuantCollector(str(tmp_path))
+    assert _closed_trades(collector) == 3.0
+
+    journal.write_text('{"event":"close","market_id":"x","pnl":1}\n')
+
+    assert _closed_trades(collector) == 1.0
+
+
+def test_collector_follows_diagnostics_rotation_without_double_counting(tmp_path):
+    live = tmp_path / "turtlequant-diagnostics.jsonl"
+    line = '{"event":"shadow_quote","reason":"ask_erased_edge","ts":"2026-05-01T00:00:00+00:00"}\n'
+    live.write_text(line * 2)
+    collector = TurtleQuantCollector(str(tmp_path))
+    assert _shadow_total(collector) == 2.0
+
+    with live.open("a") as handle:  # written after the last scrape, then rotated away
+        handle.write(line)
+    live.rename(tmp_path / "turtlequant-diagnostics.jsonl.1")
+    live.write_text(line)
+
+    assert _shadow_total(collector) == 4.0
+    # A fresh exporter reads the rotated file plus the live one.
+    assert _shadow_total(TurtleQuantCollector(str(tmp_path))) == 4.0
