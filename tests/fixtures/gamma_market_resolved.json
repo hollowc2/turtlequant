@@ -1,0 +1,15 @@
+{
+  "id": "4934822",
+  "question": "Ethereum above 2,760 on September 25, 12AM ET?",
+  "conditionId": "0xe3075b213f9a2c6ab49e6bc6f069cc27d67247ca7810d332668391422b8cb1f9",
+  "endDate": "2026-09-25T04:00:00Z",
+  "closed": true,
+  "active": true,
+  "umaResolutionStatus": "resolved",
+  "outcomes": "[\"Yes\", \"No\"]",
+  "outcomePrices": "[\"0\", \"1\"]",
+  "clobTokenIds": "[\"33349721050371651047633056375430836067817080931159425659592355054371018381192\", \"88031557137368365075379518735586843584438393101771750806111087455693359984106\"]",
+  "bestBid": null,
+  "bestAsk": 0.001,
+  "lastTradePrice": null
+}

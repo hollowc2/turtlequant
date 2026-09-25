@@ -235,3 +235,13 @@ def test_absolute_spread_filter_keeps_cheap_long_dated_markets():
     wide = MarketScanner(session=_RecordingSession(events), assets=["btc"], min_liquidity=0.0, max_spread=0.001)
     assert tail["id"] not in {m.market_id for m in wide.get_active_markets()}
     assert wide.last_scan_counts["spread"] >= 1
+
+
+def test_resolution_contract_on_a_real_resolved_market():
+    # Real /markets/{id} for "Ethereum above 2,760 on September 25, 12AM ET?"
+    # (resolved NO). Gamma has no resolutionPrice field; outcomePrices is final.
+    payload = json.loads((FIXTURES / "gamma_market_resolved.json").read_text())
+    assert "resolutionPrice" not in payload
+    yes_token = json.loads(payload["clobTokenIds"])[0]
+
+    assert MarketScanner(session=_ResolvedSession(payload)).fetch_resolution(payload["id"], yes_token) == 0.0
