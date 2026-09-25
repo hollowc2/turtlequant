@@ -36,14 +36,6 @@ _ASSET_TO_DERIBIT_CCY: dict[str, str] = {
     "sol": "SOL",
 }
 
-# Binance daily intervals map (asset → symbol)
-_ASSET_TO_SYMBOL: dict[str, str] = {
-    "btc": "BTCUSDT",
-    "eth": "ETHUSDT",
-    "sol": "SOLUSDT",
-    "xrp": "XRPUSDT",
-}
-
 
 @dataclass
 class IVPoint:
@@ -328,7 +320,9 @@ class VolSurface:
         if cache_key in self._realized_vol_cache:
             return self._realized_vol_cache[cache_key]
 
-        symbol = _ASSET_TO_SYMBOL.get(self.asset)
+        from turtlequant.data.binance import ASSET_TO_SYMBOL
+
+        symbol = ASSET_TO_SYMBOL.get(self.asset)
         if symbol is None:
             return 0.80  # wide fallback
 

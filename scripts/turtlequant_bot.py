@@ -39,22 +39,21 @@ import os
 import signal
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from turtlequant.clob_execution import ExecutionClient
+from turtlequant.data.binance import ASSET_TO_SYMBOL, fetch_klines
 from turtlequant.discord_trades import DiscordTrades
-from turtlequant.data.binance import fetch_klines, fetch_latest_closes
-from turtlequant.clob_execution import DEFAULT_CRYPTO_FEE, ExecutionClient, estimate_buy_fill
-from turtlequant.market_parser import parse_market, set_corpus_file, strike_is_plausible
+from turtlequant.market_parser import set_corpus_file
 from turtlequant.market_scanner import MarketScanner
 from turtlequant.notifications import NotificationQueue
 from turtlequant.order_intents import OrderIntentLedger
-from turtlequant.order_reconciliation import ReconciliationError, reconcile_intent, reconcile_outstanding
-from turtlequant.position_manager import PositionManager, StatePersistenceError, make_position
-from turtlequant.probability_engine import compute_probability
-from turtlequant.history import append_history
+from turtlequant.order_reconciliation import ReconciliationError, reconcile_outstanding
+from turtlequant.position_manager import PositionManager
 from turtlequant.risk_controls import RiskControls
+from turtlequant.trader import Trader, TraderConfig
 from turtlequant.vol_surface import VolSurface
 
 # ---------------------------------------------------------------------------
@@ -90,13 +89,6 @@ logger = _setup_logging()
 # Constants
 # ---------------------------------------------------------------------------
 
-ASSET_TO_SYMBOL: dict[str, str] = {
-    "btc": "BTCUSDT",
-    "eth": "ETHUSDT",
-    "sol": "SOLUSDT",
-    "xrp": "XRPUSDT",
-}
-
 DEFAULT_ENTRY_THRESHOLD = 0.05  # 5% minimum edge
 DEFAULT_KELLY_FRACTION = 0.25
 DEFAULT_STARTING_NAV = 1000.0
@@ -105,7 +97,6 @@ DEFAULT_STATE_DIR = Path("state/turtlequant")
 
 SCAN_INTERVAL_SECS = 60
 REPRICE_INTERVAL_SECS = 30
-REENTRY_COOLDOWN_SECS = 2 * 3600  # 2 hours — prevent churn after edge-reversed close
 
 running = True
 
@@ -122,29 +113,7 @@ def handle_signal(sig, _frame) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Spot price fetcher
-# ---------------------------------------------------------------------------
-
-
-def fetch_spot(asset: str) -> float | None:
-    """Fetch current spot price from Binance (latest 1m close)."""
-    symbol = ASSET_TO_SYMBOL.get(asset)
-    if symbol is None:
-        return None
-    try:
-        end_ms = int(datetime.now(UTC).timestamp() * 1000)
-        start_ms = end_ms - 5 * 60_000  # last 5 minutes
-        df = fetch_klines(symbol, "1m", start_ms, end_ms)
-        if df.empty:
-            return None
-        return float(df["close"].iloc[-1])
-    except Exception as exc:
-        logger.warning("Failed to fetch spot for %s: %s", asset.upper(), exc)
-        return None
-
-
-# ---------------------------------------------------------------------------
-# History tracking
+# Discord notifications
 # ---------------------------------------------------------------------------
 
 
@@ -329,6 +298,21 @@ def main() -> None:
         metavar="PRICE",
         help="Max absolute bid-ask spread in price units (0.03 = 3 cents)",
     )
+    # Strategy knobs; defaults are the values that used to be hard-coded.
+    for flag, env, default, help_text in (
+        ("--min-entry-price", "MIN_ENTRY_PRICE", 0.02, "Skip entries with YES mid at or below this"),
+        ("--max-entry-price", "MAX_ENTRY_PRICE", 0.98, "Skip entries with YES mid at or above this"),
+        ("--reentry-cooldown-hours", "REENTRY_COOLDOWN_HOURS", 2.0, "No re-entry this soon after a full close"),
+        ("--edge-decay-ratio", "EDGE_DECAY_RATIO", 0.4, "Exit when edge falls to this fraction of entry edge"),
+        ("--cleanup-hours", "CLEANUP_HOURS", 6.0, "Time-cleanup window before expiry"),
+        ("--cleanup-edge", "CLEANUP_EDGE", 0.05, "Time-cleanup exits when edge is at or below this"),
+        ("--max-per-market-pct", "MAX_PER_MARKET_PCT", 0.10, "Per-market cap as a fraction of NAV"),
+        ("--max-per-expiry-pct", "MAX_PER_EXPIRY_PCT", 0.15, "Per-expiry-date cap as a fraction of NAV"),
+        ("--max-total-exposure-pct", "MAX_TOTAL_EXPOSURE_PCT", 0.40, "Total exposure cap as a fraction of NAV"),
+    ):
+        parser.add_argument(
+            flag, type=float, default=float(os.getenv(env, str(default))), metavar="FLOAT", help=help_text
+        )
     args = parser.parse_args()
 
     # Validate mode
@@ -367,7 +351,6 @@ def main() -> None:
         max_spread=args.max_spread,
         assets=assets,
     )
-
     vol_surfaces: dict[str, VolSurface] = {a: VolSurface(asset=a) for a in assets}
 
     # Dry-run evaluates signals against the real state but never writes it:
@@ -376,6 +359,12 @@ def main() -> None:
     pos_mgr = PositionManager(
         starting_nav=args.starting_nav,
         kelly_fraction=args.kelly_fraction,
+        max_per_market_pct=args.max_per_market_pct,
+        max_per_expiry_pct=args.max_per_expiry_pct,
+        max_total_exposure_pct=args.max_total_exposure_pct,
+        edge_decay_ratio=args.edge_decay_ratio,
+        cleanup_hours=args.cleanup_hours,
+        cleanup_edge=args.cleanup_edge,
         positions_file=state_dir / "turtlequant-positions.json",
         persist=persist,
     )
@@ -383,38 +372,6 @@ def main() -> None:
     executor = ExecutionClient.from_env(
         mode=execution_mode, allow_live=args.i_accept_live_risk
     )
-
-    def record(entry: dict[str, object]) -> None:
-        if persist:
-            try:
-                append_history(state_dir, entry)
-            except OSError as exc:
-                raise StatePersistenceError(f"history was not persisted: {exc}") from exc
-
-    def check_entry_gate(market_data_at: datetime | None) -> bool:
-        """Evaluate the entry gate; log and record only when its state changes."""
-        allowed, reason = risk_controls.entries_allowed(
-            pos_mgr.marked_equity(),
-            max_daily_loss=args.max_daily_loss,
-            market_data_at=market_data_at,
-            max_market_data_age_secs=args.max_market_data_age_secs,
-            unreconciled_orders=len(intent_ledger.outstanding()) if intent_ledger is not None else 0,
-        )
-        if risk_controls.record_entry_gate(reason):
-            if reason:
-                logger.warning("[ENTRY_HALTED] %s", reason)
-            else:
-                logger.info("[ENTRY_RESUMED] entry gate open")
-            record(
-                {
-                    "event": "entry_gate",
-                    "halted": bool(reason),
-                    "reason": reason,
-                    "ts": datetime.now(UTC).isoformat(),
-                }
-            )
-        return allowed
-
     set_corpus_file(state_dir / "unclassified_markets.jsonl" if persist else None)
 
     intent_ledger = (
@@ -432,54 +389,35 @@ def main() -> None:
                 exc,
             )
             sys.exit(1)
-
-    def journal_result(intent_id: int | None, result) -> None:
-        """Record the broker's answer on its intent; an unsent order is terminal."""
-        if intent_id is None:
-            return
-        if not result.sent:
-            intent_ledger.fail(intent_id, result.error or result.status)
-            return
-        intent_ledger.submitted(intent_id, result.order_id, result.raw)
-        if result.broker_failure:
-            logger.warning(
-                "[ORDER_AMBIGUOUS] intent %d %s: entries halt until it is reconciled",
-                intent_id,
-                result.error or result.status,
-            )
-
-    def market_has_open_intent(market_id: str) -> bool:
-        return intent_ledger is not None and bool(intent_ledger.outstanding(market_id))
-
-    reconcile_warned_at: dict[int, float] = {}
-
-    def reconcile_in_process() -> None:
-        """Retry ambiguous broker actions; a confirmed fill updates positions."""
-        if intent_ledger is None:
-            return
-        for intent in intent_ledger.outstanding():
-            if not intent.order_id:
-                continue  # no broker order id: needs an operator (scripts/order_intents.py)
-            try:
-                reconcile_intent(intent, executor, pos_mgr)
-            except ReconciliationError as exc:
-                if time.time() - reconcile_warned_at.get(intent.id, 0.0) >= 300:
-                    logger.warning("[UNRECONCILED] %s", exc)
-                    reconcile_warned_at[intent.id] = time.time()
-                continue
-            intent_ledger.reconcile(intent.id)
-            record(
-                {
-                    "event": "intent_reconciled",
-                    "intent_id": intent.id,
-                    "market_id": intent.market_id,
-                    "side": intent.side,
-                    "order_id": intent.order_id,
-                    "ts": datetime.now(UTC).isoformat(),
-                }
-            )
     discord = DiscordTrades(state_dir, execution_mode)
     notifier = NotificationQueue()
+
+    trader = Trader(
+        TraderConfig(
+            execution_mode=execution_mode,
+            assets=tuple(assets),
+            entry_threshold=args.entry_threshold,
+            calibration_rmse=args.calibration_rmse,
+            max_daily_loss=args.max_daily_loss,
+            max_market_data_age_secs=args.max_market_data_age_secs,
+            dry_run=args.dry_run,
+            min_entry_price=args.min_entry_price,
+            max_entry_price=args.max_entry_price,
+            reentry_cooldown_secs=args.reentry_cooldown_hours * 3600,
+        ),
+        state_dir=state_dir,
+        scanner=scanner,
+        vol_surfaces=vol_surfaces,
+        positions=pos_mgr,
+        risk=risk_controls,
+        executor=executor,
+        intents=intent_ledger,
+        notify_entry=lambda pos, **kw: notifier.submit(notify_entry, discord, pos, **kw),
+        notify_exit=lambda pos, price, pnl, reason: notifier.submit(
+            notify_exit, discord, pos, price, pnl, reason
+        ),
+        running=lambda: running,
+    )
 
     logger.info("=== TurtleQuant Bot ===")
     logger.info(
@@ -498,821 +436,18 @@ def main() -> None:
 
     last_scan_time = 0.0
     last_reprice_time = 0.0
-    reprice_errors = 0  # data-plane errors since the last scan summary
-
     while running:
         now = time.time()
-
-        # ── Reprice open positions every 30s ─────────────────────────────────
         if now - last_reprice_time >= REPRICE_INTERVAL_SECS:
-            reconcile_in_process()
-            latest_spots = fetch_latest_closes(
-                [ASSET_TO_SYMBOL[pos.asset] for pos in pos_mgr.all_positions()]
-            )
-            position_spots = {
-                asset: latest_spots.get(symbol)
-                for asset, symbol in ASSET_TO_SYMBOL.items()
-            }
-            open_positions = pos_mgr.all_positions()
-            if open_positions:
-                logger.info("Repricing %d open position(s)", len(open_positions))
-            for pos in open_positions:
-                try:
-                    logger.info(
-                        "[REPRICE] %s K=%.0f exp=%s",
-                        pos.asset.upper(),
-                        pos.strike,
-                        pos.expiry_iso[:10],
-                    )
-                    # Settle positions whose expiry has passed
-                    if pos.status == "pending_redemption" or datetime.now(UTC) >= pos.expiry:
-                        # Expiry is not settlement. Keep the claim accounted for
-                        # until Gamma explicitly confirms its final resolution.
-                        resolved_price = (
-                            pos.resolution_price
-                            if pos.status == "pending_redemption"
-                            else scanner.fetch_resolution(pos.market_id, pos.yes_token_id)
-                        )
-                        if resolved_price is None:
-                            overdue_hours = (datetime.now(UTC) - pos.expiry).total_seconds() / 3600
-                            logger.log(
-                                logging.WARNING if overdue_hours > 24 else logging.INFO,
-                                "[EXPIRED_PENDING] Awaiting confirmed resolution for %s (%.1fh past expiry)",
-                                pos.market_id[:16],
-                                overdue_hours,
-                            )
-                            continue
-                        if execution_mode == "live":
-                            # Live payouts only exist once the CTF redemption lands;
-                            # until that is automated, hold the claim as pending.
-                            if pos.status != "pending_redemption":
-                                logger.info(
-                                    "[PENDING_REDEMPTION] %s K=%.0f exp=%s resolved=%.4f",
-                                    pos.asset.upper(),
-                                    pos.strike,
-                                    pos.expiry_iso[:10],
-                                    resolved_price,
-                                )
-                                pos_mgr.mark_pending_redemption(pos.market_id, resolved_price)
-                                record(
-                                    {
-                                        "event": "pending_redemption",
-                                        "market_id": pos.market_id,
-                                        "asset": pos.asset,
-                                        "strike": pos.strike,
-                                        "resolution_price": resolved_price,
-                                        "ts": datetime.now(UTC).isoformat(),
-                                    },
-                                )
-                            continue
-                        if args.dry_run:
-                            logger.info("[RESOLVED] %s would settle at %.4f (dry-run)", pos.market_id[:16], resolved_price)
-                            continue
-                        shares = pos.token_size
-                        _pos, pnl = pos_mgr.settle_position(pos.market_id, resolved_price)
-                        risk_controls.record_realized_pnl(pnl)
-                        record(
-                            {
-                                "event": "close",
-                                "market_id": pos.market_id,
-                                "asset": pos.asset,
-                                "strike": pos.strike,
-                                "reason": "resolved",
-                                "yes_price": resolved_price,
-                                "resolution_price": resolved_price,
-                                "filled_shares": shares,
-                                "remaining_shares": 0.0,
-                                "complete": True,
-                                "pnl": pnl,
-                                "ts": datetime.now(UTC).isoformat(),
-                            },
-                        )
-                        if _pos and _pos.fill_confirmed:
-                            notifier.submit(notify_exit, discord, _pos, resolved_price, pnl, "resolved")
-                        continue
-
-                    spot = position_spots.get(pos.asset)
-                    if spot is None:
-                        continue
-                    vs = vol_surfaces.get(pos.asset)
-                    if vs is None:
-                        continue
-                    from turtlequant.market_parser import MarketParams, OptionType
-
-                    params = MarketParams(
-                        asset=pos.asset,
-                        strike=pos.strike,
-                        expiry=pos.expiry,
-                        option_type=OptionType(pos.option_type),
-                    )
-                    sigma = vs.get_iv(spot, pos.strike, pos.expiry)
-                    model_prob = compute_probability(params, spot, sigma)
-
-                    # Fall back only to Gamma's live bid/ask. A stale last trade
-                    # or persisted mark is never an executable exit price: with
-                    # neither source there is no bid, and the position holds.
-                    gamma_bid, gamma_ask = scanner.fetch_market_quote(pos.market_id) or (0.0, 0.0)
-                    book = executor.get_order_book(
-                        pos.yes_token_id,
-                        fallback_bid=gamma_bid,
-                        fallback_ask=gamma_ask,
-                    )
-                    if book.best_bid > 0 or book.best_ask > 0:
-                        pos_mgr.record_market_data(
-                            pos.market_id,
-                            yes_price=book.mid,
-                            bid=book.best_bid,
-                            ask=book.best_ask,
-                            observed_at=datetime.now(UTC),
-                        )
-
-                    executable_exit_price = book.best_bid
-                    decision = pos_mgr.exit_decision(
-                        pos.market_id,
-                        model_prob,
-                        executable_exit_price,
-                        now=datetime.now(UTC),
-                    )
-                    if decision.should_exit:
-                        if args.dry_run:
-                            logger.info(
-                                "[DRY_RUN] Would exit %s reason=%s model_p=%.4f bid=%.4f",
-                                pos.market_id[:16],
-                                decision.reason,
-                                model_prob,
-                                executable_exit_price,
-                            )
-                            continue
-                        if market_has_open_intent(pos.market_id):
-                            logger.info("[EXIT_BLOCKED] %s has an unreconciled order intent", pos.market_id[:16])
-                            continue
-                        shares = (
-                            pos.token_size
-                            if pos.token_size > 0
-                            else pos.size_usd / pos.entry_price
-                        )
-                        exit_intent_id = (
-                            intent_ledger.pending(pos.market_id, pos.yes_token_id, "SELL", shares)
-                            if execution_mode == "live" else None
-                        )
-                        exit_fee = executor.get_market_fee(pos.condition_id, pos.yes_token_id)
-                        exit_result = executor.sell_yes(
-                            pos.yes_token_id, shares, book,
-                            fee=exit_fee if exit_fee is not None else DEFAULT_CRYPTO_FEE,
-                        )
-                        journal_result(exit_intent_id, exit_result)
-                        if exit_result.sent or exit_result.success:
-                            record(
-                                {
-                                    "event": "order",
-                                    "market_id": pos.market_id,
-                                    "asset": pos.asset,
-                                    "reason": decision.reason or "edge_reversed",
-                                    **exit_result.to_history(),
-                                    "ts": datetime.now(UTC).isoformat(),
-                                },
-                            )
-                        if not exit_result.success:
-                            if not exit_result.broker_failure:
-                                # No bids to sell into: a liquidity outcome, not a broker fault.
-                                # Keep holding and retry on the next reprice.
-                                logger.info(
-                                    "[EXIT_UNFILLED] %s %s: %s",
-                                    pos.market_id[:16],
-                                    decision.reason,
-                                    exit_result.error or "no executable depth",
-                                )
-                                continue
-                            risk_controls.record_failure(
-                                exit_result.error or exit_result.status
-                            )
-                            record(
-                                {
-                                    "event": "failed_order",
-                                    "market_id": pos.market_id,
-                                    "asset": pos.asset,
-                                    "side": "SELL",
-                                    "reason": decision.reason or "edge_reversed",
-                                    "remaining_shares": shares,
-                                    "remaining_size_usd": pos.size_usd,
-                                    "unhedged_exposure": True,
-                                    "error": exit_result.error
-                                    or exit_result.status,
-                                    "ts": datetime.now(UTC).isoformat(),
-                                },
-                            )
-                            continue
-                        filled_price = (
-                            exit_result.avg_price
-                            if exit_result and exit_result.avg_price > 0
-                            else executable_exit_price
-                        )
-                        filled_shares = (
-                            exit_result.filled_shares if exit_result else None
-                        )
-                        _pos, pnl = pos_mgr.close_position(
-                            pos.market_id,
-                            exit_price=filled_price,
-                            reason=decision.reason or "edge_reversed",
-                            filled_shares=filled_shares,
-                            exit_fee_usd=exit_result.fee_usd if exit_result else None,
-                        )
-                        if exit_result is not None and execution_mode == "live":
-                            intent_ledger.reconcile(exit_intent_id)
-                        risk_controls.record_realized_pnl(pnl)
-                        risk_controls.record_success(pos_mgr.marked_equity())
-                        record(
-                            {
-                                "event": "close"
-                                if exit_result is None or exit_result.complete
-                                else "partial_close",
-                                "market_id": pos.market_id,
-                                "asset": pos.asset,
-                                "strike": pos.strike,
-                                "reason": decision.reason or "edge_reversed",
-                                "model_prob": model_prob,
-                                "yes_price": filled_price,
-                                "bid": book.best_bid,
-                                "ask": book.best_ask,
-                                "current_edge": decision.current_edge,
-                                "entry_edge": decision.entry_edge,
-                                "hours_to_expiry": decision.hours_to_expiry,
-                                "filled_shares": filled_shares,
-                                "remaining_shares": (
-                                    max(0.0, shares - filled_shares)
-                                    if filled_shares is not None
-                                    else 0.0
-                                ),
-                                "complete": True
-                                if exit_result is None
-                                else exit_result.complete,
-                                "pnl": pnl,
-                                "ts": datetime.now(UTC).isoformat(),
-                            },
-                        )
-                        if (
-                            _pos
-                            and _pos.fill_confirmed
-                            and (exit_result is None or exit_result.complete)
-                        ):
-                            notifier.submit(
-                                notify_exit,
-                                discord,
-                                _pos,
-                                filled_price,
-                                pnl,
-                                decision.reason or "edge_reversed",
-                            )
-                    else:
-                        logger.info(
-                            "[HOLD] %s K=%.0f exp=%s model_p=%.4f mkt_p=%.4f edge=%.4f entry_edge=%.4f ttl=%.1fh",
-                            pos.asset.upper(),
-                            pos.strike,
-                            pos.expiry_iso[:10],
-                            model_prob,
-                            executable_exit_price,
-                            decision.current_edge,
-                            decision.entry_edge,
-                            decision.hours_to_expiry or 0.0,
-                        )
-                except StatePersistenceError:
-                    raise
-                except Exception as exc:
-                    # Data-plane error: logged and counted, never a broker failure.
-                    logger.warning("Reprice failed for %s: %s", pos.market_id[:16], exc)
-                    reprice_errors += 1
-
+            trader.reprice_positions()
             last_reprice_time = now
-
-        # ── Full market scan every 60s ────────────────────────────────────────
         if now - last_scan_time >= SCAN_INTERVAL_SECS:
             last_scan_time = now
-            try:
-                markets = scanner.get_active_markets()
-                logger.info("Scan: %d markets found", len(markets))
-            except Exception as exc:
-                # No markets means no entries; the breaker is for broker faults.
-                logger.warning("Market scan failed: %s", exc)
-                time.sleep(5)
-                continue
-
-            scan_started_at = datetime.now(UTC)
-            scan_stats: dict[str, object] = {
-                "event": "scan_summary",
-                "markets_passed_filters": len(markets),
-                "scanner_funnel": dict(scanner.last_scan_counts),
-                "parse_attempted": 0,
-                "parsed_markets": 0,
-                "unclassified_markets": 0,
-                "asset_skipped": 0,
-                "spot_missing": 0,
-                "implausible_strike": 0,
-                "market_errors": 0,
-                "vol_sources": {},
-                "mid_edge_candidates": 0,
-                "executable_edge_candidates": 0,
-                "ask_erased_edge": 0,
-                "book_sources": {},
-                "ts": scan_started_at.isoformat(),
-            }
-
-            def _inc_scan_stat(key: str, subkey: str | None = None) -> None:
-                if subkey is None:
-                    scan_stats[key] = int(scan_stats.get(key, 0)) + 1
-                    return
-                bucket = scan_stats.setdefault(key, {})
-                if isinstance(bucket, dict):
-                    bucket[subkey] = int(bucket.get(subkey, 0)) + 1
-
-            # Independent asset marks are bounded and fetched concurrently.
-            latest_spots = fetch_latest_closes(ASSET_TO_SYMBOL[a] for a in assets)
-            spots = {asset: latest_spots.get(ASSET_TO_SYMBOL[asset]) for asset in assets}
-            # Staleness is measured from when Gamma actually served the list;
-            # a cached list during an outage keeps its old timestamp.
-            market_data_at = scanner.markets_fetched_at
-            check_entry_gate(market_data_at)
-
-            for market in markets:
-                if not running:
-                    break
-                try:
-                    _inc_scan_stat("parse_attempted")
-                    params = parse_market(market.question, market.resolution_time)
-                    if params is None:
-                        _inc_scan_stat("unclassified_markets")
-                        continue
-                    _inc_scan_stat("parsed_markets")
-                    if params.asset not in assets:
-                        _inc_scan_stat("asset_skipped")
-                        continue
-
-                    spot = spots.get(params.asset)
-                    if spot is None or spot <= 0:
-                        _inc_scan_stat("spot_missing")
-                        continue
-                    if not strike_is_plausible(params.strike, spot):
-                        # A strike far from spot means the question was misparsed
-                        # (wrong units or not a price market) — never a real edge.
-                        _inc_scan_stat("implausible_strike")
-                        logger.info(
-                            "[PARSE_REJECTED] K=%g vs spot %.2f: %s",
-                            params.strike, spot, market.question[:100],
-                        )
-                        continue
-
-                    vs = vol_surfaces[params.asset]
-                    sigma = vs.get_iv(spot, params.strike, params.expiry)
-                    vol_source = vs.last_source
-                    _inc_scan_stat("vol_sources", vol_source)
-                    model_prob = compute_probability(params, spot, sigma)
-                    yes_price = market.yes_price
-                    edge = model_prob - yes_price
-
-                    if pos_mgr.has_position(market.market_id):
-                        pos_mgr.record_market_data(
-                            market.market_id,
-                            yes_token_id=market.yes_token_id,
-                            condition_id=market.condition_id,
-                            yes_price=yes_price,
-                            bid=market.bid,
-                            ask=market.ask,
-                            observed_at=datetime.now(UTC),
-                        )
-
-                    logger.debug(
-                        "%s K=%.0f exp=%s model_p=%.4f mkt_p=%.4f edge=%+.4f σ=%.3f",
-                        params.asset.upper(),
-                        params.strike,
-                        params.expiry.strftime("%Y-%m-%d"),
-                        model_prob,
-                        yes_price,
-                        edge,
-                        sigma,
-                    )
-
-                    # ── Check exit for existing positions ─────────────────
-                    if pos_mgr.has_position(market.market_id):
-                        book = executor.get_order_book(
-                            market.yes_token_id,
-                            fallback_bid=market.bid,
-                            fallback_ask=market.ask,
-                        )
-                        executable_exit_price = book.best_bid
-                        decision = pos_mgr.exit_decision(
-                            market.market_id,
-                            model_prob,
-                            executable_exit_price,
-                            now=datetime.now(UTC),
-                        )
-                        if decision.should_exit:
-                            if args.dry_run:
-                                logger.info(
-                                    "[DRY_RUN] Would exit %s reason=%s model_p=%.4f bid=%.4f",
-                                    market.market_id[:16],
-                                    decision.reason,
-                                    model_prob,
-                                    executable_exit_price,
-                                )
-                                continue
-                            if market_has_open_intent(market.market_id):
-                                logger.info(
-                                    "[EXIT_BLOCKED] %s has an unreconciled order intent", market.market_id[:16]
-                                )
-                                continue
-                            exit_result = None
-                            pos = pos_mgr.get_position(market.market_id)
-                            if pos:
-                                token_id = pos.yes_token_id or market.yes_token_id
-                                shares = (
-                                    pos.token_size
-                                    if pos.token_size > 0
-                                    else pos.size_usd / pos.entry_price
-                                )
-                                exit_intent_id = (
-                                    intent_ledger.pending(market.market_id, token_id, "SELL", shares)
-                                    if execution_mode == "live" else None
-                                )
-                                exit_fee = executor.get_market_fee(market.condition_id, token_id)
-                                exit_result = executor.sell_yes(
-                                    token_id, shares, book,
-                                    fee=exit_fee if exit_fee is not None else DEFAULT_CRYPTO_FEE,
-                                )
-                                journal_result(exit_intent_id, exit_result)
-                                if exit_result.sent or exit_result.success:
-                                    record(
-                                        {
-                                            "event": "order",
-                                            "market_id": market.market_id,
-                                            "asset": params.asset,
-                                            "reason": decision.reason
-                                            or "edge_reversed",
-                                            **exit_result.to_history(),
-                                            "ts": datetime.now(UTC).isoformat(),
-                                        },
-                                    )
-                                if not exit_result.success:
-                                    if not exit_result.broker_failure:
-                                        # No bids to sell into: a liquidity outcome, not a broker fault.
-                                        # Keep holding and retry on the next reprice.
-                                        logger.info(
-                                            "[EXIT_UNFILLED] %s %s: %s",
-                                            pos.market_id[:16],
-                                            decision.reason,
-                                            exit_result.error or "no executable depth",
-                                        )
-                                        continue
-                                    risk_controls.record_failure(
-                                        exit_result.error or exit_result.status
-                                    )
-                                    record(
-                                        {
-                                            "event": "failed_order",
-                                            "market_id": market.market_id,
-                                            "asset": params.asset,
-                                            "side": "SELL",
-                                            "reason": decision.reason
-                                            or "edge_reversed",
-                                            "remaining_shares": shares,
-                                            "remaining_size_usd": pos.size_usd,
-                                            "unhedged_exposure": True,
-                                            "error": exit_result.error
-                                            or exit_result.status,
-                                            "ts": datetime.now(UTC).isoformat(),
-                                        },
-                                    )
-                                    continue
-                            filled_price = (
-                                exit_result.avg_price
-                                if exit_result and exit_result.avg_price > 0
-                                else executable_exit_price
-                            )
-                            filled_shares = (
-                                exit_result.filled_shares if exit_result else None
-                            )
-                            _pos, pnl = pos_mgr.close_position(
-                                market.market_id,
-                                exit_price=filled_price,
-                                reason=decision.reason or "edge_reversed",
-                                filled_shares=filled_shares,
-                                exit_fee_usd=exit_result.fee_usd if exit_result else None,
-                            )
-                            if exit_result is not None and execution_mode == "live":
-                                intent_ledger.reconcile(exit_intent_id)
-                            risk_controls.record_realized_pnl(pnl)
-                            risk_controls.record_success(pos_mgr.marked_equity())
-                            record(
-                                {
-                                    "event": "close"
-                                    if exit_result is None or exit_result.complete
-                                    else "partial_close",
-                                    "market_id": market.market_id,
-                                    "asset": params.asset,
-                                    "strike": params.strike,
-                                    "reason": decision.reason or "edge_reversed",
-                                    "model_prob": model_prob,
-                                    "yes_price": filled_price,
-                                    "bid": book.best_bid,
-                                    "ask": book.best_ask,
-                                    "current_edge": decision.current_edge,
-                                    "entry_edge": decision.entry_edge,
-                                    "hours_to_expiry": decision.hours_to_expiry,
-                                    "filled_shares": filled_shares,
-                                    "remaining_shares": (
-                                        max(0.0, shares - filled_shares)
-                                        if filled_shares is not None
-                                        else 0.0
-                                    ),
-                                    "complete": True
-                                    if exit_result is None
-                                    else exit_result.complete,
-                                    "pnl": pnl,
-                                    "ts": datetime.now(UTC).isoformat(),
-                                },
-                            )
-                            if (
-                                _pos
-                                and _pos.fill_confirmed
-                                and (exit_result is None or exit_result.complete)
-                            ):
-                                notifier.submit(
-                                    notify_exit,
-                                    discord,
-                                    _pos,
-                                    filled_price,
-                                    pnl,
-                                    decision.reason or "edge_reversed",
-                                )
-                        continue
-
-                    # ── Check entry ───────────────────────────────────────
-                    # Skip if this market was recently closed (re-entry cooldown)
-                    if pos_mgr.closed_within(market.market_id, REENTRY_COOLDOWN_SECS):
-                        logger.debug(
-                            "Cooldown active for %s — skip re-entry",
-                            market.market_id[:16],
-                        )
-                        continue
-
-                    if not check_entry_gate(market_data_at):
-                        continue
-
-                    if edge < args.entry_threshold:
-                        continue
-                    _inc_scan_stat("mid_edge_candidates")
-                    if yes_price <= 0.02 or yes_price >= 0.98:
-                        continue  # near-certain markets — skip
-
-                    # Place order
-                    book = executor.get_order_book(
-                        market.yes_token_id,
-                        fallback_bid=market.bid,
-                        fallback_ask=market.ask,
-                    )
-                    _inc_scan_stat("book_sources", book.source)
-                    preliminary_size = pos_mgr.kelly_size(edge, model_prob, book.best_ask)
-                    fill_estimate = estimate_buy_fill(book, preliminary_size)
-                    fee = executor.get_market_fee(market.condition_id, market.yes_token_id)
-                    if execution_mode == "live" and fee is None:
-                        logger.warning("[ENTRY_REJECTED] Missing CLOB fee rate for %s", market.market_id[:16])
-                        continue
-                    fee = fee if fee is not None else DEFAULT_CRYPTO_FEE
-                    estimated_fee = fee.fee(
-                        fill_estimate.filled_shares,
-                        fill_estimate.avg_price,
-                    )
-                    executable_entry_price = (
-                        (fill_estimate.filled_usd + estimated_fee) / fill_estimate.filled_shares
-                        if fill_estimate.filled_shares > 0
-                        else 0.0
-                    )
-                    # Logged for diagnostics only — not used to gate or size entries.
-                    # A 1.645*RMSE haircut here (on top of entry_threshold, which
-                    # already encodes the required edge) was found to silently
-                    # raise the effective entry bar from 5% to ~13.25%, which is
-                    # what collapsed trade frequency starting 2026-07-15.
-                    conservative_prob = max(
-                        0.0, model_prob - 1.645 * args.calibration_rmse
-                    )
-                    entry_edge = model_prob - executable_entry_price
-                    size_usd = pos_mgr.kelly_size(
-                        entry_edge, model_prob, executable_entry_price
-                    )
-                    fill_estimate = estimate_buy_fill(book, size_usd)
-                    if size_usd < 1.0 or not fill_estimate.complete:
-                        continue
-                    if not pos_mgr.has_expiry_headroom(params.expiry, size_usd):
-                        logger.info("Per-expiry cap reached for %s — skip", params.expiry.strftime("%Y-%m-%d"))
-                        continue
-                    fill_ratio = (
-                        min(1.0, fill_estimate.filled_usd / size_usd)
-                        if size_usd > 0
-                        else 0.0
-                    )
-                    record(
-                        {
-                            "event": "signal_evaluation",
-                            "parsed": True,
-                            "market_id": market.market_id,
-                            "asset": params.asset,
-                            "strike": params.strike,
-                            "expiry": params.expiry.isoformat(),
-                            "option_type": params.option_type.value,
-                            "model_prob": model_prob,
-                            "conservative_prob": conservative_prob,
-                            "mid_price": yes_price,
-                            "executable_price": executable_entry_price,
-                            "mid_edge": edge,
-                            "ask_edge": entry_edge,
-                            "entry_threshold": args.entry_threshold,
-                            "ask_erased_edge": entry_edge < args.entry_threshold,
-                            "requested_size_usd": size_usd,
-                            "estimated_fill_ratio": fill_ratio,
-                            "estimated_avg_price": fill_estimate.avg_price,
-                            "estimated_slippage": fill_estimate.avg_price - yes_price
-                            if fill_estimate.avg_price > 0
-                            else 0.0,
-                            "estimated_complete": fill_estimate.complete,
-                            "fee_rate": fee.rate,
-                            "fee_exponent": fee.exponent,
-                            "estimated_fee": estimated_fee,
-                            "vol_source": vol_source,
-                            "sigma": sigma,
-                            "book_source": book.source,
-                            "quote": book.to_dict(),
-                            "ts": datetime.now(UTC).isoformat(),
-                        },
-                    )
-                    quote_reason = (
-                        "ask_erased_edge"
-                        if entry_edge < args.entry_threshold
-                        else "executable_edge"
-                    )
-                    record(
-                        {
-                            "event": "shadow_quote",
-                            "market_id": market.market_id,
-                            "asset": params.asset,
-                            "model_prob": model_prob,
-                            "mid_price": yes_price,
-                            "bid": book.best_bid,
-                            "ask": book.best_ask,
-                            "edge": entry_edge,
-                            "reason": quote_reason,
-                            "book_source": book.source,
-                            "vol_source": vol_source,
-                            # Book depth is already on the signal_evaluation event.
-                            "ts": datetime.now(UTC).isoformat(),
-                        },
-                    )
-                    if entry_edge < args.entry_threshold:
-                        _inc_scan_stat("ask_erased_edge")
-                        continue
-                    _inc_scan_stat("executable_edge_candidates")
-                    if args.dry_run:
-                        logger.info(
-                            "[DRY_RUN] Would buy %s $%.2f at %.4f (model_p=%.4f edge=%.4f)",
-                            market.market_id[:16],
-                            size_usd,
-                            executable_entry_price,
-                            model_prob,
-                            entry_edge,
-                        )
-                        continue
-                    intent_id = (
-                        intent_ledger.pending(
-                            market.market_id, market.yes_token_id, "BUY", size_usd,
-                            {
-                                "question": market.question, "asset": params.asset,
-                                "strike": params.strike, "expiry_iso": params.expiry.isoformat(),
-                                "option_type": params.option_type.value, "model_prob": model_prob,
-                                "condition_id": market.condition_id,
-                            },
-                        )
-                        if execution_mode == "live"
-                        else None
-                    )
-                    entry_result = executor.buy_yes(
-                        market.yes_token_id,
-                        size_usd,
-                        book,
-                        max_price=min(0.99, model_prob - args.entry_threshold),
-                        fee=fee,
-                    )
-                    journal_result(intent_id, entry_result)
-                    record(
-                        {
-                            "event": "order",
-                            "market_id": market.market_id,
-                            "asset": params.asset,
-                            **entry_result.to_history(),
-                            "ts": datetime.now(UTC).isoformat(),
-                        },
-                    )
-                    if not entry_result.success:
-                        if entry_result.broker_failure:
-                            risk_controls.record_failure(
-                                entry_result.error or entry_result.status
-                            )
-                        record(
-                            {
-                                "event": "failed_order",
-                                "market_id": market.market_id,
-                                "asset": params.asset,
-                                "side": "BUY",
-                                "error": entry_result.error or entry_result.status,
-                                "ts": datetime.now(UTC).isoformat(),
-                            },
-                        )
-                        continue
-
-                    pos = make_position(
-                        market_id=market.market_id,
-                        question=market.question,
-                        asset=params.asset,
-                        strike=params.strike,
-                        expiry=params.expiry,
-                        option_type=params.option_type.value,
-                        yes_token_id=market.yes_token_id,
-                        yes_price=entry_result.avg_price,
-                        size_usd=entry_result.filled_usd,
-                        model_prob=model_prob,
-                        token_size=entry_result.filled_shares,
-                        condition_id=market.condition_id,
-                    )
-                    pos_mgr.open_position(pos)
-                    pos_mgr.confirm_fill(
-                        market.market_id,
-                        entry_result.avg_price,
-                        yes_token_id=market.yes_token_id,
-                        size_usd=entry_result.filled_usd,
-                        token_size=entry_result.filled_shares,
-                        bid=book.best_bid,
-                        ask=book.best_ask,
-                        fee_usd=entry_result.fee_usd,
-                    )
-                    if intent_id is not None:
-                        intent_ledger.reconcile(intent_id)
-                    risk_controls.record_success(pos_mgr.marked_equity())
-                    record(
-                        {
-                            "event": "open",
-                            "market_id": market.market_id,
-                            "question": market.question[:120],
-                            "asset": params.asset,
-                            "strike": params.strike,
-                            "expiry": params.expiry.isoformat(),
-                            "option_type": params.option_type.value,
-                            "model_prob": model_prob,
-                            "yes_price": entry_result.avg_price,
-                            "bid": book.best_bid,
-                            "ask": book.best_ask,
-                            "mid_price": yes_price,
-                            "edge": entry_edge,
-                            "size_usd": entry_result.filled_usd,
-                            "requested_size_usd": size_usd,
-                            "filled_shares": entry_result.filled_shares,
-                            "complete": entry_result.complete,
-                            "slippage": entry_result.avg_price - yes_price,
-                            "sigma": sigma,
-                            "vol_source": vol_source,
-                            "book_source": book.source,
-                            "yes_token_id": market.yes_token_id,
-                            "fill_confirmed": True,
-                            "ts": datetime.now(UTC).isoformat(),
-                        },
-                    )
-                    notifier.submit(
-                        notify_entry,
-                        discord,
-                        pos,
-                        model_prob=model_prob,
-                        bid=book.best_bid,
-                        ask=book.best_ask,
-                        sigma=sigma,
-                    )
-
-                except StatePersistenceError:
-                    raise
-                except Exception as exc:
-                    logger.warning(
-                        "Market processing error (%s): %s", market.market_id[:16], exc
-                    )
-                    _inc_scan_stat("market_errors")
-
-            scan_stats["reprice_errors"] = reprice_errors
-            reprice_errors = 0
-            risk_controls.record_scan(
-                errors=int(scan_stats["market_errors"]),
-                attempted=int(scan_stats["parse_attempted"]),
-            )
-            record(scan_stats)
-
-        # Sleep until next event
+            trader.scan()
         time.sleep(5)
 
     notifier.close()
     logger.info("TurtleQuant bot stopped.")
-
 
 if __name__ == "__main__":
     main()

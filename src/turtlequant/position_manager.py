@@ -7,10 +7,10 @@ NAV limits:
   - Max per expiry:     15% NAV  (correlated risk control)
   - Max total exposure: 40% NAV
 
-Exit triggers:
+Exit triggers (thresholds are PositionManager fields; defaults shown):
   - edge reversed: model_prob < yes_price
-  - edge decayed: current edge falls below 40% of entry edge
-  - time cleanup: <= 6h to expiry and edge <= 5%
+  - edge decayed: current edge falls below 40% of entry edge (edge_decay_ratio)
+  - time cleanup: <= 6h to expiry (cleanup_hours) and edge <= 5% (cleanup_edge)
 """
 
 from __future__ import annotations
@@ -99,6 +99,9 @@ class PositionManager:
     max_per_market_pct: float = DEFAULT_MAX_PER_MARKET_PCT
     max_per_expiry_pct: float = DEFAULT_MAX_PER_EXPIRY_PCT
     max_total_exposure_pct: float = DEFAULT_MAX_TOTAL_EXPOSURE_PCT
+    edge_decay_ratio: float = 0.4
+    cleanup_hours: float = 6.0
+    cleanup_edge: float = 0.05
     positions_file: Path = field(default_factory=lambda: DEFAULT_POSITIONS_FILE)
     persist: bool = True  # False (dry-run) keeps every change in memory only
     _positions: dict[str, Position] = field(default_factory=dict, repr=False)
@@ -389,9 +392,9 @@ class PositionManager:
 
         if current_edge <= 0:
             return ExitDecision(True, "edge_reversed", current_edge, entry_edge, hours_to_expiry)
-        if entry_edge > 0 and current_edge <= 0.4 * entry_edge:
+        if entry_edge > 0 and current_edge <= self.edge_decay_ratio * entry_edge:
             return ExitDecision(True, "edge_decayed", current_edge, entry_edge, hours_to_expiry)
-        if hours_to_expiry <= 6.0 and current_edge <= 0.05:
+        if hours_to_expiry <= self.cleanup_hours and current_edge <= self.cleanup_edge:
             return ExitDecision(True, "time_cleanup", current_edge, entry_edge, hours_to_expiry)
         return ExitDecision(False, None, current_edge, entry_edge, hours_to_expiry)
 

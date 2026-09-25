@@ -23,6 +23,14 @@ DATA_SOURCE: str = os.getenv("DATA_SOURCE", "auto").lower()
 
 BASE_URL = "https://api.binance.com/api/v3/klines"
 
+# Binance spot symbols for the assets TurtleQuant prices (single source).
+ASSET_TO_SYMBOL: dict[str, str] = {
+    "btc": "BTCUSDT",
+    "eth": "ETHUSDT",
+    "sol": "SOLUSDT",
+    "xrp": "XRPUSDT",
+}
+
 # Bybit — globally accessible on most hosts, deep history (5m back to 2020+)
 BYBIT_BASE_URL = "https://api.bybit.com/v5/market/kline"
 BYBIT_INTERVAL_MAP = {
