@@ -15,12 +15,20 @@ services:
     environment:
       STATE_DIR: "/app/state"
       LOG_FILE: "/app/state/turtlequant-bot.log"
+      # Wallet and CLOB API secrets are passed to the live bot only.
+      POLYMARKET_PRIVATE_KEY: "${POLYMARKET_PRIVATE_KEY:-}"
+      PRIVATE_KEY: "${PRIVATE_KEY:-}"
+      POLYMARKET_API_KEY: "${POLYMARKET_API_KEY:-}"
+      POLYMARKET_API_SECRET: "${POLYMARKET_API_SECRET:-}"
+      POLYMARKET_API_PASSPHRASE: "${POLYMARKET_API_PASSPHRASE:-}"
+      CLOB_API_KEY: "${CLOB_API_KEY:-}"
+      CLOB_API_SECRET: "${CLOB_API_SECRET:-}"
+      CLOB_API_PASSPHRASE: "${CLOB_API_PASSPHRASE:-}"
       POLYMARKET_SIGNATURE_TYPE: "0"
       POLYMARKET_FUNDER: ""
 
   turtlequant-grafana-exporter:
     volumes:
       - /opt/turtlequant/state/live-state:/opt/turtlequant/state:ro
-      - .:/app
     environment:
       STATE_DIR: "/opt/turtlequant/state"

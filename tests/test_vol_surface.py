@@ -48,3 +48,32 @@ def test_interpolate_uses_otm_wing_and_total_variance():
 
     assert iv == pytest.approx((0.13) ** 0.5, rel=1e-4)
     assert wing_iv == pytest.approx(0.20)
+
+
+def test_deribit_auth_sends_secret_in_post_body_not_url():
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"result": {"access_token": "tok"}}
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        def post(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            return FakeResponse()
+
+        def get(self, url, **kwargs):  # pragma: no cover - must not be used for auth
+            raise AssertionError("auth must not use GET")
+
+    session = FakeSession()
+    surface = VolSurface(asset="btc", _session=session)
+
+    assert surface._fetch_access_token("cid", "supersecret") == "tok"
+    (url, kwargs), = session.calls
+    assert "supersecret" not in url
+    assert kwargs["json"]["method"] == "public/auth"
+    assert kwargs["json"]["params"]["client_secret"] == "supersecret"

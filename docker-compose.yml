@@ -1,4 +1,6 @@
 x-bot-common: &bot-common
+  # One image, built from uv.lock, for the bot and the exporter.
+  image: turtlequant:local
   build:
     context: .
     dockerfile: Dockerfile
@@ -37,16 +39,8 @@ services:
       LOG_FILE: "/app/state/turtlequant-bot.log"
       DERIBIT_CLIENT_ID: "${DERIBIT_CLIENT_ID:-}"
       DERIBIT_CLIENT_SECRET: "${DERIBIT_CLIENT_SECRET:-}"
-      POLYMARKET_PRIVATE_KEY: "${POLYMARKET_PRIVATE_KEY:-}"
-      PRIVATE_KEY: "${PRIVATE_KEY:-}"
-      POLYMARKET_API_KEY: "${POLYMARKET_API_KEY:-}"
-      POLYMARKET_API_SECRET: "${POLYMARKET_API_SECRET:-}"
-      POLYMARKET_API_PASSPHRASE: "${POLYMARKET_API_PASSPHRASE:-}"
-      CLOB_API_KEY: "${CLOB_API_KEY:-}"
-      CLOB_API_SECRET: "${CLOB_API_SECRET:-}"
-      CLOB_API_PASSPHRASE: "${CLOB_API_PASSPHRASE:-}"
-      POLYMARKET_SIGNATURE_TYPE: "${POLYMARKET_SIGNATURE_TYPE:-0}"
-      POLYMARKET_FUNDER: "${POLYMARKET_FUNDER:-}"
+      # No wallet or CLOB API secrets here: shadow/paper only read public
+      # books and fees. They are passed by docker-compose.live.yml alone.
       DISCORD_TRADES: "${DISCORD_TRADES:-all}"
       DISCORD_CHART_INTERVAL: "${DISCORD_CHART_INTERVAL:-1h}"
     healthcheck:
@@ -61,24 +55,23 @@ services:
       start_period: 120s
 
   # Prometheus metrics exporter — reads TurtleQuant JSON state files
+  # Runs from the lockfile-built bot image. Only src/ and scripts/ are
+  # mounted (read-only) so the checkout's .env never reaches this container.
   turtlequant-grafana-exporter:
-    image: python:3.12-slim
+    <<: *bot-common
     container_name: turtlequant-grafana-exporter
-    command: >
-      sh -c "pip install prometheus_client requests numpy -q &&
-             python /app/scripts/grafana_exporter.py"
+    command: ["python", "scripts/grafana_exporter.py"]
     volumes:
       - /opt/turtlequant/state:/opt/turtlequant/state:ro
-      - .:/app
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
     ports:
       - "127.0.0.1:8004:8004"
     networks:
       - monitoring_net
-    restart: unless-stopped
     environment:
       EXPORTER_PORT: "8004"
       STATE_DIR: "/opt/turtlequant/state"
-      PYTHONPATH: "/app/src"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/metrics', timeout=3)\""]
       interval: 30s

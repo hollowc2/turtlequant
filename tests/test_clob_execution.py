@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from turtlequant.clob_execution import (
     DEFAULT_CRYPTO_FEE,
     BookLevel,
@@ -140,6 +142,23 @@ def test_build_clob_client_derives_api_creds_when_not_in_env(monkeypatch):
     mock_ctor.assert_called_once()
     fake_client.create_or_derive_api_key.assert_called_once()
     fake_client.set_api_creds.assert_called_once_with(fake_creds)
+
+
+@pytest.mark.parametrize("mode", ["paper", "shadow"])
+def test_non_live_client_ignores_wallet_key(monkeypatch, mode):
+    monkeypatch.setenv("POLYMARKET_PRIVATE_KEY", "0x" + "11" * 32)
+    monkeypatch.setenv("POLYMARKET_API_KEY", "k")
+    monkeypatch.setenv("POLYMARKET_API_SECRET", "s")
+    monkeypatch.setenv("POLYMARKET_API_PASSPHRASE", "p")
+    fake_client = MagicMock()
+
+    with patch("py_clob_client_v2.ClobClient", return_value=fake_client) as mock_ctor:
+        client = ExecutionClient(mode=mode)
+
+    assert client._client is fake_client
+    mock_ctor.assert_called_once_with(host=client.host, chain_id=client.chain_id)
+    fake_client.create_or_derive_api_key.assert_not_called()
+    fake_client.set_api_creds.assert_not_called()
 
 
 def test_live_sell_records_actual_partial_fill_from_clob_response():

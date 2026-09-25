@@ -388,12 +388,14 @@ class ExecutionClient:
         except ImportError:
             return None
 
-        private_key, api_key, api_secret, api_passphrase, signature_type, funder = _polymarket_env()
-
-        if self.mode == "live" and not private_key:
-            raise RuntimeError("POLYMARKET_PRIVATE_KEY or PRIVATE_KEY is required for live CLOB execution")
-        if not private_key:
+        # Books, market info and fee rates are public. Only live orders need the
+        # wallet, so paper/shadow never read the key or derive API credentials.
+        if self.mode != "live":
             return ClobClient(host=self.host, chain_id=self.chain_id)
+
+        private_key, api_key, api_secret, api_passphrase, signature_type, funder = _polymarket_env()
+        if not private_key:
+            raise RuntimeError("POLYMARKET_PRIVATE_KEY or PRIVATE_KEY is required for live CLOB execution")
 
         kwargs: dict[str, Any] = {
             "host": self.host,

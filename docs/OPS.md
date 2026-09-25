@@ -37,10 +37,15 @@ Compose interpolates only the variables listed in `docker-compose.yml` from `.en
 
 | Variable | Required when |
 |----------|----------------|
-| `DERIBIT_CLIENT_ID`, `DERIBIT_CLIENT_SECRET` | Always recommended (rate limits) |
-| `POLYMARKET_PRIVATE_KEY` (or `PRIVATE_KEY`) | `--live` / `--shadow` with authenticated CLOB |
-| `POLYMARKET_API_*` | Optional — derived from private key at runtime if omitted |
+| `DERIBIT_CLIENT_ID`, `DERIBIT_CLIENT_SECRET` | Optional — public IV data works without them; sent in a POST body, never a URL |
+| `POLYMARKET_PRIVATE_KEY` (or `PRIVATE_KEY`) | `--live` only (passed by `docker-compose.live.yml`) |
+| `POLYMARKET_API_*` | `--live` only — derived from the private key at startup if omitted |
 | `POLYMARKET_SIGNATURE_TYPE`, `POLYMARKET_FUNDER` | Proxy wallet setups (`SIGNATURE_TYPE=1`) |
+
+Shadow and paper mode never read the wallet key: books, market info and fee rates are
+public CLOB endpoints, so the base `docker-compose.yml` passes no Polymarket secrets.
+The exporter runs from the same lockfile-built image and mounts only `src/` and
+`scripts/` read-only, so the checkout's `.env` never enters a container.
 
 Legacy aliases from `crypto_up_or_down` are supported: `PRIVATE_KEY`, `CLOB_API_*`, `FUNDER_ADDRESS`, `SIGNATURE_TYPE`.
 
