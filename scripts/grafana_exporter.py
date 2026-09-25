@@ -798,22 +798,22 @@ class TurtleQuantCollector:
         pos_size_g = GaugeMetricFamily(
             "turtlequant_position_size_usd",
             "Open position size in USD",
-            labels=["strategy", "market_id", "asset", "option_type"],
+            labels=["strategy", "market_id", "asset", "option_type", "outcome"],
         )
         pos_edge_g = GaugeMetricFamily(
             "turtlequant_position_edge_at_entry",
             "Edge at entry for open position",
-            labels=["strategy", "market_id", "asset", "option_type"],
+            labels=["strategy", "market_id", "asset", "option_type", "outcome"],
         )
         pos_age_g = GaugeMetricFamily(
             "turtlequant_position_age_hours",
             "Hours since position was opened",
-            labels=["strategy", "market_id", "asset", "option_type"],
+            labels=["strategy", "market_id", "asset", "option_type", "outcome"],
         )
         pos_model_prob_g = GaugeMetricFamily(
             "turtlequant_position_model_prob_at_entry",
             "Model probability at entry for open position",
-            labels=["strategy", "market_id", "asset", "option_type"],
+            labels=["strategy", "market_id", "asset", "option_type", "outcome"],
         )
 
         # --- Recent closed trades ---
@@ -919,7 +919,7 @@ class TurtleQuantCollector:
                 mid = str(pos.get("market_id", ""))
                 asset = str(pos.get("asset", ""))
                 opt_type = str(pos.get("option_type", ""))
-                pos_labels = [strategy, mid, asset, opt_type]
+                pos_labels = [strategy, mid, asset, opt_type, str(pos.get("outcome") or "YES")]
 
                 size = pos.get("size_usd")
                 if size is not None:

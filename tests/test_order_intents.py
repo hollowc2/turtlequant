@@ -167,3 +167,24 @@ def test_order_intents_cli_lists_and_resolves(tmp_path, capsys):
     assert cli.main(["--state-dir", str(tmp_path), "resolve", str(intent), "failed", "no order at broker"]) == 0
     assert OrderIntentLedger(tmp_path / cli.LEDGER_FILE).outstanding() == []
     assert cli.main(["--state-dir", str(tmp_path), "resolve", str(intent), "failed", "again"]) == 1
+
+
+def test_recovery_rebuilds_a_no_position_on_the_no_token(tmp_path):
+    ledger = OrderIntentLedger(tmp_path / "intents.sqlite3")
+    intent = ledger.pending("market", "no-token", "BUY", 10.0, {
+        "question": "Will BTC rise?", "asset": "btc", "strike": 100_000,
+        "expiry_iso": "2026-08-01T00:00:00+00:00", "option_type": "european", "model_prob": 0.6,
+        "outcome": "NO", "yes_token_id": "yes-token", "no_token_id": "no-token",
+    })
+    ledger.submitted(intent, "order-1", {})
+    broker = _Broker(
+        {"status": "matched", "makingAmount": "9000000", "takingAmount": "20000000"},
+        [_trade("20000000", "0.45")],
+    )
+    positions = PositionManager(positions_file=tmp_path / "positions.json")
+
+    reconcile_outstanding(ledger, ExecutionClient(clob_client=broker), positions)
+
+    pos = positions.get_position("market")
+    assert (pos.outcome, pos.token_id, pos.yes_token_id) == ("NO", "no-token", "yes-token")
+    assert ledger.outstanding() == []

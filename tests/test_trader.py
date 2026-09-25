@@ -37,8 +37,10 @@ class FakeScanner:
     def fetch_market_quote(self, _market_id):
         return self.quote
 
-    def fetch_resolution(self, _market_id, _token_id=""):
-        return self.resolution
+    def fetch_resolution(self, _market_id, _token_id="", outcome="YES"):
+        if self.resolution is None:
+            return None
+        return 1.0 - self.resolution if outcome == "NO" else self.resolution  # resolution = YES payout
 
 
 class FakeVol:
@@ -54,15 +56,23 @@ class FakeVol:
 
 
 class FakeClob:
+    """YES book as given; the NO token ("no-1") mirrors it, as on the live CLOB."""
+
     def __init__(self, bids=((0.39, 500),), asks=((0.41, 500),)):
         self.bids, self.asks = bids, asks
         self.book_calls = 0
+        self.tokens_booked: list[str] = []
 
-    def get_order_book(self, _token_id):
+    def get_order_book(self, token_id):
         self.book_calls += 1
+        self.tokens_booked.append(token_id)
+        bids, asks = self.bids, self.asks
+        if token_id == "no-1":
+            bids = tuple((round(1 - p, 6), s) for p, s in self.asks)
+            asks = tuple((round(1 - p, 6), s) for p, s in self.bids)
         return {
-            "bids": [{"price": str(p), "size": str(s)} for p, s in self.bids],
-            "asks": [{"price": str(p), "size": str(s)} for p, s in self.asks],
+            "bids": [{"price": str(p), "size": str(s)} for p, s in bids],
+            "asks": [{"price": str(p), "size": str(s)} for p, s in asks],
         }
 
     def get_clob_market_info(self, _condition_id):
@@ -434,3 +444,60 @@ def test_kelly_shrink_sizes_toward_the_market(tmp_path):
 
     assert shrunk.positions.get_position("m-1").size_usd < raw.positions.get_position("m-1").size_usd
     assert not at_market.positions.has_position("m-1")  # the mid has no edge over the ask
+
+
+# Market at 0.70/0.72 while the model (~0.52) says YES is overpriced: a NO edge.
+def _rich_yes():
+    return FakeScanner([market(bid=0.70, ask=0.72)]), FakeClob(bids=((0.70, 500),), asks=((0.72, 500),))
+
+
+def test_no_side_is_off_by_default(tmp_path):
+    scanner, clob = _rich_yes()
+    trader = make_trader(tmp_path, scanner=scanner, clob=clob)
+
+    trader.scan()
+
+    assert not trader.positions.has_position("m-1")
+
+
+def test_no_side_buys_the_no_token_when_enabled(tmp_path):
+    scanner, clob = _rich_yes()
+    trader = make_trader(tmp_path, scanner=scanner, clob=clob, sides=("YES", "NO"))
+
+    stats = trader.scan()
+
+    pos = trader.positions.get_position("m-1")
+    assert pos is not None and pos.outcome == "NO" and pos.token_id == "no-1"
+    assert pos.yes_token_id == "yes-1"
+    assert pos.entry_price == pytest.approx(0.30)  # NO ask = 1 - YES bid
+    assert pos.model_prob_at_entry == pytest.approx(1 - 0.52, abs=0.02)
+    assert "no-1" in clob.tokens_booked
+    assert stats["no_side_candidates"] == 1
+    opened = [e for e in events(tmp_path) if e["event"] == "open"][0]
+    assert opened["outcome"] == "NO" and opened["token_id"] == "no-1"
+    assert trader.asset_risk["btc"]["delta_usd"] < 0  # NO on "above 80k" is short BTC
+
+
+def test_no_position_exits_on_the_no_book_and_settles_on_the_no_payout(tmp_path):
+    scanner, clob = _rich_yes()
+    trader = make_trader(tmp_path, scanner=scanner, clob=clob, sides=("YES", "NO"))
+    trader.scan()
+    assert trader.positions.get_position("m-1").outcome == "NO"
+
+    # YES collapses to 0.20/0.22: the NO bid (0.78) is now far above P(NO) ~0.48.
+    trader.executor._client.bids, trader.executor._client.asks = ((0.20, 500),), ((0.22, 500),)
+    trader.reprice_positions()
+    close = [e for e in events(tmp_path) if e["event"] == "close"][0]
+    assert close["outcome"] == "NO" and close["yes_price"] == pytest.approx(0.78)
+    assert close["pnl"] > 0
+
+    settled = make_trader(tmp_path / "s", scanner=FakeScanner([], resolution=1.0), sides=("YES", "NO"))
+    settled.positions.open_position(make_position(
+        market_id="m-2", question="q", asset="btc", strike=80_000.0,
+        expiry=datetime.now(UTC) - timedelta(hours=1), option_type="european", yes_token_id="yes-1",
+        yes_price=0.30, size_usd=30.0, model_prob=0.5, token_size=100.0, outcome="NO", no_token_id="no-1",
+    ))
+    settled.reprice_positions()
+    resolved = [e for e in events(tmp_path / "s") if e["event"] == "close"][0]
+    assert resolved["resolution_price"] == 0.0  # YES won, so the NO token pays 0
+    assert resolved["pnl"] == pytest.approx(-30.0 - 100 * 0.07 * 0.30 * 0.70)  # stake plus modelled entry fee

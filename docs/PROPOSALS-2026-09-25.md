@@ -79,6 +79,11 @@ describe the model that trades.
 
 ## #12 NO-side trading
 
+**Status: implemented, off by default** (`--sides yes,no`). Live dry-run on
+2026-09-25: legacy pricing found 9 YES / 0 NO candidates, smile pricing 2 YES / 5 NO.
+A shadow smoke run filled NO entries against real NO-token books. `_PAGE_SCRIPT` is
+byte-identical, so the CSP hash is unchanged.
+
 **Change** (`--sides yes|yes,no`, default `yes`): `Position.outcome` ("YES"/"NO") with
 the side's token id, `p_no = 1 − p_yes`, the NO book from `no_token_id` (already
 parsed), and settlement from the NO index of `outcomePrices`. Exits, fees and the intent

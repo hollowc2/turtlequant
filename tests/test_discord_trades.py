@@ -66,6 +66,7 @@ def test_notify_entry_sends_text_only_and_remembers_link(monkeypatch):
         edge_at_entry=0.10,
         strike=100000.0,
         expiry_iso="2026-12-31T00:00:00+00:00",
+        outcome="NO",
     )
 
     turtlequant_bot.notify_entry(
@@ -80,6 +81,6 @@ def test_notify_entry_sends_text_only_and_remembers_link(monkeypatch):
     assert len(sent) == 1
     key, content, chart, remember = sent[0]
     assert key == "m-1"
-    assert "TURTLEQUANT ENTERED" in content
+    assert "TURTLEQUANT ENTERED** `BTC NO`" in content
     assert chart is None
     assert remember is True

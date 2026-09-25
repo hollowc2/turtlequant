@@ -298,8 +298,8 @@ class MarketScanner:
             )
         return None
 
-    def fetch_resolution(self, market_id: str, yes_token_id: str = "") -> float | None:
-        """Return the final YES payout once Gamma reports the market resolved.
+    def fetch_resolution(self, market_id: str, token_id: str = "", outcome: str = "YES") -> float | None:
+        """Return the final payout of ``token_id`` (else of ``outcome``) once resolved.
 
         Gamma has no resolution-price field: a resolved market is ``closed``
         with ``umaResolutionStatus == "resolved"``, and ``outcomePrices`` then
@@ -312,7 +312,7 @@ class MarketScanner:
             if not raw.get("closed") or str(raw.get("umaResolutionStatus", "")).lower() != "resolved":
                 return None
             prices = _coerce_list(raw.get("outcomePrices"))
-            index = _yes_index(raw, yes_token_id)
+            index = _outcome_index(raw, token_id, outcome)
             if index is None or index >= len(prices):
                 return None
             price = float(prices[index])
@@ -369,14 +369,14 @@ def _parse_iso(s: str) -> datetime | None:
         return None
 
 
-def _yes_index(raw: dict, yes_token_id: str = "") -> int | None:
-    """Index of the YES outcome, matched by token id first, then outcome label."""
+def _outcome_index(raw: dict, token_id: str = "", outcome: str = "YES") -> int | None:
+    """Index of the held outcome, matched by token id first, then outcome label."""
     tokens = [str(t) for t in _coerce_list(raw.get("clobTokenIds") or raw.get("clob_token_ids"))]
-    if yes_token_id and yes_token_id in tokens:
-        return tokens.index(yes_token_id)
+    if token_id and token_id in tokens:
+        return tokens.index(token_id)
     outcomes = [str(o).lower() for o in _coerce_list(raw.get("outcomes"))]
-    if "yes" in outcomes:
-        return outcomes.index("yes")
+    if outcome.lower() in outcomes:
+        return outcomes.index(outcome.lower())
     return None
 
 

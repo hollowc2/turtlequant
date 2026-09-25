@@ -14,7 +14,8 @@ Strategy:
   4. Get IV from Deribit (or realized vol fallback)
   5. Compute model probability via Black-Scholes / barrier pricing
   6. If model_prob - yes_price > ENTRY_THRESHOLD and no position: buy YES tokens
-  7. If holding position and model_prob < yes_price: exit (edge reversed)
+     (with --sides yes,no, buy NO when yes_price - model_prob clears it instead)
+  7. If holding and the held token's bid exceeds its model value: exit (edge reversed)
 
 Main loop: scan every 60s; reprice positions every 30s.
 
@@ -147,7 +148,7 @@ def trade_chart(
             pnl=pnl,
             expiry=pos.expiry_iso,
             yes_above_strike=pos.option_type not in {"barrier_down", "european_put"},
-            bought_side="YES",
+            bought_side=pos.outcome,
         )
     except Exception:
         return None
@@ -165,7 +166,7 @@ def notify_entry(
     discord.send(
         pos.market_id,
         (
-            f"🐢 **TURTLEQUANT ENTERED** `{pos.asset.upper()} YES`\n"
+            f"🐢 **TURTLEQUANT ENTERED** `{pos.asset.upper()} {pos.outcome}`\n"
             f"> {pos.question[:180]}\n"
             f"> Fill: **{pos.entry_price:.3f}** | Bid/Ask: {bid:.3f}/{ask:.3f}\n"
             f"> Size: **${pos.size_usd:.2f}** | Shares: {pos.token_size:.4f}\n"
@@ -186,7 +187,7 @@ def notify_exit(
     discord.send(
         pos.market_id,
         (
-            f"{'✅' if pnl >= 0 else '❌'} **TURTLEQUANT EXITED** `{pos.asset.upper()} YES`\n"
+            f"{'✅' if pnl >= 0 else '❌'} **TURTLEQUANT EXITED** `{pos.asset.upper()} {pos.outcome}`\n"
             f"> {pos.question[:180]}\n"
             f"> Entry: {pos.entry_price:.3f} → Exit: **{exit_price:.3f}**\n"
             f"> P&L: **${pnl:+.2f}** ({pnl_pct:+.1%}) | Fees included\n"
@@ -306,6 +307,11 @@ def main() -> None:
         "smile: Deribit forward, zero drift, plus the smile's skew term",
     )
     parser.add_argument(
+        "--sides",
+        default=os.getenv("SIDES", "yes"),
+        help="Outcome tokens to buy: 'yes' (default) or 'yes,no' to also buy NO when the model is below the market",
+    )
+    parser.add_argument(
         "--max-iv-age-secs",
         type=float,
         default=float(os.getenv("MAX_IV_AGE_SECS", "0")),
@@ -321,8 +327,8 @@ def main() -> None:
     )
     # Strategy knobs; defaults are the values that used to be hard-coded.
     for flag, env, default, help_text in (
-        ("--min-entry-price", "MIN_ENTRY_PRICE", 0.02, "Skip entries with YES mid at or below this"),
-        ("--max-entry-price", "MAX_ENTRY_PRICE", 0.98, "Skip entries with YES mid at or above this"),
+        ("--min-entry-price", "MIN_ENTRY_PRICE", 0.02, "Skip entries whose side's mid is at or below this"),
+        ("--max-entry-price", "MAX_ENTRY_PRICE", 0.98, "Skip entries whose side's mid is at or above this"),
         ("--reentry-cooldown-hours", "REENTRY_COOLDOWN_HOURS", 2.0, "No re-entry this soon after a full close"),
         ("--edge-decay-ratio", "EDGE_DECAY_RATIO", 0.4, "Exit when edge falls to this fraction of entry edge"),
         ("--cleanup-hours", "CLEANUP_HOURS", 6.0, "Time-cleanup window before expiry"),
@@ -365,6 +371,11 @@ def main() -> None:
         if a not in ASSET_TO_SYMBOL:
             logger.error("Unknown asset: %s. Valid: btc,eth,sol,xrp", a)
             sys.exit(1)
+
+    sides = tuple(s.strip().upper() for s in args.sides.split(",") if s.strip())
+    if not sides or any(s not in ("YES", "NO") for s in sides):
+        logger.error("--sides must be 'yes' or 'yes,no' (got %r)", args.sides)
+        sys.exit(1)
 
     # State directory
     state_dir = args.state_dir
@@ -436,6 +447,7 @@ def main() -> None:
             max_asset_exposure_pct=args.max_asset_exposure_pct,
             max_asset_delta_pct=args.max_asset_delta_pct,
             kelly_shrink=args.kelly_shrink,
+            sides=sides,
         ),
         state_dir=state_dir,
         scanner=scanner,
@@ -463,6 +475,7 @@ def main() -> None:
     )
     logger.info("Kelly frac  : %.2f", args.kelly_fraction)
     logger.info("Pricing     : %s", args.pricing_model)
+    logger.info("Sides       : %s", ",".join(sides))
     logger.info("Starting NAV: $%.2f", args.starting_nav)
     logger.info("State dir   : %s", state_dir)
     logger.info("")

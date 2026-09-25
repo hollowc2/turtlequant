@@ -46,7 +46,13 @@ class StatePersistenceError(RuntimeError):
 
 @dataclass
 class Position:
-    """An open position on a Polymarket YES token."""
+    """An open position on one outcome token (YES or NO) of a Polymarket market.
+
+    Prices, probabilities and edges (entry_price, model_prob_at_entry,
+    edge_at_entry, last_* quotes) are in the held token's terms: for a NO
+    position, entry_price is what one NO share cost and model_prob_at_entry is
+    the model's P(NO). ``yes_token_id`` always names the market's YES token.
+    """
 
     market_id: str
     question: str
@@ -71,6 +77,13 @@ class Position:
     last_bid: float = 0.0
     last_ask: float = 0.0
     condition_id: str = ""  # CLOB condition id, used for fee lookups
+    outcome: str = "YES"  # "YES" | "NO": the token held
+    no_token_id: str = ""
+
+    @property
+    def token_id(self) -> str:
+        """CLOB token actually held."""
+        return self.no_token_id if self.outcome == "NO" else self.yes_token_id
 
     @property
     def expiry(self) -> datetime:
@@ -201,8 +214,9 @@ class PositionManager:
     def open_position(self, position: Position) -> None:
         self._positions[position.market_id] = position
         logger.info(
-            "Opened position: %s %s K=%.0f exp=%s size=$%.2f edge=+%.3f",
+            "Opened position: %s %s %s K=%.0f exp=%s size=$%.2f edge=+%.3f",
             position.asset.upper(),
+            position.outcome,
             position.option_type,
             position.strike,
             position.expiry_iso[:10],
@@ -217,6 +231,7 @@ class PositionManager:
         *,
         yes_token_id: str | None = None,
         condition_id: str | None = None,
+        no_token_id: str | None = None,
         yes_price: float | None = None,
         bid: float | None = None,
         ask: float | None = None,
@@ -237,6 +252,9 @@ class PositionManager:
             changed = True
         if condition_id and condition_id != pos.condition_id:
             pos.condition_id = condition_id
+            changed = True
+        if no_token_id and no_token_id != pos.no_token_id:
+            pos.no_token_id = no_token_id
             changed = True
         if yes_price is not None and yes_price > 0:
             pos.last_yes_price = yes_price
@@ -446,7 +464,9 @@ class PositionManager:
             pos_data.setdefault("last_ask", 0.0)
             pos = Position(**pos_data)
             if (
-                not pos.market_id
+                pos.outcome not in ("YES", "NO")
+                or (pos.outcome == "NO" and not pos.no_token_id)
+                or not pos.market_id
                 or pos.market_id in loaded
                 or not (0 < pos.entry_price < 1)
                 or not math.isfinite(pos.entry_price)
@@ -514,6 +534,8 @@ def make_position(
     model_prob: float,
     token_size: float = 0.0,
     condition_id: str = "",
+    outcome: str = "YES",
+    no_token_id: str = "",
 ) -> Position:
     """Factory helper to build a Position from trade decision data."""
     opened_at = datetime.now(UTC).isoformat()
@@ -534,4 +556,6 @@ def make_position(
         last_yes_price=yes_price,
         last_yes_price_at=opened_at,
         condition_id=condition_id,
+        outcome=outcome,
+        no_token_id=no_token_id,
     )

@@ -48,6 +48,7 @@ class ClosedTrade:
     model_prob_at_entry: float | None
     exit_reason: str
     pnl: float
+    outcome: str = "YES"  # token held; prices are that token's
 
     @property
     def return_pct(self) -> float | None:
@@ -75,6 +76,7 @@ class OpenPosition:
     tokens: float
     edge_at_entry: float
     status: str
+    outcome: str = "YES"
 
     @property
     def unrealized_pnl(self) -> float:
@@ -179,6 +181,7 @@ def build_closed_trades(events: list[dict[str, Any]]) -> list[ClosedTrade]:
                     model_prob_at_entry=_opt_float(opened.get("model_prob")),
                     exit_reason=str(event.get("reason") or "—"),
                     pnl=pnl,
+                    outcome=str(opened.get("outcome") or event.get("outcome") or "YES"),
                 )
             )
     trades.sort(key=lambda t: t.closed_at)
@@ -219,6 +222,7 @@ def open_positions_from_state(state: dict[str, Any]) -> list[OpenPosition]:
                 tokens=_opt_float(raw.get("token_size")) or size / entry,
                 edge_at_entry=_opt_float(raw.get("edge_at_entry")) or 0.0,
                 status=status,
+                outcome=str(raw.get("outcome") or "YES"),
             )
         )
     positions.sort(key=lambda p: p.opened_at or dt.datetime.min.replace(tzinfo=dt.UTC))
@@ -479,6 +483,7 @@ def _trade_rows(trades: list[ClosedTrade]) -> str:
             f"<td class='l'>{html.escape(trade.asset)}</td>"
             f"<td class='l market' title='{question}'>{question}</td>"
             f"<td class='l'>{_label(trade.option_type)}</td>"
+            f"<td class='l'>{html.escape(trade.outcome)}</td>"
             f"<td>{_strike(trade.strike)}</td>"
             f"<td>{_date(trade.expiry)}</td>"
             f"<td>{_pct(trade.model_prob_at_entry * 100 if trade.model_prob_at_entry is not None else None)}</td>"
@@ -492,7 +497,7 @@ def _trade_rows(trades: list[ClosedTrade]) -> str:
             "</tr>"
         )
     if not rows:
-        return "<tr><td colspan='17' class='empty-cell'>No closed trades yet.</td></tr>"
+        return "<tr><td colspan='18' class='empty-cell'>No closed trades yet.</td></tr>"
     return "".join(rows)
 
 
@@ -507,6 +512,7 @@ def _open_rows(positions: list[OpenPosition]) -> str:
             f"<td class='l'>{html.escape(pos.asset)}</td>"
             f"<td class='l market' title='{question}'>{question}</td>"
             f"<td class='l'>{_label(pos.option_type)}</td>"
+            f"<td class='l'>{html.escape(pos.outcome)}</td>"
             f"<td>{_strike(pos.strike)}</td>"
             f"<td>{_date(pos.expiry)}</td>"
             f"<td>{_pct(pos.edge_at_entry * 100, signed=True)}</td>"
@@ -518,7 +524,7 @@ def _open_rows(positions: list[OpenPosition]) -> str:
             "</tr>"
         )
     if not rows:
-        return "<tr><td colspan='12' class='empty-cell'>No open positions.</td></tr>"
+        return "<tr><td colspan='13' class='empty-cell'>No open positions.</td></tr>"
     return "".join(rows)
 
 
@@ -690,7 +696,7 @@ def render_page(
       <thead>
         <tr>
           <th class="l">Opened (UTC)</th><th class="l">Asset</th><th class="l">Market</th><th class="l">Type</th>
-          <th>Strike</th><th>Expiry</th><th>Edge</th><th>Entry</th><th>Mark</th><th>Size</th>
+          <th class="l">Side</th><th>Strike</th><th>Expiry</th><th>Edge</th><th>Entry</th><th>Mark</th><th>Size</th>
           <th class="l">Status</th><th>Unrealized</th>
         </tr>
       </thead>
@@ -715,7 +721,8 @@ def render_page(
         <thead>
           <tr>
             <th>#</th><th class="l">Opened (UTC)</th><th class="l">Closed (UTC)</th><th>Hold</th>
-            <th class="l">Asset</th><th class="l">Market</th><th class="l">Type</th><th>Strike</th><th>Expiry</th>
+            <th class="l">Asset</th><th class="l">Market</th><th class="l">Type</th><th class="l">Side</th>
+            <th>Strike</th><th>Expiry</th>
             <th>Model P</th><th>Edge</th><th>Entry</th><th>Exit</th><th>Size</th>
             <th class="l">Exit Reason</th><th>Return</th><th>P&amp;L</th>
           </tr>
@@ -728,7 +735,7 @@ def render_page(
   <section class="methodology">
     <h2>Methodology</h2>
     <ul>
-      <li>P&amp;L is realized and net of modeled taker fees. Entry and exit prices are YES-token prices in cents.</li>
+      <li>P&amp;L is realized and net of modeled taker fees. Entry and exit prices are the held token's prices (YES or NO, see Side) in cents.</li>
       <li>Sharpe and Sortino are annualized (√365) from daily returns on realized NAV. Days with no closed trades count as 0%.</li>
       <li>Edge is model probability minus the executable ask at entry. Open-position marks use the last observed best bid, before exit fees; resolved markets use the resolution price.</li>
       <li>Profit factor is gross winning P&amp;L over gross losing P&amp;L. Payoff ratio is average win over average loss.</li>
