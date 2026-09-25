@@ -125,7 +125,7 @@ Runtime state is outside this repo:
 | `/opt/turtlequant/state/live-state` | Separate live-mode state when `docker-compose.live.yml` is used |
 | `/opt/polymarket/state` | Other `crypto_up_or_down` bot state, not TurtleQuant runtime state |
 
-State files (`*-positions.json`, `*-history.json`) persist in `/opt/turtlequant/state`. The history file includes `order`, `failed_order`, and `shadow_quote` events with bid/ask snapshots, slippage, fill ratio inputs, and partial-fill fields.
+State files persist in `/opt/turtlequant/state`. `turtlequant-history.jsonl` is the trade ledger (`open`, `close`, `order`, `failed_order` events with fills, fees and partial-fill fields). Per-scan diagnostics (`scan_summary`, `signal_evaluation` with bid/ask depth, `shadow_quote`) go to the size-rotated `turtlequant-diagnostics.jsonl`. See [docs/OPS.md](docs/OPS.md#state-files-and-growth).
 
 See [docs/OPS.md](docs/OPS.md) for secrets, Grafana/Prometheus wiring, alerts, healthchecks, and rollback.
 

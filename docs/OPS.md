@@ -232,6 +232,36 @@ Promotion gate:
 4. Parser misses are reviewed before raising live risk.
 5. Failed-order and stale-exporter alerts are quiet.
 
+## State files and growth
+
+| File (in the state dir) | Contents | Growth |
+|-------------------------|----------|--------|
+| `turtlequant-positions.json` | NAV, open positions, re-entry cooldowns | Bounded |
+| `turtlequant-risk.json` | High-water mark, breaker, entry-gate state | Bounded |
+| `turtlequant-history.jsonl` | Trade and ops events (`open`, `close`, `order`, `failed_order`, `entry_gate`, …), fsynced | One line per trade action |
+| `turtlequant-diagnostics.jsonl[.1-.3]` | Per-scan `scan_summary`, `signal_evaluation`, `shadow_quote` | Rotated at 64 MiB × 3 backups (`DIAGNOSTICS_MAX_BYTES`, `DIAGNOSTICS_BACKUP_COUNT`) |
+| `unclassified_markets.jsonl` | Each unparsed question once, for parser review | Bounded by distinct questions |
+| `turtlequant-bot.log[.1-.5]` | Bot log | Rotated at 10 MiB |
+
+The exporter tails the history and diagnostics files incrementally. It keeps running
+aggregates rather than every event, and it handles partially written lines, truncation
+and rotation. Its shadow-soak ratios cover the retained diagnostics window.
+
+**One-off migration:** history written before 2026-09-25 also holds the diagnostics.
+With the bot stopped, split them out:
+
+```bash
+docker compose stop turtlequant-bot
+uv run python scripts/split_history.py --state-dir /opt/turtlequant/state --dry-run
+uv run python scripts/split_history.py --state-dir /opt/turtlequant/state
+docker compose start turtlequant-bot
+```
+
+This keeps trade events in place and gzips the old diagnostics to
+`turtlequant-diagnostics-archive-<ts>.jsonl.gz` (or pass `--drop-diagnostics`). The
+original stays as a `.bak-<ts>` hard link; delete it once the dashboard and performance
+page look right.
+
 ## Entry gate and circuit breaker
 
 New entries are blocked (exits always run) by, in order: a `HALT` file in the state dir,

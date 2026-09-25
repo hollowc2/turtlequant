@@ -2473,8 +2473,8 @@
     {
       "id": 15,
       "type": "table",
-      "title": "Closed Trade Ledger",
-      "description": "All closed positions currently present in TurtleQuant state, including pre-Prometheus trade history.",
+      "title": "Recent Closed Trades",
+      "description": "The 50 most recent closed trades (0 = latest): realized P&L and holding time. Per-trade detail (market, question, timestamps) is on the public performance page and in scripts/monitor_turtlequant.py; it is not exported as Prometheus labels because that adds a series per trade.",
       "gridPos": {
         "x": 0,
         "y": 48,
@@ -2489,8 +2489,8 @@
         "showHeader": true,
         "sortBy": [
           {
-            "displayName": "Close Time",
-            "desc": true
+            "displayName": "Trade # (0 = latest)",
+            "desc": false
           }
         ],
         "footer": {
@@ -2556,92 +2556,7 @@
                 }
               }
             ]
-          }
-        ]
-      },
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "renameByName": {
-              "Value": "P&L ($)",
-              "market_id": "Market ID",
-              "asset": "Asset",
-              "reason": "Exit Reason",
-              "opened_at": "Open Time",
-              "closed_at": "Close Time",
-              "question": "Market",
-              "strategy": "",
-              "Time": ""
-            },
-            "excludeByName": {
-              "strategy": true,
-              "Time": true,
-              "__name__": true,
-              "job": true,
-              "instance": true
-            },
-            "indexByName": {
-              "idx": 0,
-              "Close Time": 1,
-              "Open Time": 2,
-              "Asset": 3,
-              "Market": 4,
-              "Exit Reason": 5,
-              "P&L ($)": 6,
-              "Market ID": 7
-            }
-          }
-        }
-      ],
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
           },
-          "expr": "turtlequant_closed_position_pnl_usd{strategy=\"$strategy\"}",
-          "instant": true,
-          "range": false,
-          "legendFormat": "",
-          "refId": "A",
-          "format": "table"
-        }
-      ]
-    },
-    {
-      "id": 34,
-      "type": "table",
-      "title": "Recent Holding Periods",
-      "description": "Holding duration for recent closed trades.",
-      "gridPos": {
-        "x": 0,
-        "y": 58,
-        "w": 12,
-        "h": 8
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "options": {
-        "showHeader": true,
-        "sortBy": [],
-        "footer": {
-          "show": false
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          }
-        },
-        "overrides": [
           {
             "matcher": {
               "id": "byName",
@@ -2666,29 +2581,36 @@
           "options": {}
         },
         {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "targetField": "idx",
+                "destinationType": "number"
+              }
+            ],
+            "fields": {}
+          }
+        },
+        {
           "id": "organize",
           "options": {
             "renameByName": {
-              "Value": "Holding (h)",
-              "market_id": "Market ID",
-              "asset": "Asset",
-              "reason": "Exit Reason",
-              "strategy": "",
-              "Time": ""
+              "idx": "Trade # (0 = latest)",
+              "Value #A": "P&L ($)",
+              "Value #B": "Holding (h)"
             },
             "excludeByName": {
               "strategy": true,
               "Time": true,
               "__name__": true,
               "job": true,
-              "instance": true,
-              "idx": true
+              "instance": true
             },
             "indexByName": {
-              "Asset": 0,
-              "Exit Reason": 1,
-              "Holding (h)": 2,
-              "Market ID": 3
+              "Trade # (0 = latest)": 0,
+              "P&L ($)": 1,
+              "Holding (h)": 2
             }
           }
         }
@@ -2699,11 +2621,23 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "turtlequant_closed_position_holding_hours{strategy=\"$strategy\"}",
+          "expr": "turtlequant_closed_position_pnl_usd{strategy=\"$strategy\"}",
           "instant": true,
           "range": false,
           "legendFormat": "",
           "refId": "A",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_closed_position_holding_hours{strategy=\"$strategy\"}",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "B",
           "format": "table"
         }
       ]
@@ -2714,9 +2648,9 @@
       "title": "Operational Health Timeline",
       "description": "State-file freshness and exporter scrape success over the selected time range.",
       "gridPos": {
-        "x": 12,
+        "x": 0,
         "y": 58,
-        "w": 12,
+        "w": 24,
         "h": 8
       },
       "datasource": {

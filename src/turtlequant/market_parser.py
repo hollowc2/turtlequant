@@ -151,13 +151,17 @@ _ASSET_MAP: dict[str, str] = {
 }
 
 # Corpus file for unclassified markets; None disables it (dry-run, tests).
+# Each distinct question is written once, so the file stays bounded by the
+# market universe instead of growing every scan.
 _CORPUS_FILE: Path | None = Path("unclassified_markets.jsonl")
+_CORPUS_SEEN: set[str] | None = None
 
 
 def set_corpus_file(path: Path | None) -> None:
     """Point the unclassified-question corpus at ``path``, or disable it."""
-    global _CORPUS_FILE
+    global _CORPUS_FILE, _CORPUS_SEEN
     _CORPUS_FILE = path
+    _CORPUS_SEEN = None
 
 
 # ---------------------------------------------------------------------------
@@ -394,14 +398,35 @@ def _parse_date(raw: str) -> datetime | None:
 
 def _log_unclassified(question: str) -> None:
     """Append unclassified question to corpus file for weekly manual review."""
+    global _CORPUS_SEEN
     if _CORPUS_FILE is None:
         return
     try:
+        if _CORPUS_SEEN is None:
+            _CORPUS_SEEN = _read_corpus_questions(_CORPUS_FILE)
+        if question in _CORPUS_SEEN:
+            return
         entry = {
             "question": question,
             "ts": datetime.now(UTC).isoformat(),
         }
         with _CORPUS_FILE.open("a") as f:
             f.write(json.dumps(entry) + "\n")
+        _CORPUS_SEEN.add(question)
     except Exception as exc:
         logger.debug("Could not write unclassified corpus: %s", exc)
+
+
+def _read_corpus_questions(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    seen: set[str] = set()
+    with path.open() as f:
+        for line in f:
+            try:
+                question = json.loads(line).get("question")
+            except (json.JSONDecodeError, AttributeError):
+                continue
+            if isinstance(question, str):
+                seen.add(question)
+    return seen

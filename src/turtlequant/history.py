@@ -1,4 +1,14 @@
-"""Append-only TurtleQuant history with legacy JSON compatibility."""
+"""Append-only TurtleQuant history with legacy JSON compatibility.
+
+Two journals:
+
+* ``turtlequant-history.jsonl`` — trade and ops events (open, close, order,
+  failed_order, entry_gate, ...). Small, fsynced, never rotated: it is the
+  track record the exporter and performance page are built from.
+* ``turtlequant-diagnostics.jsonl`` — per-scan diagnostics (scan_summary,
+  signal_evaluation, shadow_quote with book depth). High volume, best-effort
+  (no fsync) and size-rotated to ``.1`` … ``.N`` so disk use is bounded.
+"""
 
 from __future__ import annotations
 
@@ -10,15 +20,59 @@ from typing import Any
 
 HISTORY_JSON = "turtlequant-history.json"
 HISTORY_JSONL = "turtlequant-history.jsonl"
+DIAGNOSTICS_JSONL = "turtlequant-diagnostics.jsonl"
+DIAGNOSTIC_EVENTS = frozenset({"scan_summary", "signal_evaluation", "shadow_quote"})
+DIAGNOSTICS_MAX_BYTES = int(os.getenv("DIAGNOSTICS_MAX_BYTES", str(64 * 1024 * 1024)))
+DIAGNOSTICS_BACKUPS = int(os.getenv("DIAGNOSTICS_BACKUP_COUNT", "3"))
 
 
 def append_history(state_dir: Path, entry: dict[str, Any]) -> None:
-    """Durably append one event to the JSONL journal."""
+    """Append one event: trade events durably, diagnostics to the rotated file."""
     state_dir.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(entry, separators=(",", ":")) + "\n"
+    if entry.get("event") in DIAGNOSTIC_EVENTS:
+        _append_diagnostic(state_dir / DIAGNOSTICS_JSONL, line)
+        return
     with (state_dir / HISTORY_JSONL).open("a") as history:
-        history.write(json.dumps(entry, separators=(",", ":")) + "\n")
+        history.write(line)
         history.flush()
         os.fsync(history.fileno())
+
+
+def _append_diagnostic(
+    path: Path, line: str, max_bytes: int = DIAGNOSTICS_MAX_BYTES, backups: int = DIAGNOSTICS_BACKUPS
+) -> None:
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        size = 0
+    if size and size + len(line) > max_bytes:
+        rotate(path, backups)
+    with path.open("a") as diagnostics:
+        diagnostics.write(line)
+
+
+def rotate(path: Path, backups: int) -> None:
+    """Shift ``path`` -> ``path.1`` -> … -> ``path.<backups>``; the oldest is dropped."""
+    if backups < 1:
+        path.unlink(missing_ok=True)
+        return
+    for index in range(backups - 1, 0, -1):
+        older = path.with_name(f"{path.name}.{index}")
+        if older.exists():
+            os.replace(older, path.with_name(f"{path.name}.{index + 1}"))
+    os.replace(path, path.with_name(f"{path.name}.1"))
+
+
+def diagnostics_paths(state_dir: Path) -> list[Path]:
+    """Existing diagnostics files, oldest first, ending with the live file."""
+    live = state_dir / DIAGNOSTICS_JSONL
+    rotated = sorted(
+        (p for p in state_dir.glob(f"{DIAGNOSTICS_JSONL}.*") if p.suffix[1:].isdigit()),
+        key=lambda p: int(p.suffix[1:]),
+        reverse=True,
+    )
+    return [*rotated, *([live] if live.exists() else [])]
 
 
 def active_history_path(state_dir: Path) -> Path:
@@ -44,7 +98,15 @@ def _journal_events(path: Path) -> Iterator[dict[str, Any]]:
         for line_number, line in enumerate(history, 1):
             if not line.strip():
                 continue
-            event = json.loads(line)
+            if not line.endswith("\n"):
+                # A crash mid-append can leave an unterminated last line; it was
+                # never a complete event. Any other bad line is still an error.
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    return
+            else:
+                event = json.loads(line)
             if not isinstance(event, dict):
                 raise ValueError(f"history line {line_number} must be an object: {path}")
             yield event
