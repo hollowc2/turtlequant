@@ -19,8 +19,6 @@ services:
     <<: *bot-common
     container_name: turtlequant-bot
     command:
-      - "uv"
-      - "run"
       - "python"
       - "scripts/turtlequant_bot.py"
       - "--shadow"
