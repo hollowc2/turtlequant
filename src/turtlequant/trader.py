@@ -84,6 +84,9 @@ class TraderConfig:
     # "legacy": N(d2)/reflection at the strike's IV, spot with a 5% drift.
     # "smile": Deribit forward, zero drift, plus the smile's -vega*dsigma/dK term.
     pricing_model: str = "legacy"
+    # Snapshot every priced market's quote and both models this often, for
+    # scripts/evaluate_models.py (0 = off). Diagnostics only.
+    marks_interval_secs: float = 900.0
 
     @property
     def persist(self) -> bool:
@@ -147,6 +150,8 @@ class Trader:
         self.notify_exit = notify_exit or (lambda *_a, **_k: None)
         self.running = running
         self.reprice_errors = 0  # data-plane errors since the last scan summary
+        self._last_marks_at = 0.0
+        self._marks: list[dict[str, object]] | None = None  # rows while a snapshot is being taken
         self._reconcile_warned_at: dict[int, float] = {}
 
     @property
@@ -504,6 +509,8 @@ class Trader:
         # cached list during an outage keeps its old timestamp.
         market_data_at = self.scanner.markets_fetched_at
         self.check_entry_gate(market_data_at)
+        interval = self.config.marks_interval_secs
+        self._marks = [] if interval > 0 and time.time() - self._last_marks_at >= interval else None
 
         for market in markets:
             if not self.running():
@@ -516,6 +523,18 @@ class Trader:
                 logger.warning("Market processing error (%s): %s", market.market_id[:16], exc)
                 _inc(stats, "market_errors")
 
+        if self._marks:
+            self._last_marks_at = time.time()
+            self.record(
+                {
+                    "event": "market_marks",
+                    "ts": _now_iso(),
+                    "pricing_model": self.config.pricing_model,
+                    "spots": {a: spots.get(a) for a in self.config.assets},
+                    "rows": self._marks,
+                }
+            )
+        self._marks = None
         stats["reprice_errors"] = self.reprice_errors
         self.reprice_errors = 0
         self.risk.record_scan(errors=int(stats["market_errors"]), attempted=int(stats["parse_attempted"]))
@@ -552,6 +571,8 @@ class Trader:
         pricing = self.price(params, spot)
         _inc(stats, "vol_sources", pricing.vol_source)
         model_prob = pricing.prob
+        if self._marks is not None:
+            self._marks.append(_mark_row(market, params, pricing))
 
         pos = self.positions.get_position(market.market_id)
         if pos is not None:
@@ -792,6 +813,27 @@ class Trader:
         )
         self.notify_entry(pos, model_prob=model_prob, bid=book.best_bid, ask=book.best_ask, sigma=sigma)
         return result
+
+
+def _mark_row(market: ActiveMarket, params: MarketParams, pricing: Pricing) -> dict[str, object]:
+    """Compact per-market snapshot row (short keys: one snapshot holds ~300 rows)."""
+
+    def r(value: float | None) -> float | None:
+        return None if value is None else round(value, 5)
+
+    return {
+        "id": market.market_id,
+        "a": params.asset,
+        "t": params.option_type.value,
+        "k": params.strike,
+        "exp": params.expiry.isoformat(),
+        "bid": r(market.bid),
+        "ask": r(market.ask),
+        "pl": r(pricing.legacy_prob),
+        "ps": r(pricing.smile_prob),
+        "v": r(pricing.sigma),
+        "src": pricing.vol_source,
+    }
 
 
 def _position_params(pos: Position) -> MarketParams:

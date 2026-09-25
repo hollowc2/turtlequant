@@ -38,7 +38,10 @@ barrier types in shadow, or accept that shadow P&L on them measures the artifact
 **Status: implemented behind flags, all off by default:** `--pricing-model smile`
 (items 1–3) and `--max-iv-age-secs` (item 4). Legacy lookups are numerically unchanged,
 checked against the previous code on the live surface. On live data a dry-run would have
-bought 8 markets with legacy pricing and 2 with smile pricing.
+bought 8 markets with legacy pricing and 2 with smile pricing. Touches use the flat
+reflection price scaled by the terminal skew correction, not the plain `2 ×` proxy
+below. Item 5 is `scripts/evaluate_models.py`, fed by 15-minute `market_marks`
+snapshots of every priced market (both models, always on, diagnostics only).
 
 **Change** (`--pricing-model legacy|smile`, default `legacy`):
 1. **Digitals:** `P(S_T > K) = N(d2) − vega·∂σ/∂K`, with ∂σ/∂K taken from the

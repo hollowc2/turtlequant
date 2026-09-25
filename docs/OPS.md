@@ -178,7 +178,8 @@ docker compose -f docker-compose.yml -f docker-compose.live.yml up -d --build tu
 | Script | Purpose |
 |--------|---------|
 | `scripts/monitor_turtlequant.py` | Live terminal dashboard: open positions with reprice edge, recent events, closed-position summary |
-| `scripts/calibrate_turtlequant.py` | Validates `probability_engine` model calibration against historical OHLCV (Brier score / RMSE) — not live trading |
+| `scripts/evaluate_models.py` | Scores the legacy and smile models and the market mid against resolved markets, using the bot's `market_marks` snapshots: Brier score, reliability, and net P&L per share of "edge ≥ threshold" YES/NO trades |
+| `scripts/calibrate_turtlequant.py` | Validates `probability_engine` calibration against historical OHLCV (Brier score / RMSE), using realized vol on simulated contracts. It does not test the traded model |
 | `scripts/migrate_pusd_v2.py` | One-time USDC.e → pUSD collateral migration (see [Live trading prep](#live-trading-prep-clob-v2)) |
 | `scripts/derive_clob_api_creds.py` | Derives CLOB API credentials from the wallet private key |
 | `scripts/reconcile_nav.py` | Compares bookkeeping NAV to actual CLOB balance (see [NAV reconciliation](#5-nav-reconciliation)) |
@@ -194,7 +195,11 @@ uv run python scripts/calibrate_turtlequant.py --asset btc --years 3
 uv run python scripts/calibrate_turtlequant.py --asset eth --years 5 --plot
 ```
 
-Deploy threshold for calibration: Brier score < 0.25 **and** calibration RMSE < 0.05.
+The realized-vol calibration gate (Brier < 0.25 and RMSE < 0.05) says little about the model
+that trades. Before switching `--pricing-model` or raising risk, run
+`uv run python scripts/evaluate_models.py --state-dir /opt/turtlequant/state` once a few
+hundred snapshotted markets have resolved. Compare the models' Brier scores with the market
+mid's, and check that their edge trades net positive after fees.
 
 ## Public performance page
 
@@ -265,6 +270,7 @@ Promotion gate:
 | `turtlequant-risk.json` | High-water mark, breaker, entry-gate state | Bounded |
 | `turtlequant-history.jsonl` | Trade and ops events (`open`, `close`, `order`, `failed_order`, `entry_gate`, …), fsynced | One line per trade action |
 | `turtlequant-diagnostics.jsonl[.1-.3]` | Per-scan `scan_summary`, `signal_evaluation`, `shadow_quote` | Rotated at 64 MiB × 3 backups (`DIAGNOSTICS_MAX_BYTES`, `DIAGNOSTICS_BACKUP_COUNT`) |
+| `turtlequant-marks.jsonl[.1-.4]` | Every 15 min: each priced market's bid/ask and legacy + smile probabilities (`market_marks`), for `scripts/evaluate_models.py` | Rotated at 64 MiB × 4 (≈ 70 days at ~4.5 MB/day; `MARKS_MAX_BYTES`, `MARKS_BACKUP_COUNT`) |
 | `unclassified_markets.jsonl` | Each unparsed question once, for parser review | Bounded by distinct questions |
 | `turtlequant-bot.log[.1-.5]` | Bot log | Rotated at 10 MiB |
 

@@ -151,4 +151,4 @@ For Phase 1 promotion, run a shadow soak first and review the Grafana `Phase 1 S
 
 Backtested on 5 years of BTC and ETH data. Brier loss: **0.178–0.199** (lower is better; 0.25 = random).
 
-Caveat: `scripts/calibrate_turtlequant.py` prices with 30-day realized vol, while the live bot prices with Deribit implied vol. The score therefore describes a related model, not the one that trades, and it does not test whether "model − market ≥ threshold" trades win. See review item 7 in [docs/REVIEW-2026-09-24.md](docs/REVIEW-2026-09-24.md).
+Caveat: `scripts/evaluate_models.py` scores the legacy and smile models against real resolved markets and prices, from snapshots the bot takes every 15 minutes. `scripts/calibrate_turtlequant.py` prices with 30-day realized vol, while the live bot prices with Deribit implied vol. The score therefore describes a related model, not the one that trades, and it does not test whether "model − market ≥ threshold" trades win. See review item 7 in [docs/REVIEW-2026-09-24.md](docs/REVIEW-2026-09-24.md).

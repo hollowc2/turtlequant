@@ -312,6 +312,13 @@ def main() -> None:
         metavar="SECONDS",
         help="Ignore Deribit IV older than this and block entries (0 = no limit)",
     )
+    parser.add_argument(
+        "--marks-interval-secs",
+        type=float,
+        default=float(os.getenv("MARKS_INTERVAL_SECS", "900")),
+        metavar="SECONDS",
+        help="Snapshot every priced market's quote and model probabilities this often (0 = off)",
+    )
     # Strategy knobs; defaults are the values that used to be hard-coded.
     for flag, env, default, help_text in (
         ("--min-entry-price", "MIN_ENTRY_PRICE", 0.02, "Skip entries with YES mid at or below this"),
@@ -421,6 +428,7 @@ def main() -> None:
             max_entry_price=args.max_entry_price,
             reentry_cooldown_secs=args.reentry_cooldown_hours * 3600,
             pricing_model=args.pricing_model,
+            marks_interval_secs=args.marks_interval_secs,
         ),
         state_dir=state_dir,
         scanner=scanner,
