@@ -69,7 +69,7 @@ class _CachedMarketSession:
     def get(self, *_args, **_kwargs):
         if self.fail:
             raise RuntimeError("api outage")
-        return _Response([{"id": "market-1"}])
+        return _Response([{"markets": [{"id": "market-1"}]}])
 
 
 class _ResolutionFailureResponse:
@@ -183,3 +183,55 @@ def test_fetch_resolution_ignores_closed_but_unresolved_quotes():
     assert MarketScanner(session=_ResolvedSession(proposed)).fetch_resolution("m", "yes-token") is None
     assert MarketScanner(session=_ResolvedSession(open_market)).fetch_resolution("m", "yes-token") is None
     assert MarketScanner(session=_ResolutionFailureSession()).fetch_resolution("m") is None
+
+
+class _RecordingSession:
+    def __init__(self, payload):
+        self.payload = payload
+        self.params = []
+
+    def get(self, url, params=None, **_kwargs):
+        self.params.append((url, params))
+        return _Response(self.payload if not params or params.get("offset", 0) == 0 else [])
+
+
+def _events_fixture():
+    return json.loads((FIXTURES / "gamma_events_crypto_prices.json").read_text())
+
+
+def test_discovery_queries_crypto_price_events_without_up_or_down():
+    session = _RecordingSession(_events_fixture())
+
+    markets = MarketScanner(session=session)._fetch_all_pages()
+
+    url, params = session.params[0]
+    assert url.endswith("/events")
+    assert params["tag_id"] == 1312 and params["exclude_tag_id"] == 102127
+    assert "tag_slug" not in params  # Gamma ignores it (returned NFL/MLB markets)
+    assert len(markets) == sum(len(e["markets"]) for e in _events_fixture())
+    assert all("Up or Down" not in m["question"] for m in markets)
+
+
+def test_discovery_skips_closed_markets_inside_open_events():
+    events = _events_fixture()
+    events[0]["markets"][0]["closed"] = True
+
+    markets = MarketScanner(session=_RecordingSession(events))._fetch_all_pages()
+
+    assert events[0]["markets"][0]["id"] not in {m["id"] for m in markets}
+
+
+def test_absolute_spread_filter_keeps_cheap_long_dated_markets():
+    events = _events_fixture()
+    tail = events[-1]["markets"][0]  # real: BTC $200k by Dec 31, 0.013 / 0.016
+    assert "December 31" in tail["question"]
+    scanner = MarketScanner(session=_RecordingSession(events), assets=["btc"], min_liquidity=0.0)
+
+    passed = {m.market_id for m in scanner.get_active_markets()}
+
+    assert tail["id"] in passed  # a 0.3c spread is ~20% "relative" and was rejected before
+    assert scanner.last_scan_counts["fetched"] == sum(len(e["markets"]) for e in events)
+
+    wide = MarketScanner(session=_RecordingSession(events), assets=["btc"], min_liquidity=0.0, max_spread=0.001)
+    assert tail["id"] not in {m.market_id for m in wide.get_active_markets()}
+    assert wide.last_scan_counts["spread"] >= 1

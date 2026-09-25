@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """TurtleQuant Bot — Probabilistic digital-option pricing on Polymarket.
 
-Scans Polymarket for longer-term crypto prediction markets (e.g., "Will BTC
-be above $75k by March 30?"), prices them as digital options using Deribit IV
-or realized vol, and trades where the gap between model probability and market
-price exceeds a configurable threshold.
+Scans Polymarket's crypto price-threshold markets (daily to year-end, e.g.
+"Will BTC be above $75k on March 30?", "Will ETH dip to $2,000 by December
+31?"), prices them as digital or barrier options using Deribit IV or realized
+vol, and trades where the gap between model probability and market price
+exceeds a configurable threshold.
 
 Strategy:
   1. Scan Gamma API for active crypto price markets
@@ -322,11 +323,11 @@ def main() -> None:
         help="Minimum market liquidity to consider",
     )
     parser.add_argument(
-        "--max-spread-pct",
+        "--max-spread",
         type=float,
-        default=float(os.getenv("MAX_SPREAD_PCT", "0.03")),
-        metavar="FLOAT",
-        help="Max bid-ask spread (as fraction of price)",
+        default=float(os.getenv("MAX_SPREAD", "0.03")),
+        metavar="PRICE",
+        help="Max absolute bid-ask spread in price units (0.03 = 3 cents)",
     )
     args = parser.parse_args()
 
@@ -363,7 +364,7 @@ def main() -> None:
     # Components
     scanner = MarketScanner(
         min_liquidity=args.min_liquidity,
-        max_spread_pct=args.max_spread_pct,
+        max_spread=args.max_spread,
         assets=assets,
     )
 
@@ -799,6 +800,7 @@ def main() -> None:
             scan_stats: dict[str, object] = {
                 "event": "scan_summary",
                 "markets_passed_filters": len(markets),
+                "scanner_funnel": dict(scanner.last_scan_counts),
                 "parse_attempted": 0,
                 "parsed_markets": 0,
                 "unclassified_markets": 0,

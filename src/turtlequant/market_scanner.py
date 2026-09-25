@@ -1,7 +1,13 @@
 """Market scanner — Gamma API discovery + liquidity/spread/time filters.
 
-Polls the Polymarket Gamma API for active crypto price markets and applies
-filters before handing them to the parser/probability engine.
+Discovery reads Gamma ``/events`` tagged "Crypto Prices" (tag 1312), minus the
+"Up or Down" events (tag 102127), and flattens each event's open markets.
+That is every daily/weekly/monthly/yearly price-threshold series ("above X
+on <date>", "reach/dip to X in <month>", "... by December 31") in two
+requests. ``/markets?tag_slug=crypto`` is silently ignored by Gamma (it
+returned the top markets site-wide), and ``/markets?tag_id=1312`` is
+dominated by thousands of up/down markets past Gamma's ~2000 offset cap.
+Verified live 2026-09-24.
 """
 
 from __future__ import annotations
@@ -24,13 +30,18 @@ GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 
 # Default filter thresholds (all overridable via MarketScanner constructor)
 DEFAULT_MIN_LIQUIDITY = 5_000.0  # USD
-DEFAULT_MAX_SPREAD_PCT = 0.03  # 3% of token price
+# Absolute bid-ask spread in price units (0.03 = 3 cents). A relative cap
+# (spread / price) rejected every cheap tail and long-dated market: 1c on a
+# 5c token is "20%". The executable-edge gate already prices the spread in.
+DEFAULT_MAX_SPREAD = 0.03
 DEFAULT_MIN_HOURS_TO_RESOLUTION = 4.0
 
-# Gamma API paginates at 100; cap at 5 pages (500 markets) — the API orders by
-# volume/liquidity descending so the most relevant markets appear first
+GAMMA_CRYPTO_PRICES_TAG_ID = 1312
+GAMMA_UP_OR_DOWN_TAG_ID = 102127
+
+# Gamma pages hold at most 100 items; ~150 crypto-price events exist at a time.
 _PAGE_SIZE = 100
-_MAX_PAGES = 5
+_MAX_PAGES = 10
 _CACHE_TTL_SECS = 15 * 60
 _WARNING_COOLDOWN_SECS = 5 * 60
 
@@ -54,10 +65,6 @@ class ActiveMarket:
     raw: dict = field(default_factory=dict, repr=False)
 
     @property
-    def spread_pct(self) -> float:
-        return self.spread / max(self.yes_price, 0.01)
-
-    @property
     def hours_to_resolution(self) -> float:
         now = datetime.now(UTC)
         delta = self.resolution_time - now
@@ -70,13 +77,13 @@ class MarketScanner:
     def __init__(
         self,
         min_liquidity: float = DEFAULT_MIN_LIQUIDITY,
-        max_spread_pct: float = DEFAULT_MAX_SPREAD_PCT,
+        max_spread: float = DEFAULT_MAX_SPREAD,
         min_hours_to_resolution: float = DEFAULT_MIN_HOURS_TO_RESOLUTION,
         assets: list[str] | None = None,
         session: requests.Session | None = None,
     ) -> None:
         self.min_liquidity = min_liquidity
-        self.max_spread_pct = max_spread_pct
+        self.max_spread = max_spread
         self.min_hours_to_resolution = min_hours_to_resolution
         # Assets to track, e.g. ["btc", "eth"]; None = all crypto price markets
         self.assets: set[str] = {a.lower() for a in assets} if assets else set()
@@ -88,6 +95,8 @@ class MarketScanner:
         self.markets_fetched_at: datetime | None = None
         self._price_cache: dict[str, tuple[tuple[float, float], float]] = {}
         self._last_warning_at: dict[str, float] = {}
+        # Per-scan funnel: markets fetched, then how many each filter rejected.
+        self.last_scan_counts: dict[str, int] = {}
 
     @staticmethod
     def _make_session() -> requests.Session:
@@ -101,13 +110,18 @@ class MarketScanner:
         """Fetch and filter all active crypto price markets from Gamma API."""
         raw_markets = self._fetch_all_pages()
         result: list[ActiveMarket] = []
+        counts = {"fetched": len(raw_markets)}
         for raw in raw_markets:
             market = self._parse_raw(raw)
             if market is None:
+                counts["malformed"] = counts.get("malformed", 0) + 1
                 continue
-            if not self._passes_filters(market):
+            rejected = self._filter_reason(market)
+            if rejected:
+                counts[rejected] = counts.get(rejected, 0) + 1
                 continue
             result.append(market)
+        self.last_scan_counts = counts
         logger.info(
             "Scanner: %d markets passed filters (fetched %d total)",
             len(result),
@@ -116,13 +130,7 @@ class MarketScanner:
         return result
 
     def _fetch_all_pages(self) -> list[dict]:
-        """Fetch pages from the Gamma API (capped at _MAX_PAGES).
-
-        The Gamma API returns markets ordered by volume descending, so the
-        most liquid/active markets appear on the first pages. Capping at 5
-        pages (500 markets) covers all meaningful price-threshold markets
-        without fetching tens of thousands of low-liquidity tail markets.
-        """
+        """Fetch every open market of the crypto-price events (see module doc)."""
         results: list[dict] = []
         offset = 0
         page_count = 0
@@ -130,11 +138,11 @@ class MarketScanner:
         while page_count < _MAX_PAGES:
             try:
                 page = self._get_json(
-                    f"{GAMMA_API_BASE}/markets",
+                    f"{GAMMA_API_BASE}/events",
                     {
-                        "active": "true",
                         "closed": "false",
-                        "tag_slug": "crypto",
+                        "tag_id": GAMMA_CRYPTO_PRICES_TAG_ID,
+                        "exclude_tag_id": GAMMA_UP_OR_DOWN_TAG_ID,
                         "limit": _PAGE_SIZE,
                         "offset": offset,
                         "order": "volume24hr",
@@ -143,7 +151,12 @@ class MarketScanner:
                 )
                 if not page:
                     break
-                results.extend(page)
+                results.extend(
+                    market
+                    for event in page
+                    for market in (event.get("markets") or [])
+                    if isinstance(market, dict) and not market.get("closed")
+                )
                 page_count += 1
                 if len(page) < _PAGE_SIZE:
                     break
@@ -324,13 +337,10 @@ class MarketScanner:
         else:
             logger.debug(msg, *args)
 
-    def _passes_filters(self, market: ActiveMarket) -> bool:
-        if market.liquidity_usd < self.min_liquidity:
-            return False
-        if market.yes_price > 0 and market.spread_pct > self.max_spread_pct:
-            return False
+    def _filter_reason(self, market: ActiveMarket) -> str:
+        """Name of the first filter that rejects ``market``, or "" if it passes."""
         if market.hours_to_resolution < self.min_hours_to_resolution:
-            return False
+            return "near_expiry"
         # Asset filter — only apply if assets list was provided
         if self.assets:
             q = market.question.lower()
@@ -338,8 +348,12 @@ class MarketScanner:
                 canonical in self.assets and alias in q
                 for alias, canonical in _ASSET_MAP.items()
             ):
-                return False
-        return True
+                return "asset"
+        if market.liquidity_usd < self.min_liquidity:
+            return "liquidity"
+        if market.spread > self.max_spread + 1e-9:
+            return "spread"
+        return ""
 
 
 def _parse_iso(s: str) -> datetime | None:
