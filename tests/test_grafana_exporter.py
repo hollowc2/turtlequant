@@ -353,3 +353,13 @@ def test_partial_close_pnl_is_part_of_its_round_trip(tmp_path):
     assert families["turtlequant_closed_trades_total"].samples[0].value == 1.0
     assert families["turtlequant_avg_pnl_per_trade_usd"].samples[0].value == -1.0
     assert families["turtlequant_win_rate"].samples[0].value == 0.0  # net loser, not a win
+
+
+def test_asset_delta_gauge_reads_the_risk_file(tmp_path):
+    (tmp_path / "turtlequant-risk.json").write_text(
+        '{"high_water":1000,"asset_risk":{"btc":{"gross_usd":120.0,"delta_usd":-85.5}}}'
+    )
+
+    families = {family.name: family for family in TurtleQuantCollector(str(tmp_path)).collect()}
+
+    assert _sample_value(families["turtlequant_asset_delta_usd"], asset="btc") == -85.5

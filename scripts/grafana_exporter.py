@@ -26,6 +26,7 @@ Entry gate (from *-risk.json):
   turtlequant_entries_halted            — 1 while entries are blocked (labeled by reason category)
   turtlequant_entry_halt_age_sec        — seconds the gate has been closed
   turtlequant_consecutive_broker_failures
+  turtlequant_asset_delta_usd           — net dollar delta per asset (labeled by asset)
 
 Per active position (labeled strategy, market_id, asset, option_type):
   turtlequant_position_size_usd
@@ -853,6 +854,11 @@ class TurtleQuantCollector:
             "Broker order failures since the last filled order",
             labels=["strategy"],
         )
+        asset_delta_g = GaugeMetricFamily(
+            "turtlequant_asset_delta_usd",
+            "Net dollar delta of open positions per asset (sum of shares * dp/dS * S)",
+            labels=["strategy", "asset"],
+        )
         scrape_success_g = GaugeMetricFamily(
             "turtlequant_exporter_scrape_success",
             "1 when both positions and history files were readable; 0 otherwise",
@@ -945,6 +951,11 @@ class TurtleQuantCollector:
                 [strategy], max(0.0, time.time() - since) if reason and since is not None else 0.0
             )
             broker_failures_g.add_metric([strategy], _safe_float(risk.get("consecutive_failures")))
+            asset_risk = risk.get("asset_risk")
+            if isinstance(asset_risk, dict):
+                for asset, values in asset_risk.items():
+                    if isinstance(values, dict):
+                        asset_delta_g.add_metric([strategy, str(asset)], _safe_float(values.get("delta_usd")))
 
         log_age = _file_age_sec(os.path.join(self.state_dir, BOT_LOG_FILE))
         if log_age is not None:
@@ -1135,6 +1146,7 @@ class TurtleQuantCollector:
         yield entries_halted_g
         yield entry_halt_age_g
         yield broker_failures_g
+        yield asset_delta_g
         yield bot_log_age_g
         yield scrape_success_g
 

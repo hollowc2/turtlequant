@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -87,6 +87,12 @@ class TraderConfig:
     # Snapshot every priced market's quote and both models this often, for
     # scripts/evaluate_models.py (0 = off). Diagnostics only.
     marks_interval_secs: float = 900.0
+    # Portfolio caps as fractions of NAV (0 = off): gross USD per asset, and
+    # net dollar delta per asset (sum of shares * dp/dS * S).
+    max_asset_exposure_pct: float = 0.0
+    max_asset_delta_pct: float = 0.0
+    # Kelly sizes on w*model + (1-w)*mid; 1.0 = raw model (legacy).
+    kelly_shrink: float = 1.0
 
     @property
     def persist(self) -> bool:
@@ -105,9 +111,18 @@ class EntryPlan:
 
 
 def plan_entry(
-    book: OrderBook, fee: FeeSchedule, model_prob: float, mid_edge: float, positions: PositionManager
+    book: OrderBook,
+    fee: FeeSchedule,
+    model_prob: float,
+    mid_edge: float,
+    positions: PositionManager,
+    sizing_prob: float | None = None,
 ) -> EntryPlan:
-    """Size a YES entry: Kelly on the mid edge to find the fill, then on the fee-inclusive edge."""
+    """Size a YES entry: Kelly on the mid edge to find the fill, then on the fee-inclusive edge.
+
+    ``sizing_prob`` (default: ``model_prob``) is the probability Kelly sizes
+    with; the reported edge, which gates the entry, always uses the model.
+    """
     preliminary = estimate_buy_fill(book, positions.kelly_size(mid_edge, model_prob, book.best_ask))
     estimated_fee = fee.fee(preliminary.filled_shares, preliminary.avg_price)
     executable_price = (
@@ -116,8 +131,22 @@ def plan_entry(
         else 0.0
     )
     edge = model_prob - executable_price
-    size_usd = positions.kelly_size(edge, model_prob, executable_price)
+    p = model_prob if sizing_prob is None else sizing_prob
+    size_usd = positions.kelly_size(p - executable_price, p, executable_price)
     return EntryPlan(size_usd, executable_price, edge, estimate_buy_fill(book, size_usd), estimated_fee)
+
+
+def delta_headroom_usd(net_delta: float, delta_per_share: float, price: float, cap_usd: float) -> float:
+    """Largest USD size whose delta keeps the asset's net delta within ``±cap_usd``.
+
+    A trade that reduces the net delta may go until it reaches the opposite
+    bound; one that adds to a net delta already past the cap gets 0.
+    """
+    if cap_usd <= 0 or delta_per_share == 0 or price <= 0:
+        return float("inf")
+    per_usd = delta_per_share / price
+    bound = cap_usd if per_usd > 0 else -cap_usd
+    return max(0.0, (bound - net_delta) / per_usd)
 
 
 class Trader:
@@ -151,6 +180,9 @@ class Trader:
         self.running = running
         self.reprice_errors = 0  # data-plane errors since the last scan summary
         self._last_marks_at = 0.0
+        # Per-asset gross USD and net dollar delta of open positions, rebuilt
+        # each scan and updated after entries within it.
+        self.asset_risk: dict[str, dict[str, float]] = {}
         self._marks: list[dict[str, object]] | None = None  # rows while a snapshot is being taken
         self._reconcile_warned_at: dict[int, float] = {}
 
@@ -251,6 +283,61 @@ class Trader:
         if self.config.pricing_model == "smile":
             return Pricing(smile_prob, s_sigma, source, legacy, smile_prob, forward, slope)
         return Pricing(legacy, sigma, source, legacy, smile_prob, forward, slope)
+
+    def dollar_delta_per_share(self, params: MarketParams, spot: float, pricing: Pricing) -> float:
+        """dp/dS * S for one YES share under the active model (±1% spot bump, sticky strike)."""
+        eps = 0.01
+
+        def prob(scale: float) -> float:
+            if self.config.pricing_model == "smile" and pricing.forward is not None and pricing.dsigma_dk is not None:
+                return smile_probability(
+                    params, spot * scale, pricing.forward * scale, pricing.sigma, pricing.dsigma_dk
+                )
+            return compute_probability(params, spot * scale, pricing.sigma)
+
+        return (prob(1 + eps) - prob(1 - eps)) / (2 * eps)
+
+    def refresh_asset_risk(self, spots: dict[str, float | None]) -> dict[str, dict[str, float]]:
+        """Gross exposure and net dollar delta per asset for positions still at market risk."""
+        risk: dict[str, dict[str, float]] = {}
+        now = datetime.now(UTC)
+        for pos in self.positions.all_positions():
+            if pos.status == "pending_redemption" or pos.expiry <= now:
+                continue
+            book = risk.setdefault(pos.asset, {"gross_usd": 0.0, "delta_usd": 0.0})
+            book["gross_usd"] += pos.size_usd
+            spot = spots.get(pos.asset)
+            if spot and pos.asset in self.vol_surfaces:
+                params = _position_params(pos)
+                book["delta_usd"] += pos.token_size * self.dollar_delta_per_share(
+                    params, spot, self.price(params, spot)
+                )
+        self.asset_risk = risk
+        return risk
+
+    def apply_portfolio_caps(
+        self, params: MarketParams, spot: float, pricing: Pricing, plan: EntryPlan, book: OrderBook
+    ) -> EntryPlan:
+        """Shrink ``plan`` to fit the per-asset gross and delta caps (no-op when off)."""
+        cfg = self.config
+        nav = self.positions.current_nav
+        current = self.asset_risk.get(params.asset, {"gross_usd": 0.0, "delta_usd": 0.0})
+        size = plan.size_usd
+        if cfg.max_asset_exposure_pct > 0:
+            size = min(size, max(0.0, cfg.max_asset_exposure_pct * nav - current["gross_usd"]))
+        if cfg.max_asset_delta_pct > 0 and plan.fill.avg_price > 0:
+            per_share = self.dollar_delta_per_share(params, spot, pricing)
+            size = min(
+                size,
+                delta_headroom_usd(current["delta_usd"], per_share, plan.fill.avg_price, cfg.max_asset_delta_pct * nav),
+            )
+        if size >= plan.size_usd:
+            return plan
+        logger.info(
+            "[ASSET_CAP] %s size $%.2f -> $%.2f (gross $%.2f, delta $%.2f)",
+            params.asset.upper(), plan.size_usd, size, current["gross_usd"], current["delta_usd"],
+        )
+        return replace(plan, size_usd=size, fill=estimate_buy_fill(book, size))
 
     # ------------------------------------------------------------------
     # Reprice pass
@@ -509,6 +596,7 @@ class Trader:
         # cached list during an outage keeps its old timestamp.
         market_data_at = self.scanner.markets_fetched_at
         self.check_entry_gate(market_data_at)
+        self.refresh_asset_risk(spots)
         interval = self.config.marks_interval_secs
         self._marks = [] if interval > 0 and time.time() - self._last_marks_at >= interval else None
 
@@ -535,6 +623,7 @@ class Trader:
                 }
             )
         self._marks = None
+        self.risk.record_asset_risk(self.asset_risk)
         stats["reprice_errors"] = self.reprice_errors
         self.reprice_errors = 0
         self.risk.record_scan(errors=int(stats["market_errors"]), attempted=int(stats["parse_attempted"]))
@@ -591,7 +680,7 @@ class Trader:
             self.evaluate_exit(pos, book=book, model_prob=model_prob)
             return
 
-        self.try_enter(market, params, pricing, market_data_at, stats)
+        self.try_enter(market, params, pricing, market_data_at, stats, spot=spot)
 
     def try_enter(
         self,
@@ -600,6 +689,8 @@ class Trader:
         pricing: Pricing,
         market_data_at: datetime | None,
         stats: dict[str, object],
+        *,
+        spot: float | None = None,
     ) -> ExecutionResult | None:
         cfg = self.config
         model_prob, sigma, vol_source = pricing.prob, pricing.sigma, pricing.vol_source
@@ -627,7 +718,16 @@ class Trader:
             logger.warning("[ENTRY_REJECTED] Missing CLOB fee rate for %s", market.market_id[:16])
             return None
         fee = fee if fee is not None else DEFAULT_CRYPTO_FEE
-        plan = plan_entry(book, fee, model_prob, mid_edge, self.positions)
+        sizing_prob = cfg.kelly_shrink * model_prob + (1 - cfg.kelly_shrink) * yes_price
+        plan = plan_entry(
+            book, fee, model_prob, mid_edge, self.positions,
+            sizing_prob=None if cfg.kelly_shrink >= 1 else sizing_prob,
+        )
+        if spot is not None:
+            capped = self.apply_portfolio_caps(params, spot, pricing, plan, book)
+            if capped.size_usd < plan.size_usd and capped.size_usd < 1.0:
+                _inc(stats, "asset_capped")
+            plan = capped
         if plan.size_usd < 1.0 or not plan.fill.complete:
             return None
         if not self.positions.has_expiry_headroom(params.expiry, plan.size_usd):
@@ -703,7 +803,12 @@ class Trader:
                 market.market_id[:16], plan.size_usd, plan.executable_price, model_prob, plan.edge,
             )
             return None
-        return self._buy(market, params, model_prob, sigma, vol_source, book, fee, plan)
+        result = self._buy(market, params, model_prob, sigma, vol_source, book, fee, plan)
+        if result.success and spot is not None:
+            asset = self.asset_risk.setdefault(params.asset, {"gross_usd": 0.0, "delta_usd": 0.0})
+            asset["gross_usd"] += result.filled_usd
+            asset["delta_usd"] += result.filled_shares * self.dollar_delta_per_share(params, spot, pricing)
+        return result
 
     def _buy(
         self,

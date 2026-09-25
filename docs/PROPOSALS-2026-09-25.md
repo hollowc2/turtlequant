@@ -94,6 +94,12 @@ depth and spreads (the CLOB mirrors YES/NO, but executable depth differs).
 
 ## #13 Portfolio risk
 
+**Status: implemented, all flags off by default:** `--max-asset-exposure-pct`,
+`--max-asset-delta-pct`, `--kelly-shrink`, plus the `turtlequant_asset_delta_usd`
+gauge. Units: dollar delta is P&L per +100% linearised move, so /100 = per 1%. On live
+shadow state, $53 of BTC positions carried −$1,765 (short-dated dip digitals). Choose
+the delta cap from the gauge; 20% of NAV blocks almost everything.
+
 **Change:**
 1. `--max-asset-exposure-pct` (gross USD per asset, e.g. 25% of NAV) and
    `--max-asset-delta-pct` (net dollar delta per asset, from each position's
