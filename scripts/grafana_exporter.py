@@ -347,6 +347,7 @@ class HistoryStats:
         self.close: list[dict] = []
         self.effective_close: list[dict] = []
         self._open_queues: dict[str, list[dict]] = {}
+        self._partial_pnl: dict[str, float] = {}  # partial_close P&L awaiting its final close
         self.book_source_counts: dict[str, int] = {}
         self.vol_source_counts: dict[str, int] = {}
         self.shadow_counts: dict[str, int] = {}
@@ -386,6 +387,9 @@ class HistoryStats:
             if event.get("edge") is not None:
                 self.edge_sum += _safe_float(event.get("edge"))
                 self.edge_count += 1
+        elif kind == "partial_close":
+            market_id = str(event.get("market_id", ""))
+            self._partial_pnl[market_id] = self._partial_pnl.get(market_id, 0.0) + _safe_float(event.get("pnl"))
         elif kind == "close":
             self._add_close(event)
         elif kind == "order":
@@ -438,7 +442,14 @@ class HistoryStats:
         if matching_open is not None:
             close_event["_opened_ts"] = matching_open.get("ts")
             close_event["_question"] = close_event.get("question") or matching_open.get("question")
-        close_event["_effective_pnl"] = effective_close_pnl(matching_open, close_event)
+        # A round trip's P&L includes its earlier partial closes, as on the
+        # performance page; otherwise win rate and drawdown miss that money.
+        earlier = self._partial_pnl.pop(str(event.get("market_id", "")), None)
+        close_event["_effective_pnl"] = (
+            effective_close_pnl(matching_open, close_event)
+            if earlier is None
+            else earlier + _safe_float(event.get("pnl"))
+        )
         self.effective_close.append(close_event)
 
     def recent_quality(self, now: float | None = None) -> dict[str, int]:

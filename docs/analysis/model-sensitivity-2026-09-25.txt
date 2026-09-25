@@ -1,0 +1,22 @@
+# Output of docs/analysis/model_sensitivity.py, 2026-09-25 ~04:30 UTC. The barrier 'skew' column is a proxy (2x skew-adjusted terminal probability, zero drift).
+spot BTC 84,120 ETH 2,676.37; 282 priced markets with Deribit IV
+BTC forward premium, longest expiry (1.00y): +4.99%/yr (bot assumes +5.00%/yr)
+ETH forward premium, longest expiry (1.00y): +4.57%/yr (bot assumes +5.00%/yr)
+model=now  mean |p - p_now| 0.0000  max 0.0000  YES edge>=5%: 11  NO edge>=5%: 4
+model=fwd  mean |p - p_now| 0.0006  max 0.0039  YES edge>=5%: 11  NO edge>=5%: 4
+model=skew mean |p - p_now| 0.0198  max 0.0938  YES edge>=5%: 3  NO edge>=5%: 17
+
+YES candidates today (model_now - mid >= 5%) and how the corrections move them:
+type          asset        K  days    mid    now    fwd   skew  delta
+barrier_down    btc   70,000    98  0.320  0.401  0.402  0.329  short
+barrier_down    btc   65,000    98  0.195  0.270  0.270  0.184  short
+barrier         eth    2,900     6  0.145  0.201  0.198  0.146  long
+barrier_down    eth    2,400     6  0.075  0.131  0.132  0.069  short
+barrier_down    btc   80,000     3  0.065  0.127  0.127  0.059  short
+barrier_down    eth    2,500     3  0.061  0.122  0.123  0.058  short
+barrier         eth    2,800     3  0.175  0.240  0.238  0.162  long
+barrier_down    eth    1,750    98  0.085  0.223  0.225  0.151  short
+barrier_down    eth    2,000    98  0.195  0.365  0.368  0.299  short
+barrier_down    eth    2,250    98  0.355  0.571  0.574  0.535  short
+barrier_down    eth    1,500    98  0.075  0.131  0.132  0.086  short
+YES candidate delta direction: {('btc', 'short'): 3, ('eth', 'long'): 2, ('eth', 'short'): 6}
