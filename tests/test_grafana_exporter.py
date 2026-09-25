@@ -363,3 +363,14 @@ def test_asset_delta_gauge_reads_the_risk_file(tmp_path):
     families = {family.name: family for family in TurtleQuantCollector(str(tmp_path)).collect()}
 
     assert _sample_value(families["turtlequant_asset_delta_usd"], asset="btc") == -85.5
+
+
+def test_position_gauges_carry_the_outcome(tmp_path):
+    (tmp_path / "turtlequant-positions.json").write_text(
+        '{"nav":1000,"positions":[{"market_id":"m","asset":"btc","option_type":"european","outcome":"NO",'
+        '"size_usd":30,"entry_price":0.3,"token_size":100,"opened_at":"2026-09-01T00:00:00+00:00"}]}'
+    )
+
+    families = {family.name: family for family in TurtleQuantCollector(str(tmp_path)).collect()}
+
+    assert _sample_value(families["turtlequant_position_size_usd"], market_id="m", outcome="NO") == 30.0

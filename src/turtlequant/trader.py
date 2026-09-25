@@ -70,6 +70,36 @@ class Pricing:
 
 
 @dataclass(frozen=True)
+class SideQuote:
+    """One outcome token of a market, in that token's own terms."""
+
+    outcome: str  # "YES" | "NO"
+    token_id: str
+    prob: float  # model probability of this outcome
+    mid: float
+    bid: float  # Gamma quote for this token (NO = complement of YES)
+    ask: float
+
+
+def side_prob(outcome: str, yes_prob: float) -> float:
+    return 1.0 - yes_prob if outcome == "NO" else yes_prob
+
+
+def side_quote(market: ActiveMarket, outcome: str, yes_prob: float) -> SideQuote:
+    """The market seen from ``outcome``'s token; NO mirrors YES (bid = 1 - YES ask)."""
+    if outcome == "NO":
+        return SideQuote(
+            "NO",
+            market.no_token_id,
+            1.0 - yes_prob,
+            1.0 - market.yes_price,
+            1.0 - market.ask if market.ask > 0 else 0.0,
+            1.0 - market.bid if market.bid > 0 else 0.0,
+        )
+    return SideQuote("YES", market.yes_token_id, yes_prob, market.yes_price, market.bid, market.ask)
+
+
+@dataclass(frozen=True)
 class TraderConfig:
     execution_mode: str  # "paper" | "shadow" | "live"
     assets: tuple[str, ...]
@@ -93,6 +123,9 @@ class TraderConfig:
     max_asset_delta_pct: float = 0.0
     # Kelly sizes on w*model + (1-w)*mid; 1.0 = raw model (legacy).
     kelly_shrink: float = 1.0
+    # Outcome tokens the bot may buy: ("YES",) is the legacy behaviour;
+    # ("YES", "NO") also buys NO when the model is below the market.
+    sides: tuple[str, ...] = ("YES",)
 
     @property
     def persist(self) -> bool:
@@ -309,14 +342,16 @@ class Trader:
             spot = spots.get(pos.asset)
             if spot and pos.asset in self.vol_surfaces:
                 params = _position_params(pos)
-                book["delta_usd"] += pos.token_size * self.dollar_delta_per_share(
+                sign = -1.0 if pos.outcome == "NO" else 1.0  # a NO share is short the YES share
+                book["delta_usd"] += sign * pos.token_size * self.dollar_delta_per_share(
                     params, spot, self.price(params, spot)
                 )
         self.asset_risk = risk
         return risk
 
     def apply_portfolio_caps(
-        self, params: MarketParams, spot: float, pricing: Pricing, plan: EntryPlan, book: OrderBook
+        self, params: MarketParams, spot: float, pricing: Pricing, plan: EntryPlan, book: OrderBook,
+        outcome: str = "YES",
     ) -> EntryPlan:
         """Shrink ``plan`` to fit the per-asset gross and delta caps (no-op when off)."""
         cfg = self.config
@@ -326,7 +361,7 @@ class Trader:
         if cfg.max_asset_exposure_pct > 0:
             size = min(size, max(0.0, cfg.max_asset_exposure_pct * nav - current["gross_usd"]))
         if cfg.max_asset_delta_pct > 0 and plan.fill.avg_price > 0:
-            per_share = self.dollar_delta_per_share(params, spot, pricing)
+            per_share = self.dollar_delta_per_share(params, spot, pricing) * (-1.0 if outcome == "NO" else 1.0)
             size = min(
                 size,
                 delta_headroom_usd(current["delta_usd"], per_share, plan.fill.avg_price, cfg.max_asset_delta_pct * nav),
@@ -369,12 +404,14 @@ class Trader:
     def _reprice(self, pos: Position, spot: float | None) -> None:
         if spot is None or pos.asset not in self.vol_surfaces:
             return
-        model_prob = self.price(_position_params(pos), spot).prob
+        model_prob = side_prob(pos.outcome, self.price(_position_params(pos), spot).prob)
         # Fall back only to Gamma's live bid/ask. A stale last trade or a
         # persisted mark is never an executable exit price: with neither source
         # there is no bid, and the position holds.
         gamma_bid, gamma_ask = self.scanner.fetch_market_quote(pos.market_id) or (0.0, 0.0)
-        book = self.executor.get_order_book(pos.yes_token_id, fallback_bid=gamma_bid, fallback_ask=gamma_ask)
+        if pos.outcome == "NO":
+            gamma_bid, gamma_ask = (1.0 - gamma_ask if gamma_ask > 0 else 0.0), (1.0 - gamma_bid if gamma_bid > 0 else 0.0)
+        book = self.executor.get_order_book(pos.token_id, fallback_bid=gamma_bid, fallback_ask=gamma_ask)
         if book.best_bid > 0 or book.best_ask > 0:
             self.positions.record_market_data(
                 pos.market_id, yes_price=book.mid, bid=book.best_bid, ask=book.best_ask, observed_at=datetime.now(UTC)
@@ -386,7 +423,7 @@ class Trader:
         resolved_price = (
             pos.resolution_price
             if pos.status == "pending_redemption"
-            else self.scanner.fetch_resolution(pos.market_id, pos.yes_token_id)
+            else self.scanner.fetch_resolution(pos.market_id, pos.token_id, pos.outcome)
         )
         if resolved_price is None:
             overdue_hours = (datetime.now(UTC) - pos.expiry).total_seconds() / 3600
@@ -429,6 +466,7 @@ class Trader:
                 "market_id": pos.market_id,
                 "asset": pos.asset,
                 "strike": pos.strike,
+                "outcome": pos.outcome,
                 "reason": "resolved",
                 "yes_price": resolved_price,
                 "resolution_price": resolved_price,
@@ -455,8 +493,8 @@ class Trader:
             self.exit_position(pos, book=book, model_prob=model_prob, decision=decision)
         elif log_hold:
             logger.info(
-                "[HOLD] %s K=%.0f exp=%s model_p=%.4f mkt_p=%.4f edge=%.4f entry_edge=%.4f ttl=%.1fh",
-                pos.asset.upper(), pos.strike, pos.expiry_iso[:10], model_prob, book.best_bid,
+                "[HOLD] %s %s K=%.0f exp=%s model_p=%.4f mkt_p=%.4f edge=%.4f entry_edge=%.4f ttl=%.1fh",
+                pos.asset.upper(), pos.outcome, pos.strike, pos.expiry_iso[:10], model_prob, book.best_bid,
                 decision.current_edge, decision.entry_edge, decision.hours_to_expiry or 0.0,
             )
         return decision
@@ -477,13 +515,13 @@ class Trader:
             return None
         shares = pos.token_size if pos.token_size > 0 else pos.size_usd / pos.entry_price
         intent_id = (
-            self.intents.pending(pos.market_id, pos.yes_token_id, "SELL", shares)
+            self.intents.pending(pos.market_id, pos.token_id, "SELL", shares)
             if self.intents is not None and self.live
             else None
         )
-        fee = self.executor.get_market_fee(pos.condition_id, pos.yes_token_id)
-        result = self.executor.sell_yes(
-            pos.yes_token_id, shares, book, fee=fee if fee is not None else DEFAULT_CRYPTO_FEE
+        fee = self.executor.get_market_fee(pos.condition_id, pos.token_id)
+        result = self.executor.sell_yes(  # token-agnostic: sells whichever token is held
+            pos.token_id, shares, book, fee=fee if fee is not None else DEFAULT_CRYPTO_FEE
         )
         self.journal_result(intent_id, result)
         if result.sent or result.success:
@@ -539,6 +577,7 @@ class Trader:
                 "market_id": pos.market_id,
                 "asset": pos.asset,
                 "strike": pos.strike,
+                "outcome": pos.outcome,
                 "reason": reason,
                 "model_prob": model_prob,
                 "yes_price": filled_price,
@@ -665,19 +704,19 @@ class Trader:
 
         pos = self.positions.get_position(market.market_id)
         if pos is not None:
+            held = side_quote(market, pos.outcome, model_prob)
             self.positions.record_market_data(
                 market.market_id,
                 yes_token_id=market.yes_token_id,
+                no_token_id=market.no_token_id,
                 condition_id=market.condition_id,
-                yes_price=market.yes_price,
-                bid=market.bid,
-                ask=market.ask,
+                yes_price=held.mid,  # the held token's mid
+                bid=held.bid,
+                ask=held.ask,
                 observed_at=datetime.now(UTC),
             )
-            book = self.executor.get_order_book(
-                pos.yes_token_id, fallback_bid=market.bid, fallback_ask=market.ask
-            )
-            self.evaluate_exit(pos, book=book, model_prob=model_prob)
+            book = self.executor.get_order_book(pos.token_id, fallback_bid=held.bid, fallback_ask=held.ask)
+            self.evaluate_exit(pos, book=book, model_prob=held.prob)
             return
 
         self.try_enter(market, params, pricing, market_data_at, stats, spot=spot)
@@ -693,38 +732,45 @@ class Trader:
         spot: float | None = None,
     ) -> ExecutionResult | None:
         cfg = self.config
-        model_prob, sigma, vol_source = pricing.prob, pricing.sigma, pricing.vol_source
+        sigma, vol_source = pricing.sigma, pricing.vol_source
         if self.positions.closed_within(market.market_id, cfg.reentry_cooldown_secs):
             logger.debug("Cooldown active for %s — skip re-entry", market.market_id[:16])
             return None
         if not self.check_entry_gate(market_data_at):
             return None
-        yes_price = market.yes_price
-        mid_edge = model_prob - yes_price
+        # Edges on YES and NO have opposite signs, so at most one side clears.
+        side = max(
+            (side_quote(market, o, pricing.prob) for o in cfg.sides if o == "YES" or market.no_token_id),
+            key=lambda q: q.prob - q.mid,
+        )
+        model_prob, mid_price = side.prob, side.mid
+        mid_edge = model_prob - mid_price
         if mid_edge < cfg.entry_threshold:
             return None
         _inc(stats, "mid_edge_candidates")
-        if yes_price <= cfg.min_entry_price or yes_price >= cfg.max_entry_price:
+        if side.outcome == "NO":
+            _inc(stats, "no_side_candidates")
+        if mid_price <= cfg.min_entry_price or mid_price >= cfg.max_entry_price:
             return None
         if vol_source in NO_ENTRY_VOL_SOURCES:
             _inc(stats, "vol_blocked")
             logger.info("[ENTRY_SKIPPED] %s vol source %s", market.market_id[:16], vol_source)
             return None
 
-        book = self.executor.get_order_book(market.yes_token_id, fallback_bid=market.bid, fallback_ask=market.ask)
+        book = self.executor.get_order_book(side.token_id, fallback_bid=side.bid, fallback_ask=side.ask)
         _inc(stats, "book_sources", book.source)
-        fee = self.executor.get_market_fee(market.condition_id, market.yes_token_id)
+        fee = self.executor.get_market_fee(market.condition_id, side.token_id)
         if self.live and fee is None:
             logger.warning("[ENTRY_REJECTED] Missing CLOB fee rate for %s", market.market_id[:16])
             return None
         fee = fee if fee is not None else DEFAULT_CRYPTO_FEE
-        sizing_prob = cfg.kelly_shrink * model_prob + (1 - cfg.kelly_shrink) * yes_price
+        sizing_prob = cfg.kelly_shrink * model_prob + (1 - cfg.kelly_shrink) * mid_price
         plan = plan_entry(
             book, fee, model_prob, mid_edge, self.positions,
             sizing_prob=None if cfg.kelly_shrink >= 1 else sizing_prob,
         )
         if spot is not None:
-            capped = self.apply_portfolio_caps(params, spot, pricing, plan, book)
+            capped = self.apply_portfolio_caps(params, spot, pricing, plan, book, side.outcome)
             if capped.size_usd < plan.size_usd and capped.size_usd < 1.0:
                 _inc(stats, "asset_capped")
             plan = capped
@@ -744,6 +790,9 @@ class Trader:
                 "strike": params.strike,
                 "expiry": params.expiry.isoformat(),
                 "option_type": params.option_type.value,
+                "outcome": side.outcome,
+                # model_prob / mid_price / executable_price are in the traded
+                # token's terms; model_prob_legacy/_smile are always P(YES).
                 "model_prob": model_prob,
                 "pricing_model": cfg.pricing_model,
                 "model_prob_legacy": pricing.legacy_prob,
@@ -753,7 +802,7 @@ class Trader:
                 # Diagnostics only: a 1.645*RMSE haircut on top of the entry
                 # threshold silently raised the bar from 5% to ~13% in July.
                 "conservative_prob": max(0.0, model_prob - 1.645 * cfg.calibration_rmse),
-                "mid_price": yes_price,
+                "mid_price": mid_price,
                 "executable_price": plan.executable_price,
                 "mid_edge": mid_edge,
                 "ask_edge": plan.edge,
@@ -762,7 +811,7 @@ class Trader:
                 "requested_size_usd": plan.size_usd,
                 "estimated_fill_ratio": min(1.0, plan.fill.filled_usd / plan.size_usd),
                 "estimated_avg_price": plan.fill.avg_price,
-                "estimated_slippage": plan.fill.avg_price - yes_price if plan.fill.avg_price > 0 else 0.0,
+                "estimated_slippage": plan.fill.avg_price - mid_price if plan.fill.avg_price > 0 else 0.0,
                 "estimated_complete": plan.fill.complete,
                 "fee_rate": fee.rate,
                 "fee_exponent": fee.exponent,
@@ -782,8 +831,9 @@ class Trader:
                     "event": "shadow_quote",
                     "market_id": market.market_id,
                     "asset": params.asset,
+                    "outcome": side.outcome,
                     "model_prob": model_prob,
-                    "mid_price": yes_price,
+                    "mid_price": mid_price,
                     "bid": book.best_bid,
                     "ask": book.best_ask,
                     "edge": plan.edge,
@@ -799,43 +849,46 @@ class Trader:
         _inc(stats, "executable_edge_candidates")
         if cfg.dry_run:
             logger.info(
-                "[DRY_RUN] Would buy %s $%.2f at %.4f (model_p=%.4f edge=%.4f)",
-                market.market_id[:16], plan.size_usd, plan.executable_price, model_prob, plan.edge,
+                "[DRY_RUN] Would buy %s %s $%.2f at %.4f (model_p=%.4f edge=%.4f)",
+                market.market_id[:16], side.outcome, plan.size_usd, plan.executable_price, model_prob, plan.edge,
             )
             return None
-        result = self._buy(market, params, model_prob, sigma, vol_source, book, fee, plan)
+        result = self._buy(market, params, side, sigma, vol_source, book, fee, plan)
         if result.success and spot is not None:
             asset = self.asset_risk.setdefault(params.asset, {"gross_usd": 0.0, "delta_usd": 0.0})
             asset["gross_usd"] += result.filled_usd
-            asset["delta_usd"] += result.filled_shares * self.dollar_delta_per_share(params, spot, pricing)
+            sign = -1.0 if side.outcome == "NO" else 1.0
+            asset["delta_usd"] += sign * result.filled_shares * self.dollar_delta_per_share(params, spot, pricing)
         return result
 
     def _buy(
         self,
         market: ActiveMarket,
         params: MarketParams,
-        model_prob: float,
+        side: SideQuote,
         sigma: float,
         vol_source: str,
         book: OrderBook,
         fee: FeeSchedule,
         plan: EntryPlan,
     ) -> ExecutionResult:
+        model_prob = side.prob
         intent_id = (
             self.intents.pending(
-                market.market_id, market.yes_token_id, "BUY", plan.size_usd,
+                market.market_id, side.token_id, "BUY", plan.size_usd,
                 {
                     "question": market.question, "asset": params.asset,
                     "strike": params.strike, "expiry_iso": params.expiry.isoformat(),
                     "option_type": params.option_type.value, "model_prob": model_prob,
-                    "condition_id": market.condition_id,
+                    "condition_id": market.condition_id, "outcome": side.outcome,
+                    "yes_token_id": market.yes_token_id, "no_token_id": market.no_token_id,
                 },
             )
             if self.intents is not None and self.live
             else None
         )
-        result = self.executor.buy_yes(
-            market.yes_token_id,
+        result = self.executor.buy_yes(  # token-agnostic: buys the chosen side's token
+            side.token_id,
             plan.size_usd,
             book,
             max_price=min(0.99, model_prob - self.config.entry_threshold),
@@ -873,6 +926,8 @@ class Trader:
             model_prob=model_prob,
             token_size=result.filled_shares,
             condition_id=market.condition_id,
+            outcome=side.outcome,
+            no_token_id=market.no_token_id,
         )
         self.positions.open_position(pos)
         self.positions.confirm_fill(
@@ -897,21 +952,23 @@ class Trader:
                 "strike": params.strike,
                 "expiry": params.expiry.isoformat(),
                 "option_type": params.option_type.value,
+                "outcome": side.outcome,
                 "model_prob": model_prob,
-                "yes_price": result.avg_price,
+                "yes_price": result.avg_price,  # price of the token bought
                 "bid": book.best_bid,
                 "ask": book.best_ask,
-                "mid_price": market.yes_price,
+                "mid_price": side.mid,
                 "edge": plan.edge,
                 "size_usd": result.filled_usd,
                 "requested_size_usd": plan.size_usd,
                 "filled_shares": result.filled_shares,
                 "complete": result.complete,
-                "slippage": result.avg_price - market.yes_price,
+                "slippage": result.avg_price - side.mid,
                 "sigma": sigma,
                 "vol_source": vol_source,
                 "book_source": book.source,
                 "yes_token_id": market.yes_token_id,
+                "token_id": side.token_id,
                 "fill_confirmed": True,
                 "ts": _now_iso(),
             }

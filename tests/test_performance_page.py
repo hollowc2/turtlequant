@@ -203,3 +203,20 @@ def test_generator_end_to_end(tmp_path):
     assert "Shadow Trading" in page
     assert "+$35.00" in page
     assert "https://github.com/hollowc2/turtlequant" in page
+
+
+def test_side_column_shows_the_held_token():
+    events = [{**_open("m-1", "2026-05-01T00:00:00+00:00"), "outcome": "NO"},
+              _close("m-1", "2026-05-01T06:00:00+00:00", 20.0)]
+    trades = build_closed_trades(events)
+    positions = open_positions_from_state({"positions": [{
+        "market_id": "m-2", "question": "q", "asset": "eth", "option_type": "barrier_down", "outcome": "NO",
+        "strike": 2000.0, "entry_price": 0.7, "size_usd": 70.0, "token_size": 100.0,
+    }]})
+
+    page = render_page(trades=trades, open_positions=positions, starting_nav=1000.0, generated_at=NOW, mode="shadow")
+
+    assert trades[0].outcome == "NO" and positions[0].outcome == "NO"
+    assert page.count("<th class=\"l\">Side</th>") == 2
+    assert page.count("<td class='l'>NO</td>") == 2
+    assert build_closed_trades(_history())[0].outcome == "YES"  # legacy rows default to YES

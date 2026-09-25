@@ -66,7 +66,7 @@ def reconcile_intent(intent: OrderIntent, executor: ExecutionClient, positions: 
         required = ("question", "asset", "strike", "expiry_iso", "option_type", "model_prob")
         if existing is not None:
             if (
-                existing.fill_confirmed and existing.yes_token_id == intent.token_id
+                existing.fill_confirmed and existing.token_id == intent.token_id
                 and abs(existing.token_size - fill.filled_shares) <= 1e-6
                 and abs(existing.size_usd - fill.filled_usd) <= 1e-6
             ):
@@ -75,13 +75,21 @@ def reconcile_intent(intent: OrderIntent, executor: ExecutionClient, positions: 
             raise ReconciliationError(f"intent {intent.id} BUY disagrees with local position")
         if any(key not in meta for key in required):
             raise ReconciliationError(f"intent {intent.id} lacks safe BUY position metadata")
+        outcome = str(meta.get("outcome", "YES"))
+        if outcome not in ("YES", "NO") or (outcome == "NO" and not meta.get("yes_token_id")):
+            raise ReconciliationError(f"intent {intent.id} has invalid outcome metadata")
         try:
             position = make_position(
                 market_id=intent.market_id, question=str(meta["question"]), asset=str(meta["asset"]),
                 strike=float(meta["strike"]), expiry=datetime.fromisoformat(str(meta["expiry_iso"])),
-                option_type=str(meta["option_type"]), yes_token_id=intent.token_id, yes_price=fill.avg_price,
+                option_type=str(meta["option_type"]),
+                # A NO intent journals the NO token; the YES token comes from metadata.
+                yes_token_id=str(meta["yes_token_id"]) if outcome == "NO" else intent.token_id,
+                yes_price=fill.avg_price,
                 size_usd=fill.filled_usd, model_prob=float(meta["model_prob"]), token_size=fill.filled_shares,
                 condition_id=str(meta.get("condition_id", "")),
+                outcome=outcome,
+                no_token_id=intent.token_id if outcome == "NO" else str(meta.get("no_token_id", "")),
             )
         except (TypeError, ValueError) as exc:
             raise ReconciliationError(f"intent {intent.id} has invalid BUY position metadata") from exc

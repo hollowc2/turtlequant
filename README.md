@@ -70,6 +70,8 @@ Enter when `edge > threshold` after crossing the executable ask. Size via fracti
 | Re-entry cooldown | 2h (`--reentry-cooldown-hours`) |
 | Scan interval | 60s |
 
+NO side (`--sides yes,no`, off by default): when the model is below the market, the bot buys the NO token, using its own CLOB book (which mirrors YES, with NO bid = 1 − YES ask) and P(NO) = 1 − P(YES). Positions, exits, settlement, fees, the intent journal, delta, the exporter (`outcome` label) and the performance page (Side column) all work in the held token's terms.
+
 Portfolio caps (all off by default): `--max-asset-exposure-pct` limits gross USD per asset. `--max-asset-delta-pct` limits net dollar delta per asset, Σ shares·∂p/∂S·S from a ±1% spot bump under the active pricing model. Divide dollar delta by 100 to get the P&L per 1% spot move. Short-dated near-the-money digitals carry a lot of it: on 2026-09-25, $53 of BTC positions held −$1,765. `--kelly-shrink w` sizes on `w·model + (1−w)·mid` while still gating on the raw model's edge. Each scan persists per-asset gross and delta to `turtlequant-risk.json`, exported as `turtlequant_asset_delta_usd{asset}`, so you can choose cap values from real numbers before turning them on.
 
 Every knob also reads an env var of the same name in upper case (e.g. `MAX_PER_EXPIRY_PCT`). `python scripts/turtlequant_bot.py --help` lists them all.

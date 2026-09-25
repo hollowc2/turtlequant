@@ -410,3 +410,25 @@ def test_partial_close_does_not_start_reentry_cooldown(tmp_path):
     manager.close_position("m1", exit_price=0.45, filled_shares=40.0)
 
     assert not manager.closed_within("m1", 2 * 3600)
+
+
+def test_legacy_state_loads_as_yes_and_no_requires_its_token(tmp_path):
+    positions_file = tmp_path / "positions.json"
+    legacy = {
+        "market_id": "m1", "question": "q", "asset": "btc", "strike": 80000.0,
+        "expiry_iso": "2026-12-31T00:00:00+00:00", "option_type": "european", "yes_token_id": "yes",
+        "entry_price": 0.4, "size_usd": 40.0, "model_prob_at_entry": 0.5, "edge_at_entry": 0.1,
+        "opened_at": "2026-09-01T00:00:00+00:00", "token_size": 100.0,
+    }
+    positions_file.write_text(json.dumps({"nav": 1000.0, "positions": [legacy]}))
+    pos = PositionManager(positions_file=positions_file).get_position("m1")
+    assert pos.outcome == "YES" and pos.token_id == "yes"
+
+    positions_file.write_text(json.dumps({"nav": 1000.0, "positions": [{**legacy, "outcome": "NO"}]}))
+    with pytest.raises(RuntimeError):
+        PositionManager(positions_file=positions_file)
+
+    positions_file.write_text(
+        json.dumps({"nav": 1000.0, "positions": [{**legacy, "outcome": "NO", "no_token_id": "no"}]})
+    )
+    assert PositionManager(positions_file=positions_file).get_position("m1").token_id == "no"
