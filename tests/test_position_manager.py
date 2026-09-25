@@ -377,3 +377,36 @@ def test_partial_closes_charge_entry_fee_exactly_once(tmp_path):
     assert first + second == pytest.approx(-1.75)
     assert manager.current_nav == pytest.approx(1000.0 - 1.75)
     assert not manager.has_position("m1")
+
+
+def test_reentry_cooldown_survives_restart(tmp_path):
+    positions_file = tmp_path / "positions.json"
+    manager = PositionManager(starting_nav=1000.0, positions_file=positions_file)
+    manager.open_position(
+        make_position(
+            market_id="m1", question="q", asset="btc", strike=100_000.0,
+            expiry=datetime.now(UTC) + timedelta(days=5), option_type="european",
+            yes_token_id="yes", yes_price=0.40, size_usd=40.0, model_prob=0.55,
+        )
+    )
+    manager.close_position("m1", exit_price=0.45)
+
+    restarted = PositionManager(starting_nav=1000.0, positions_file=positions_file)
+
+    assert restarted.closed_within("m1", 2 * 3600)
+    assert not restarted.closed_within("m1", 2 * 3600, now=datetime.now(UTC) + timedelta(hours=3))
+    assert not restarted.closed_within("other", 2 * 3600)
+
+
+def test_partial_close_does_not_start_reentry_cooldown(tmp_path):
+    manager = PositionManager(starting_nav=1000.0, positions_file=tmp_path / "positions.json")
+    manager.open_position(
+        make_position(
+            market_id="m1", question="q", asset="btc", strike=100_000.0,
+            expiry=datetime.now(UTC) + timedelta(days=5), option_type="european",
+            yes_token_id="yes", yes_price=0.40, size_usd=40.0, model_prob=0.55, token_size=100.0,
+        )
+    )
+    manager.close_position("m1", exit_price=0.45, filled_shares=40.0)
+
+    assert not manager.closed_within("m1", 2 * 3600)

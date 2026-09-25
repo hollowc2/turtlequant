@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from turtlequant.market_scanner import MarketScanner
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def test_parse_raw_accepts_gamma_json_string_token_fields():
@@ -127,10 +132,36 @@ def test_fetch_all_pages_uses_recent_cache_on_outage():
     assert scanner._fetch_all_pages() == [{"id": "market-1"}]
 
 
-def test_fetch_market_price_handles_resolution_failure():
-    scanner = MarketScanner(session=_ResolutionFailureSession())
+def test_fetch_market_quote_reads_best_bid_ask_not_last_trade():
+    payload = json.loads((FIXTURES / "gamma_market_open.json").read_text())
 
-    assert scanner.fetch_market_price("market-1") is None
+    quote = MarketScanner(session=_ResolvedSession(payload)).fetch_market_quote(payload["id"])
+
+    assert quote == (payload["bestBid"], payload["bestAsk"])
+    assert payload["price"] is None  # Gamma has no "price" field to fall back to
+
+
+def test_fetch_market_quote_reports_missing_side_as_zero():
+    payload = {"bestAsk": 0.2, "lastTradePrice": 0.9}
+
+    assert MarketScanner(session=_ResolvedSession(payload)).fetch_market_quote("m") == (0.0, 0.2)
+
+
+def test_fetch_market_quote_handles_api_failure():
+    assert MarketScanner(session=_FailingSession()).fetch_market_quote("market-1") is None
+
+
+def test_markets_fetched_at_keeps_last_fresh_time_on_cache_fallback():
+    session = _CachedMarketSession()
+    scanner = MarketScanner(session=session)
+    scanner._fetch_all_pages()
+    fresh = scanner.markets_fetched_at
+    assert fresh is not None
+
+    session.fail = True
+    scanner._fetch_all_pages()
+
+    assert scanner.markets_fetched_at == fresh
 
 
 def test_fetch_resolution_reads_outcome_prices_of_resolved_market():

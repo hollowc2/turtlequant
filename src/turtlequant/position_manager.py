@@ -20,7 +20,7 @@ import logging
 import math
 import os
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .clob_execution import DEFAULT_CRYPTO_FEE
@@ -32,6 +32,8 @@ DEFAULT_MAX_PER_MARKET_PCT = 0.10
 DEFAULT_MAX_PER_EXPIRY_PCT = 0.15
 DEFAULT_MAX_TOTAL_EXPOSURE_PCT = 0.40
 DEFAULT_KELLY_FRACTION = 0.25
+# Fully closed markets are remembered this long for the re-entry cooldown.
+_RECENTLY_CLOSED_RETENTION = timedelta(days=1)
 
 # Default state directory (overridden by --state-dir CLI arg or env)
 DEFAULT_STATE_DIR = Path("state/turtlequant")
@@ -100,6 +102,7 @@ class PositionManager:
     positions_file: Path = field(default_factory=lambda: DEFAULT_POSITIONS_FILE)
     persist: bool = True  # False (dry-run) keeps every change in memory only
     _positions: dict[str, Position] = field(default_factory=dict, repr=False)
+    _recently_closed: dict[str, str] = field(default_factory=dict, repr=False)  # market_id -> ISO close time
 
     def __post_init__(self) -> None:
         if self.current_nav <= 0:
@@ -118,6 +121,14 @@ class PositionManager:
 
     def all_positions(self) -> list[Position]:
         return list(self._positions.values())
+
+    def closed_within(self, market_id: str, seconds: float, now: datetime | None = None) -> bool:
+        """True if this market was fully closed less than ``seconds`` ago (persisted)."""
+        closed_at = self._recently_closed.get(market_id)
+        if not closed_at:
+            return False
+        now = now or datetime.now(UTC)
+        return (now - datetime.fromisoformat(closed_at)).total_seconds() < seconds
 
     def marked_equity(self) -> float:
         """Current NAV including the latest persisted mark for each open claim."""
@@ -281,6 +292,7 @@ class PositionManager:
             self.total_pnl += pnl
             if closed_tokens >= tokens - 1e-6:
                 self._positions.pop(market_id, None)
+                self._recently_closed[market_id] = datetime.now(UTC).isoformat()
             else:
                 pos.token_size = tokens - closed_tokens
                 pos.size_usd = max(0.0, pos.size_usd * (1.0 - close_ratio))
@@ -404,6 +416,13 @@ class PositionManager:
         nav = data.get("nav", self.current_nav)
         total_pnl = data.get("total_pnl", 0.0)
         positions = data.get("positions", [])
+        recently_closed = data.get("recently_closed", {})
+        if not isinstance(recently_closed, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in recently_closed.items()
+        ):
+            raise ValueError("recently_closed must map market ids to ISO timestamps")
+        for closed_at in recently_closed.values():
+            datetime.fromisoformat(closed_at)
         if not isinstance(nav, (int, float)) or not math.isfinite(nav) or nav <= 0:
             raise ValueError("nav must be a positive finite number")
         if not isinstance(total_pnl, (int, float)) or not math.isfinite(total_pnl):
@@ -446,17 +465,25 @@ class PositionManager:
         self.current_nav = float(nav)
         self.total_pnl = float(total_pnl)
         self._positions = loaded
+        self._recently_closed = dict(recently_closed)
 
     def _save(self) -> None:
         if not self.persist:
             return
+        now = datetime.now(UTC)
+        self._recently_closed = {
+            market_id: closed_at
+            for market_id, closed_at in self._recently_closed.items()
+            if now - datetime.fromisoformat(closed_at) < _RECENTLY_CLOSED_RETENTION
+        }
         try:
             self.positions_file.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 "nav": self.current_nav,
                 "total_pnl": self.total_pnl,
-                "updated_at": datetime.now(UTC).isoformat(),
+                "updated_at": now.isoformat(),
                 "positions": [asdict(p) for p in self._positions.values()],
+                "recently_closed": self._recently_closed,
             }
             tmp_file = self.positions_file.with_name(
                 f".{self.positions_file.name}.{os.getpid()}.tmp"

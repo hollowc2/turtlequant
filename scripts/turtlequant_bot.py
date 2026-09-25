@@ -447,9 +447,6 @@ def main() -> None:
     last_scan_time = 0.0
     last_reprice_time = 0.0
     reprice_errors = 0  # data-plane errors since the last scan summary
-    recently_closed: dict[
-        str, datetime
-    ] = {}  # market_id → close time (cooldown tracker)
 
     while running:
         now = time.time()
@@ -558,28 +555,25 @@ def main() -> None:
                     sigma = vs.get_iv(spot, pos.strike, pos.expiry)
                     model_prob = compute_probability(params, spot, sigma)
 
-                    yes_price = scanner.fetch_market_price(pos.market_id)
+                    # Fall back only to Gamma's live bid/ask. A stale last trade
+                    # or persisted mark is never an executable exit price: with
+                    # neither source there is no bid, and the position holds.
+                    gamma_bid, gamma_ask = scanner.fetch_market_quote(pos.market_id) or (0.0, 0.0)
                     book = executor.get_order_book(
                         pos.yes_token_id,
-                        fallback_bid=yes_price or pos.last_bid or pos.last_yes_price,
-                        fallback_ask=yes_price or pos.last_ask or pos.last_yes_price,
+                        fallback_bid=gamma_bid,
+                        fallback_ask=gamma_ask,
                     )
-                    if yes_price is None:
-                        yes_price = (
-                            pos.last_yes_price
-                            if pos.last_yes_price > 0
-                            else pos.entry_price
-                        )
-                    else:
+                    if book.best_bid > 0 or book.best_ask > 0:
                         pos_mgr.record_market_data(
                             pos.market_id,
-                            yes_price=yes_price,
+                            yes_price=book.mid,
                             bid=book.best_bid,
                             ask=book.best_ask,
                             observed_at=datetime.now(UTC),
                         )
 
-                    executable_exit_price = book.best_bid or yes_price
+                    executable_exit_price = book.best_bid
                     decision = pos_mgr.exit_decision(
                         pos.market_id,
                         model_prob,
@@ -672,8 +666,6 @@ def main() -> None:
                             intent_ledger.reconcile(exit_intent_id)
                         risk_controls.record_realized_pnl(pnl)
                         risk_controls.record_success(pos_mgr.marked_equity())
-                        if exit_result is None or exit_result.complete:
-                            recently_closed[pos.market_id] = datetime.now(UTC)
                         record(
                             {
                                 "event": "close"
@@ -779,7 +771,10 @@ def main() -> None:
             # Independent asset marks are bounded and fetched concurrently.
             latest_spots = fetch_latest_closes(ASSET_TO_SYMBOL[a] for a in assets)
             spots = {asset: latest_spots.get(ASSET_TO_SYMBOL[asset]) for asset in assets}
-            check_entry_gate(scan_started_at)
+            # Staleness is measured from when Gamma actually served the list;
+            # a cached list during an outage keeps its old timestamp.
+            market_data_at = scanner.markets_fetched_at
+            check_entry_gate(market_data_at)
 
             for market in markets:
                 if not running:
@@ -846,7 +841,7 @@ def main() -> None:
                             fallback_bid=market.bid,
                             fallback_ask=market.ask,
                         )
-                        executable_exit_price = book.best_bid or market.bid or yes_price
+                        executable_exit_price = book.best_bid
                         decision = pos_mgr.exit_decision(
                             market.market_id,
                             model_prob,
@@ -945,8 +940,6 @@ def main() -> None:
                                 intent_ledger.reconcile(exit_intent_id)
                             risk_controls.record_realized_pnl(pnl)
                             risk_controls.record_success(pos_mgr.marked_equity())
-                            if exit_result is None or exit_result.complete:
-                                recently_closed[market.market_id] = datetime.now(UTC)
                             record(
                                 {
                                     "event": "close"
@@ -993,19 +986,14 @@ def main() -> None:
 
                     # ── Check entry ───────────────────────────────────────
                     # Skip if this market was recently closed (re-entry cooldown)
-                    closed_at = recently_closed.get(market.market_id)
-                    if (
-                        closed_at
-                        and (datetime.now(UTC) - closed_at).total_seconds()
-                        < REENTRY_COOLDOWN_SECS
-                    ):
+                    if pos_mgr.closed_within(market.market_id, REENTRY_COOLDOWN_SECS):
                         logger.debug(
                             "Cooldown active for %s — skip re-entry",
                             market.market_id[:16],
                         )
                         continue
 
-                    if not check_entry_gate(scan_started_at):
+                    if not check_entry_gate(market_data_at):
                         continue
 
                     if edge < args.entry_threshold:

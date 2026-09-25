@@ -341,3 +341,19 @@ def test_live_submission_exception_is_an_ambiguous_broker_failure():
     assert result.status == "pending_reconciliation"
     assert result.sent is True
     assert result.broker_failure is True
+
+
+def test_order_book_404_is_not_retried(monkeypatch):
+    class NotFound(Exception):
+        status_code = 404
+
+    fake_client = MagicMock()
+    fake_client.get_order_book.side_effect = NotFound("No orderbook exists for the requested token id")
+    monkeypatch.setattr("turtlequant.clob_execution.time.sleep", lambda _s: None)
+
+    book = ExecutionClient(mode="paper", clob_client=fake_client).get_order_book(
+        "gone", fallback_bid=0.3, fallback_ask=0.4
+    )
+
+    assert fake_client.get_order_book.call_count == 1
+    assert book.source == "synthetic"
