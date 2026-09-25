@@ -149,6 +149,50 @@ def test_resolution_remains_accounted_until_redemption(tmp_path):
     assert (saved.status, saved.resolution_price) == ("pending_redemption", 1.0)
 
 
+def test_settlement_realises_payout_without_exit_fee(tmp_path):
+    mgr = PositionManager(starting_nav=1000.0, positions_file=tmp_path / "positions.json")
+    mgr.open_position(make_position(
+        market_id="m-settle", question="Question", asset="btc", strike=100_000,
+        expiry=datetime.now(UTC) - timedelta(hours=3), option_type="european",
+        yes_token_id="token", yes_price=0.5, size_usd=50, model_prob=0.6, token_size=100,
+    ))
+    mgr.confirm_fill("m-settle", 0.5, size_usd=50, token_size=100, fee_usd=1.75)
+
+    pos, pnl = mgr.settle_position("m-settle", 1.0)
+
+    assert pos is not None
+    assert pnl == pytest.approx(50.0 - 1.75)
+    assert not mgr.has_position("m-settle")
+    assert mgr.current_nav == pytest.approx(1000.0 + 48.25)
+
+
+def test_resolved_claims_do_not_consume_exposure_headroom(tmp_path):
+    mgr = PositionManager(starting_nav=1000.0, positions_file=tmp_path / "positions.json")
+    expiry = datetime.now(UTC) + timedelta(days=1)
+    mgr.open_position(make_position(
+        market_id="m-big", question="Question", asset="btc", strike=100_000, expiry=expiry,
+        option_type="european", yes_token_id="token", yes_price=0.5, size_usd=150, model_prob=0.6,
+    ))
+    assert not mgr.has_expiry_headroom(expiry, 10.0)
+
+    mgr.mark_pending_redemption("m-big", 1.0)
+
+    assert mgr.has_expiry_headroom(expiry, 10.0)
+
+
+def test_condition_id_is_persisted_and_backfilled(tmp_path):
+    mgr = PositionManager(positions_file=tmp_path / "positions.json")
+    mgr.open_position(make_position(
+        market_id="m-cid", question="Question", asset="btc", strike=100_000,
+        expiry=datetime.now(UTC) + timedelta(days=1), option_type="european",
+        yes_token_id="token", yes_price=0.5, size_usd=50, model_prob=0.6,
+    ))
+
+    assert mgr.record_market_data("m-cid", condition_id="0xabc")
+    saved = PositionManager(positions_file=tmp_path / "positions.json").get_position("m-cid")
+    assert saved is not None and saved.condition_id == "0xabc"
+
+
 def test_confirmed_fees_are_stored_and_used_for_pnl(tmp_path):
     mgr = PositionManager(positions_file=tmp_path / "positions.json")
     pos = make_position(

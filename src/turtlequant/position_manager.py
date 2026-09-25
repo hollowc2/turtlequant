@@ -23,7 +23,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .clob_execution import DEFAULT_CRYPTO_TAKER_FEE_RATE, taker_fee
+from .clob_execution import DEFAULT_CRYPTO_FEE
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,7 @@ class Position:
     last_yes_price_at: str = ""  # ISO 8601 UTC for last observed market price
     last_bid: float = 0.0
     last_ask: float = 0.0
+    condition_id: str = ""  # CLOB condition id, used for fee lookups
 
     @property
     def expiry(self) -> datetime:
@@ -156,7 +157,7 @@ class PositionManager:
         size = min(raw_size, max_market)
 
         # Cap by remaining total-exposure headroom
-        current_exposure = sum(p.size_usd for p in self._positions.values())
+        current_exposure = sum(p.size_usd for p in self._open_market_risk())
         max_total = self.max_total_exposure_pct * self.current_nav
         headroom = max(0.0, max_total - current_exposure)
         size = min(size, headroom)
@@ -166,7 +167,11 @@ class PositionManager:
     def expiry_exposure(self, expiry: datetime) -> float:
         """Total USD currently exposed to positions expiring on the same date."""
         target_date = expiry.date()
-        return sum(p.size_usd for p in self._positions.values() if p.expiry.date() == target_date)
+        return sum(p.size_usd for p in self._open_market_risk() if p.expiry.date() == target_date)
+
+    def _open_market_risk(self) -> list[Position]:
+        """Positions still exposed to price moves; resolved claims only await redemption."""
+        return [p for p in self._positions.values() if p.status != "pending_redemption"]
 
     def has_expiry_headroom(self, expiry: datetime, size_usd: float) -> bool:
         """Returns True if adding size_usd does not breach per-expiry NAV cap."""
@@ -192,6 +197,7 @@ class PositionManager:
         market_id: str,
         *,
         yes_token_id: str | None = None,
+        condition_id: str | None = None,
         yes_price: float | None = None,
         bid: float | None = None,
         ask: float | None = None,
@@ -209,6 +215,9 @@ class PositionManager:
         changed = False
         if yes_token_id and yes_token_id != pos.yes_token_id:
             pos.yes_token_id = yes_token_id
+            changed = True
+        if condition_id and condition_id != pos.condition_id:
+            pos.condition_id = condition_id
             changed = True
         if yes_price is not None and yes_price > 0:
             pos.last_yes_price = yes_price
@@ -253,12 +262,12 @@ class PositionManager:
                 if pos.entry_fee_usd is not None
                 # ponytail: legacy state lacks fee metadata; use the current
                 # crypto schedule until those positions have closed.
-                else taker_fee(closed_tokens, pos.entry_price, DEFAULT_CRYPTO_TAKER_FEE_RATE)
+                else DEFAULT_CRYPTO_FEE.fee(closed_tokens, pos.entry_price)
             )
             exit_fee = (
                 exit_fee_usd
                 if exit_fee_usd is not None
-                else taker_fee(closed_tokens, exit_price, DEFAULT_CRYPTO_TAKER_FEE_RATE)
+                else DEFAULT_CRYPTO_FEE.fee(closed_tokens, exit_price)
             )
             if exit_fee < 0 or not math.isfinite(exit_fee):
                 raise ValueError("exit_fee_usd must be a finite non-negative number")
@@ -332,6 +341,12 @@ class PositionManager:
         pos.resolution_price = resolution_price
         self._save()
         return True
+
+    def settle_position(self, market_id: str, resolution_price: float) -> tuple[Position | None, float]:
+        """Realise a resolved claim at its payout. Redemption carries no trading fee."""
+        if not 0.0 <= resolution_price <= 1.0:
+            raise ValueError("resolution_price must be within [0, 1]")
+        return self.close_position(market_id, resolution_price, reason="resolved", exit_fee_usd=0.0)
 
     def exit_decision(
         self,
@@ -456,6 +471,7 @@ def make_position(
     size_usd: float,
     model_prob: float,
     token_size: float = 0.0,
+    condition_id: str = "",
 ) -> Position:
     """Factory helper to build a Position from trade decision data."""
     opened_at = datetime.now(UTC).isoformat()
@@ -475,4 +491,5 @@ def make_position(
         opened_at=opened_at,
         last_yes_price=yes_price,
         last_yes_price_at=opened_at,
+        condition_id=condition_id,
     )

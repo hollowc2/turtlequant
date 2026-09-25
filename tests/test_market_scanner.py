@@ -83,8 +83,24 @@ class _ResolutionFailureSession:
 
 
 class _ResolvedSession:
+    """Serves one market payload shaped like Gamma's /markets/{id}."""
+
+    def __init__(self, payload):
+        self.payload = payload
+
     def get(self, *_args, **_kwargs):
-        return _Response({"closed": True, "resolutionPrice": "1"})
+        return _Response(self.payload)
+
+
+# Verbatim fields from a resolved Gamma market (ETH above 2,600 on Sep 23, 2026).
+_RESOLVED_YES = {
+    "closed": True,
+    "umaResolutionStatus": "resolved",
+    "outcomes": '["Yes", "No"]',
+    "outcomePrices": '["1", "0"]',
+    "clobTokenIds": '["yes-token", "no-token"]',
+    "lastTradePrice": 0.999,
+}
 
 
 def test_fetch_all_pages_handles_api_outage():
@@ -117,6 +133,22 @@ def test_fetch_market_price_handles_resolution_failure():
     assert scanner.fetch_market_price("market-1") is None
 
 
-def test_fetch_resolution_requires_closed_market_and_valid_settlement():
-    assert MarketScanner(session=_ResolvedSession()).fetch_resolution("market-1") == 1.0
-    assert MarketScanner(session=_ResolutionFailureSession()).fetch_resolution("market-1") is None
+def test_fetch_resolution_reads_outcome_prices_of_resolved_market():
+    assert MarketScanner(session=_ResolvedSession(_RESOLVED_YES)).fetch_resolution("m", "yes-token") == 1.0
+    no_won = {**_RESOLVED_YES, "outcomePrices": '["0", "1"]'}
+    assert MarketScanner(session=_ResolvedSession(no_won)).fetch_resolution("m", "yes-token") == 0.0
+    split = {**_RESOLVED_YES, "outcomePrices": '["0.5", "0.5"]'}
+    assert MarketScanner(session=_ResolvedSession(split)).fetch_resolution("m", "yes-token") == 0.5
+
+
+def test_fetch_resolution_matches_yes_by_token_id_before_label():
+    reordered = {**_RESOLVED_YES, "clobTokenIds": '["no-token", "yes-token"]', "outcomePrices": '["0", "1"]'}
+    assert MarketScanner(session=_ResolvedSession(reordered)).fetch_resolution("m", "yes-token") == 1.0
+
+
+def test_fetch_resolution_ignores_closed_but_unresolved_quotes():
+    proposed = {**_RESOLVED_YES, "umaResolutionStatus": "proposed", "outcomePrices": '["0.9995", "0.0005"]'}
+    open_market = {**_RESOLVED_YES, "closed": False}
+    assert MarketScanner(session=_ResolvedSession(proposed)).fetch_resolution("m", "yes-token") is None
+    assert MarketScanner(session=_ResolvedSession(open_market)).fetch_resolution("m", "yes-token") is None
+    assert MarketScanner(session=_ResolutionFailureSession()).fetch_resolution("m") is None

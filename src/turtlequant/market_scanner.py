@@ -288,16 +288,24 @@ class MarketScanner:
             )
         return None
 
-    def fetch_resolution(self, market_id: str) -> float | None:
-        """Return an explicit Gamma settlement price, never a live quote."""
+    def fetch_resolution(self, market_id: str, yes_token_id: str = "") -> float | None:
+        """Return the final YES payout once Gamma reports the market resolved.
+
+        Gamma has no resolution-price field: a resolved market is ``closed``
+        with ``umaResolutionStatus == "resolved"``, and ``outcomePrices`` then
+        holds the payouts (e.g. ``["1", "0"]``, or ``["0.5", "0.5"]`` for a
+        50-50 resolution). Before that, ``outcomePrices`` are live quotes and
+        must never be treated as settlement.
+        """
         try:
             raw = self._get_json(f"{GAMMA_API_BASE}/markets/{market_id}")
-            if not raw.get("closed"):
+            if not raw.get("closed") or str(raw.get("umaResolutionStatus", "")).lower() != "resolved":
                 return None
-            value = raw.get("resolutionPrice", raw.get("resolution_price"))
-            if value is None:
+            prices = _coerce_list(raw.get("outcomePrices"))
+            index = _yes_index(raw, yes_token_id)
+            if index is None or index >= len(prices):
                 return None
-            price = float(value)
+            price = float(prices[index])
             return price if 0.0 <= price <= 1.0 else None
         except (TypeError, ValueError, OSError, requests.RequestException) as exc:
             self._log_api_warning(
@@ -348,6 +356,17 @@ def _parse_iso(s: str) -> datetime | None:
         return dt.astimezone(UTC)
     except Exception:
         return None
+
+
+def _yes_index(raw: dict, yes_token_id: str = "") -> int | None:
+    """Index of the YES outcome, matched by token id first, then outcome label."""
+    tokens = [str(t) for t in _coerce_list(raw.get("clobTokenIds") or raw.get("clob_token_ids"))]
+    if yes_token_id and yes_token_id in tokens:
+        return tokens.index(yes_token_id)
+    outcomes = [str(o).lower() for o in _coerce_list(raw.get("outcomes"))]
+    if "yes" in outcomes:
+        return outcomes.index("yes")
+    return None
 
 
 def _coerce_list(value: object) -> list:

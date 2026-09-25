@@ -58,9 +58,42 @@ class MarketParams:
 # Recognised assets (case-insensitive)
 _ASSET_PAT = r"(BTC|Bitcoin|ETH|Ethereum|SOL|Solana|XRP|Ripple)"
 
-# Strike: $75,000 or $75k or 75000. Keep the suffix inside the
-# capture so _parse_strike can scale compact values correctly.
-_STRIKE_PAT = r"\$?([\d,]+(?:\.\d+)?\s*[kK]?)"
+# Strike: $75,000, $75k, $1.5M, $2T or "1 million". Keep the suffix inside the
+# capture so _parse_strike can scale compact values correctly. The trailing
+# lookahead stops backtracking into a shorter number, and rejects percentages
+# ("dominance above 60%") outright.
+_STRIKE_PAT = (
+    r"\$?([\d,]+(?:\.\d+)?"
+    r"(?:\s*(?:[kKmMbBtT]|thousand|million|billion|trillion)\b)?)"
+    r"(?![\d,]|\.\d|\s*%)"
+)
+_STRIKE_MULTIPLIERS: dict[str, float] = {
+    "k": 1e3,
+    "thousand": 1e3,
+    "m": 1e6,
+    "million": 1e6,
+    "b": 1e9,
+    "billion": 1e9,
+    "t": 1e12,
+    "trillion": 1e12,
+}
+
+# Questions that mention an asset and a number but are not a plain price
+# threshold on that asset: market cap, dominance, ETF flows, network stats,
+# ratio/flip markets, ranges, and "X or Y first" races (not a single touch).
+_REJECT_RE = re.compile(
+    r"\b(?:market\s*cap|mcap|dominance|etfs?|inflows?|outflows?|hash\s*rate|gas|"
+    r"supply|treasur(?:y|ies)|reserves?|holdings?|hold|flip(?:s|pening)?|"
+    r"outperform|between|first)\b"
+    r"|\bbefore\s+(?:it\s+)?(?:hits?|reach(?:es)?|dips?|falls?|drops?|touch(?:es)?)\b"
+    r"|\bor\s+(?:dip|fall|drop|sink|reach|hit|touch)",
+    re.IGNORECASE,
+)
+
+# Accept a parsed strike only within this multiple of live spot. Anything
+# outside is a misparse (wrong units, non-price market), not a tradeable edge.
+MIN_STRIKE_TO_SPOT = 0.25
+MAX_STRIKE_TO_SPOT = 4.0
 
 # Date phrase: "March 30", "March 30, 2025", "2025-03-30", "end of March", "March 16-22"
 _DATE_PAT = (
@@ -97,10 +130,12 @@ _BARRIER_DOWN_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-# Simpler "above X by date" fallback (covers "close above", "trade above")
+# Polymarket's short-form template: "Ethereum above 2,600 on September 23, 8PM ET?"
+# Anchored so a stray asset mention elsewhere in a question cannot match.
 _EUROPEAN_SIMPLE_RE = re.compile(
-    rf"{_ASSET_PAT}.*?(?:above|over)\s+{_STRIKE_PAT}.*?(?:by|on)\s+{_DATE_PAT}",
-    re.IGNORECASE | re.DOTALL,
+    rf"^\s*(?:Will\s+)?(?:the\s+price\s+of\s+)?{_ASSET_PAT}(?:\s+price)?\s+(?:be\s+|close\s+|trade\s+)?"
+    rf"(?:above|over)\s+{_STRIKE_PAT}\s+(?:by|on|at)\s+{_DATE_PAT}",
+    re.IGNORECASE,
 )
 
 # Asset normalization map
@@ -138,6 +173,9 @@ def parse_market(
             If provided, overrides any date parsed from the question text.
     """
     question = question.strip()
+    if _REJECT_RE.search(question):
+        _log_unclassified(question)
+        return None
 
     # Try European pattern first
     params = _try_european(question, resolution_time)
@@ -264,16 +302,25 @@ def _build_params(
 
 
 def _parse_strike(raw: str) -> float | None:
-    """Parse '$75,000' or '$75k' or '75000' → 75000.0"""
-    raw = raw.replace(",", "").strip()
-    multiplier = 1_000.0 if raw.lower().endswith("k") else 1.0
-    if multiplier > 1:
-        raw = raw[:-1].strip()
+    """Parse '$75,000', '$75k', '$1.5M', '1 million' or '75000' → USD float."""
+    m = re.fullmatch(r"([\d.]+)\s*([A-Za-z]*)", raw.replace(",", "").strip())
+    if m is None:
+        return None
+    number, suffix = m.groups()
+    multiplier = _STRIKE_MULTIPLIERS.get(suffix.lower(), None) if suffix else 1.0
+    if multiplier is None:
+        return None
     try:
-        val = float(raw)
-        return val * multiplier
+        return float(number) * multiplier
     except ValueError:
         return None
+
+
+def strike_is_plausible(strike: float, spot: float) -> bool:
+    """True when strike/spot is within the band of real price-threshold markets."""
+    if spot <= 0 or strike <= 0:
+        return False
+    return MIN_STRIKE_TO_SPOT <= strike / spot <= MAX_STRIKE_TO_SPOT
 
 
 def _parse_date(raw: str) -> datetime | None:

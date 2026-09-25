@@ -70,6 +70,7 @@ def reconcile_intent(intent: OrderIntent, executor: ExecutionClient, positions: 
                 strike=float(meta["strike"]), expiry=datetime.fromisoformat(str(meta["expiry_iso"])),
                 option_type=str(meta["option_type"]), yes_token_id=intent.token_id, yes_price=fill.avg_price,
                 size_usd=fill.filled_usd, model_prob=float(meta["model_prob"]), token_size=fill.filled_shares,
+                condition_id=str(meta.get("condition_id", "")),
             )
         except (TypeError, ValueError) as exc:
             raise ReconciliationError(f"intent {intent.id} has invalid BUY position metadata") from exc

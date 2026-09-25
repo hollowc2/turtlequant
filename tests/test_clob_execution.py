@@ -3,8 +3,10 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from turtlequant.clob_execution import (
+    DEFAULT_CRYPTO_FEE,
     BookLevel,
     ExecutionClient,
+    FeeSchedule,
     OrderBook,
     OrderSide,
     _polymarket_env,
@@ -211,38 +213,78 @@ def test_live_rejects_synthetic_book_before_order_submission():
     fake_client.create_and_post_market_order.assert_not_called()
 
 
-def test_market_fee_rate_uses_sdk_bps_and_taker_fee_formula():
-    fake_client = MagicMock()
-    fake_client.get_fee_rate.return_value = 700
-
-    rate = ExecutionClient(mode="paper", clob_client=fake_client).get_market_fee_rate("yes")
-
-    assert rate == 0.07
-    assert abs(taker_fee(20.0, 0.45, rate) - 0.3465) < 1e-9
+# Verbatim shape of get_clob_market_info for live BTC/ETH price markets (2026-09-24).
+_LIVE_CRYPTO_MARKET_INFO = {"fd": {"r": 0.07, "e": 1, "to": True}}
 
 
-def test_shadow_fill_records_current_sdk_fee():
+def test_market_fee_reads_fd_exponent_as_power_not_decimal_scale():
+    fake_client = MagicMock(spec=[])
+    fake_client.get_clob_market_info = lambda _condition_id: _LIVE_CRYPTO_MARKET_INFO
+
+    fee = ExecutionClient(mode="paper", clob_client=fake_client).get_market_fee("condition")
+
+    assert fee == FeeSchedule(rate=0.07, exponent=1.0)
+    # SDK formula: shares * r * (p*(1-p))**e -> 100 * 0.07 * 0.25
+    assert abs(fee.fee(100.0, 0.5) - 1.75) < 1e-12
+
+
+def test_fee_exponent_is_applied_to_price_curve():
+    assert abs(FeeSchedule(rate=0.25, exponent=2.0).fee(100.0, 0.5) - 100 * 0.25 * 0.0625) < 1e-12
+    assert abs(taker_fee(20.0, 0.45, 0.07) - 0.3465) < 1e-9
+
+
+def test_market_fee_prefers_market_info_over_base_fee():
+    fake_client = MagicMock(spec=[])
+    fake_client.get_clob_market_info = lambda _condition_id: _LIVE_CRYPTO_MARKET_INFO
+    fake_client.get_fee_rate_bps = lambda _token_id: 1000  # base_fee on the same live markets
+
+    fee = ExecutionClient(mode="paper", clob_client=fake_client).get_market_fee("condition", "yes")
+
+    assert fee is not None and fee.rate == 0.07
+
+
+def test_market_fee_falls_back_to_bps_without_condition_id():
     fake_client = MagicMock(spec=[])
     fake_client.get_fee_rate_bps = lambda _token_id: 700
-    client = ExecutionClient(mode="shadow", clob_client=fake_client)
+
+    fee = ExecutionClient(mode="paper", clob_client=fake_client).get_market_fee("", "yes")
+
+    assert fee == FeeSchedule(rate=0.07, exponent=1.0)
+
+
+def test_market_fee_is_cached_per_condition():
+    calls = []
+    fake_client = MagicMock(spec=[])
+    fake_client.get_clob_market_info = lambda cid: calls.append(cid) or _LIVE_CRYPTO_MARKET_INFO
+    client = ExecutionClient(mode="paper", clob_client=fake_client)
+
+    client.get_market_fee("condition")
+    client.get_market_fee("condition")
+
+    assert calls == ["condition"]
+
+
+def test_market_fee_zero_rate_is_not_replaced_by_default():
+    fake_client = MagicMock(spec=[])
+    fake_client.get_clob_market_info = lambda _condition_id: {"fd": {"r": 0, "e": 1}}
+
+    fee = ExecutionClient(mode="paper", clob_client=fake_client).get_market_fee("condition")
+
+    assert fee == FeeSchedule(rate=0.0, exponent=1.0)
+
+
+def test_shadow_fill_records_fee_from_schedule():
+    client = ExecutionClient(mode="shadow", clob_client=MagicMock(spec=[]))
     book = OrderBook(token_id="yes", asks=[BookLevel(0.50, 100)])
-    rate = client.get_market_fee_rate("condition", "yes")
 
-    result = client.buy_yes("yes", 10.0, book, fee_rate=rate or 0.0)
+    result = client.buy_yes("yes", 10.0, book, fee=DEFAULT_CRYPTO_FEE)
 
-    assert rate == 0.07
+    # 20 shares * 0.07 * 0.25
     assert abs((result.fee_usd or 0.0) - 0.35) < 1e-9
 
 
-def test_market_fee_rate_supports_market_info_sdk_shape():
+def test_market_fee_supports_legacy_market_info_scalar():
     fake_client = MagicMock(spec=[])
-    fake_client.getClobMarketInfo = lambda _token_id: {"feeRate": "1000"}
+    fake_client.getClobMarketInfo = lambda _condition_id: {"feeRate": "1000"}
 
-    assert ExecutionClient(mode="paper", clob_client=fake_client).get_market_fee_rate("yes") == 0.1
-
-
-def test_market_fee_rate_supports_documented_market_info_fd_shape():
-    fake_client = MagicMock(spec=[])
-    fake_client.getClobMarketInfo = lambda _condition_id: {"fd": {"r": "700", "e": 4}}
-
-    assert ExecutionClient(mode="paper", clob_client=fake_client).get_market_fee_rate("condition") == 0.07
+    assert ExecutionClient(mode="paper", clob_client=fake_client).get_market_fee("condition") == FeeSchedule(0.1)

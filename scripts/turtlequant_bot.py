@@ -44,8 +44,8 @@ from pathlib import Path
 
 from turtlequant.discord_trades import DiscordTrades
 from turtlequant.data.binance import fetch_klines, fetch_latest_closes
-from turtlequant.clob_execution import DEFAULT_CRYPTO_TAKER_FEE_RATE, ExecutionClient, estimate_buy_fill, taker_fee
-from turtlequant.market_parser import parse_market
+from turtlequant.clob_execution import DEFAULT_CRYPTO_FEE, ExecutionClient, estimate_buy_fill
+from turtlequant.market_parser import parse_market, strike_is_plausible
 from turtlequant.market_scanner import MarketScanner
 from turtlequant.notifications import NotificationQueue
 from turtlequant.order_intents import OrderIntentLedger
@@ -432,36 +432,73 @@ def main() -> None:
                         pos.strike,
                         pos.expiry_iso[:10],
                     )
-                    # Auto-close positions whose expiry has passed
-                    if datetime.now(UTC) >= pos.expiry:
+                    # Settle positions whose expiry has passed
+                    if pos.status == "pending_redemption" or datetime.now(UTC) >= pos.expiry:
                         # Expiry is not settlement. Keep the claim accounted for
                         # until Gamma explicitly confirms its final resolution.
-                        resolved_price = scanner.fetch_resolution(pos.market_id)
+                        resolved_price = (
+                            pos.resolution_price
+                            if pos.status == "pending_redemption"
+                            else scanner.fetch_resolution(pos.market_id, pos.yes_token_id)
+                        )
                         if resolved_price is None:
-                            logger.warning(
-                                "[EXPIRED_PENDING] Awaiting confirmed resolution for %s",
+                            overdue_hours = (datetime.now(UTC) - pos.expiry).total_seconds() / 3600
+                            logger.log(
+                                logging.WARNING if overdue_hours > 24 else logging.INFO,
+                                "[EXPIRED_PENDING] Awaiting confirmed resolution for %s (%.1fh past expiry)",
                                 pos.market_id[:16],
+                                overdue_hours,
                             )
                             continue
-                        logger.info(
-                            "[PENDING_REDEMPTION] %s K=%.0f exp=%s resolved=%.4f",
-                            pos.asset.upper(),
-                            pos.strike,
-                            pos.expiry_iso[:10],
-                            resolved_price,
-                        )
-                        pos_mgr.mark_pending_redemption(pos.market_id, resolved_price)
+                        if execution_mode == "live":
+                            # Live payouts only exist once the CTF redemption lands;
+                            # until that is automated, hold the claim as pending.
+                            if pos.status != "pending_redemption":
+                                logger.info(
+                                    "[PENDING_REDEMPTION] %s K=%.0f exp=%s resolved=%.4f",
+                                    pos.asset.upper(),
+                                    pos.strike,
+                                    pos.expiry_iso[:10],
+                                    resolved_price,
+                                )
+                                pos_mgr.mark_pending_redemption(pos.market_id, resolved_price)
+                                append_history(
+                                    state_dir,
+                                    {
+                                        "event": "pending_redemption",
+                                        "market_id": pos.market_id,
+                                        "asset": pos.asset,
+                                        "strike": pos.strike,
+                                        "resolution_price": resolved_price,
+                                        "ts": datetime.now(UTC).isoformat(),
+                                    },
+                                )
+                            continue
+                        if args.dry_run:
+                            logger.info("[RESOLVED] %s would settle at %.4f (dry-run)", pos.market_id[:16], resolved_price)
+                            continue
+                        shares = pos.token_size
+                        _pos, pnl = pos_mgr.settle_position(pos.market_id, resolved_price)
+                        risk_controls.record_realized_pnl(pnl)
                         append_history(
                             state_dir,
                             {
-                                "event": "pending_redemption",
+                                "event": "close",
                                 "market_id": pos.market_id,
                                 "asset": pos.asset,
                                 "strike": pos.strike,
+                                "reason": "resolved",
+                                "yes_price": resolved_price,
                                 "resolution_price": resolved_price,
+                                "filled_shares": shares,
+                                "remaining_shares": 0.0,
+                                "complete": True,
+                                "pnl": pnl,
                                 "ts": datetime.now(UTC).isoformat(),
                             },
                         )
+                        if _pos and _pos.fill_confirmed:
+                            notifier.submit(notify_exit, discord, _pos, resolved_price, pnl, "resolved")
                         continue
 
                     spot = position_spots.get(pos.asset)
@@ -521,10 +558,10 @@ def main() -> None:
                                 intent_ledger.pending(pos.market_id, pos.yes_token_id, "SELL", shares)
                                 if execution_mode == "live" else None
                             )
+                            exit_fee = executor.get_market_fee(pos.condition_id, pos.yes_token_id)
                             exit_result = executor.sell_yes(
                                 pos.yes_token_id, shares, book,
-                                fee_rate=executor.get_market_fee_rate("", pos.yes_token_id)
-                                or DEFAULT_CRYPTO_TAKER_FEE_RATE,
+                                fee=exit_fee if exit_fee is not None else DEFAULT_CRYPTO_FEE,
                             )
                             if exit_intent_id is not None:
                                 intent_ledger.submitted(exit_intent_id, exit_result.order_id, exit_result.raw)
@@ -663,6 +700,7 @@ def main() -> None:
                 "unclassified_markets": 0,
                 "asset_skipped": 0,
                 "spot_missing": 0,
+                "implausible_strike": 0,
                 "vol_sources": {},
                 "mid_edge_candidates": 0,
                 "executable_edge_candidates": 0,
@@ -701,6 +739,15 @@ def main() -> None:
                     if spot is None or spot <= 0:
                         _inc_scan_stat("spot_missing")
                         continue
+                    if not strike_is_plausible(params.strike, spot):
+                        # A strike far from spot means the question was misparsed
+                        # (wrong units or not a price market) — never a real edge.
+                        _inc_scan_stat("implausible_strike")
+                        logger.info(
+                            "[PARSE_REJECTED] K=%g vs spot %.2f: %s",
+                            params.strike, spot, market.question[:100],
+                        )
+                        continue
 
                     vs = vol_surfaces[params.asset]
                     sigma = vs.get_iv(spot, params.strike, params.expiry)
@@ -714,6 +761,7 @@ def main() -> None:
                         pos_mgr.record_market_data(
                             market.market_id,
                             yes_token_id=market.yes_token_id,
+                            condition_id=market.condition_id,
                             yes_price=yes_price,
                             bid=market.bid,
                             ask=market.ask,
@@ -760,10 +808,10 @@ def main() -> None:
                                         intent_ledger.pending(market.market_id, token_id, "SELL", shares)
                                         if execution_mode == "live" else None
                                     )
+                                    exit_fee = executor.get_market_fee(market.condition_id, token_id)
                                     exit_result = executor.sell_yes(
                                         token_id, shares, book,
-                                        fee_rate=executor.get_market_fee_rate(market.condition_id, token_id)
-                                        or DEFAULT_CRYPTO_TAKER_FEE_RATE,
+                                        fee=exit_fee if exit_fee is not None else DEFAULT_CRYPTO_FEE,
                                     )
                                     if exit_intent_id is not None:
                                         intent_ledger.submitted(exit_intent_id, exit_result.order_id, exit_result.raw)
@@ -909,15 +957,14 @@ def main() -> None:
                     _inc_scan_stat("book_sources", book.source)
                     preliminary_size = pos_mgr.kelly_size(edge, model_prob, book.best_ask)
                     fill_estimate = estimate_buy_fill(book, preliminary_size)
-                    fee_rate = executor.get_market_fee_rate(market.condition_id, market.yes_token_id)
-                    if execution_mode == "live" and fee_rate is None:
+                    fee = executor.get_market_fee(market.condition_id, market.yes_token_id)
+                    if execution_mode == "live" and fee is None:
                         logger.warning("[ENTRY_REJECTED] Missing CLOB fee rate for %s", market.market_id[:16])
                         continue
-                    fee_rate = fee_rate if fee_rate is not None else DEFAULT_CRYPTO_TAKER_FEE_RATE
-                    estimated_fee = taker_fee(
+                    fee = fee if fee is not None else DEFAULT_CRYPTO_FEE
+                    estimated_fee = fee.fee(
                         fill_estimate.filled_shares,
                         fill_estimate.avg_price,
-                        fee_rate,
                     )
                     executable_entry_price = (
                         (fill_estimate.filled_usd + estimated_fee) / fill_estimate.filled_shares
@@ -972,7 +1019,8 @@ def main() -> None:
                             if fill_estimate.avg_price > 0
                             else 0.0,
                             "estimated_complete": fill_estimate.complete,
-                            "fee_rate": fee_rate,
+                            "fee_rate": fee.rate,
+                            "fee_exponent": fee.exponent,
                             "estimated_fee": estimated_fee,
                             "vol_source": vol_source,
                             "sigma": sigma,
@@ -1015,6 +1063,7 @@ def main() -> None:
                                 "question": market.question, "asset": params.asset,
                                 "strike": params.strike, "expiry_iso": params.expiry.isoformat(),
                                 "option_type": params.option_type.value, "model_prob": model_prob,
+                                "condition_id": market.condition_id,
                             },
                         )
                         if execution_mode == "live"
@@ -1025,7 +1074,7 @@ def main() -> None:
                         size_usd,
                         book,
                         max_price=min(0.99, model_prob - args.entry_threshold),
-                        fee_rate=fee_rate,
+                        fee=fee,
                     )
                     if intent_id is not None:
                         intent_ledger.submitted(
@@ -1070,6 +1119,7 @@ def main() -> None:
                         size_usd=entry_result.filled_usd,
                         model_prob=model_prob,
                         token_size=entry_result.filled_shares,
+                        condition_id=market.condition_id,
                     )
                     pos_mgr.open_position(pos)
                     pos_mgr.confirm_fill(

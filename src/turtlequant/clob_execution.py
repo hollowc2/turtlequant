@@ -15,10 +15,29 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 POLYMARKET_CLOB_HOST = "https://clob.polymarket.com"
-DEFAULT_CRYPTO_TAKER_FEE_RATE = 0.07
 _BOOK_RETRIES = 2
 _AMOUNT_SCALE = Decimal("1000000")
 _BPS = Decimal("10000")
+_FEE_CACHE_TTL_SECS = 60 * 60
+
+
+@dataclass(frozen=True)
+class FeeSchedule:
+    """Polymarket taker fee: ``shares * rate * (p * (1 - p)) ** exponent``.
+
+    Mirrors the CLOB ``fd`` block (``r``, ``e``) and Gamma's ``feeSchedule``
+    (``rate``, ``exponent``); ``exponent`` is a power, not a decimal scale.
+    """
+
+    rate: float
+    exponent: float = 1.0
+
+    def fee(self, shares: float, price: float) -> float:
+        return taker_fee(shares, price, self.rate, self.exponent)
+
+
+# Live crypto price markets report fd={"r": 0.07, "e": 1} (verified 2026-09-24).
+DEFAULT_CRYPTO_FEE = FeeSchedule(rate=0.07, exponent=1.0)
 
 
 def _polymarket_env() -> tuple[str, str, str, str, int, str]:
@@ -245,6 +264,7 @@ class ExecutionClient:
         self.allow_live = allow_live
         self._client = clob_client if clob_client is not None else self._build_clob_client()
         self._last_book_warning_at: dict[str, float] = {}
+        self._fee_cache: dict[str, tuple[FeeSchedule, float]] = {}
 
     @classmethod
     def from_env(cls, *, mode: str, allow_live: bool = False) -> "ExecutionClient":
@@ -273,27 +293,29 @@ class ExecutionClient:
                 self._log_book_warning(token_id, "CLOB order book fetch failed for %s: %s", token_id[:16], last_exc)
         return synthetic_book(token_id, fallback_bid, fallback_ask)
 
-    def get_market_fee_rate(self, market_id: str, token_id: str = "") -> float | None:
-        """Return the market's taker fee rate as a fraction, or None if unknown.
+    def get_market_fee(self, condition_id: str, token_id: str = "") -> FeeSchedule | None:
+        """Return the market's taker fee schedule, or None if unknown.
 
         Prefer ``get_clob_market_info``/``getClobMarketInfo``: its ``fd`` block
-        (``rate * 10**-exponent``) is the documented fee representation and is
-        verified against the live CLOB API. ``get_fee_rate_bps``/``get_fee_rate``
-        return a raw ``base_fee`` scalar whose unit does not match ordinary
-        basis points (dividing by 10_000 was found to overstate real fees by
-        ~14x against the live API — e.g. base_fee=1000 there while the same
-        market's fd block reports a true rate of 0.007), so those are kept only
-        as a last-resort fallback for SDKs that don't expose market info.
-        Unknown fees must be handled by the entry gate, not replaced with an
-        old global default.
+        ``{"r": rate, "e": exponent}`` is what the SDK itself uses to charge
+        fees (``rate * (p*(1-p))**exponent``). Live crypto markets report
+        ``{"r": 0.07, "e": 1}`` — the same values as Gamma's ``feeSchedule``.
+        ``get_fee_rate_bps``/``get_fee_rate`` return ``base_fee`` (1000 on
+        those same markets, i.e. 0.10), which overstates the taker rate, so
+        they are only a last-resort fallback for SDKs without market info.
+        Unknown fees must be handled by the caller, not silently zeroed.
         """
         if self._client is None:
             return None
+        cache_key = condition_id or token_id
+        cached = self._fee_cache.get(cache_key)
+        if cached is not None and time.time() - cached[1] < _FEE_CACHE_TTL_SECS:
+            return cached[0]
         lookups = (
-            ("get_clob_market_info", market_id),
-            ("getClobMarketInfo", market_id),
-            ("get_fee_rate_bps", token_id or market_id),
-            ("get_fee_rate", token_id or market_id),
+            ("get_clob_market_info", condition_id),
+            ("getClobMarketInfo", condition_id),
+            ("get_fee_rate_bps", token_id or condition_id),
+            ("get_fee_rate", token_id or condition_id),
         )
         for method_name, identifier in lookups:
             if not identifier:
@@ -303,12 +325,13 @@ class ExecutionClient:
                 continue
             try:
                 raw = method(identifier)
-                rate = _fee_rate_fraction(raw)
+                schedule = _fee_schedule(raw)
             except Exception as exc:
-                logger.warning("CLOB fee-rate lookup failed for %s via %s: %s", market_id[:16], method_name, exc)
+                logger.warning("CLOB fee lookup failed for %s via %s: %s", cache_key[:16], method_name, exc)
                 continue
-            if rate is not None:
-                return rate
+            if schedule is not None:
+                self._fee_cache[cache_key] = (schedule, time.time())
+                return schedule
         return None
 
     def get_order(self, order_id: str) -> Any:
@@ -337,11 +360,11 @@ class ExecutionClient:
 
     def buy_yes(
         self, token_id: str, amount_usd: float, book: OrderBook, *,
-        max_price: float | None = None, fee_rate: float = 0.0,
+        max_price: float | None = None, fee: FeeSchedule | None = None,
     ) -> ExecutionResult:
         estimate = estimate_buy_fill(book, amount_usd)
         if self.mode != "live":
-            return _paper_result(token_id, estimate, "shadow" if self.mode == "shadow" else "paper", book, fee_rate)
+            return _paper_result(token_id, estimate, "shadow" if self.mode == "shadow" else "paper", book, fee)
         return self._post_market_order(
             token_id, OrderSide.BUY, amount_usd=amount_usd, shares=0.0,
             estimate=estimate, book=book, limit_price=max_price,
@@ -349,11 +372,11 @@ class ExecutionClient:
 
     def sell_yes(
         self, token_id: str, shares: float, book: OrderBook, *,
-        min_price: float | None = None, fee_rate: float = 0.0,
+        min_price: float | None = None, fee: FeeSchedule | None = None,
     ) -> ExecutionResult:
         estimate = estimate_sell_fill(book, shares)
         if self.mode != "live":
-            return _paper_result(token_id, estimate, "shadow" if self.mode == "shadow" else "paper", book, fee_rate)
+            return _paper_result(token_id, estimate, "shadow" if self.mode == "shadow" else "paper", book, fee)
         return self._post_market_order(
             token_id, OrderSide.SELL, amount_usd=0.0, shares=shares,
             estimate=estimate, book=book, limit_price=min_price or estimate.avg_price,
@@ -459,7 +482,7 @@ class ExecutionClient:
 
 
 def _paper_result(
-    token_id: str, estimate: FillEstimate, status: str, book: OrderBook, fee_rate: float
+    token_id: str, estimate: FillEstimate, status: str, book: OrderBook, fee: FeeSchedule | None
 ) -> ExecutionResult:
     return ExecutionResult(
         side=estimate.side,
@@ -469,7 +492,7 @@ def _paper_result(
         filled_usd=estimate.filled_usd,
         filled_shares=estimate.filled_shares,
         avg_price=estimate.avg_price,
-        fee_usd=taker_fee(estimate.filled_shares, estimate.avg_price, fee_rate),
+        fee_usd=fee.fee(estimate.filled_shares, estimate.avg_price) if fee is not None else 0.0,
         complete=estimate.complete,
         success=estimate.filled_shares > 0,
         status=status,
@@ -573,25 +596,32 @@ def _scaled_amount(value: Any) -> float:
         raise RuntimeError("invalid fixed-point fill amount") from exc
 
 
-def taker_fee(shares: float, price: float, fee_rate: float) -> float:
-    """Return the CLOB taker fee in USDC for a confirmed fill."""
-    if not all(math.isfinite(value) for value in (shares, price, fee_rate)):
+def taker_fee(shares: float, price: float, fee_rate: float, exponent: float = 1.0) -> float:
+    """Return the CLOB taker fee in USDC: ``shares * rate * (p*(1-p))**exponent``."""
+    if not all(math.isfinite(value) for value in (shares, price, fee_rate, exponent)):
         raise ValueError("fee inputs must be finite")
-    if shares < 0 or fee_rate < 0 or not 0 <= price <= 1:
+    if shares < 0 or fee_rate < 0 or exponent < 0 or not 0 <= price <= 1:
         raise ValueError("invalid fee inputs")
-    return shares * fee_rate * price * (1.0 - price)
+    return shares * fee_rate * (price * (1.0 - price)) ** exponent
 
 
-def _fee_rate_fraction(raw: Any) -> float | None:
-    """Normalize SDK fee data (usually basis points) to a rate fraction."""
+def _fee_schedule(raw: Any) -> FeeSchedule | None:
+    """Normalize SDK fee data to a FeeSchedule.
+
+    The ``fd`` block is ``{"r": rate, "e": exponent}``; a missing exponent
+    defaults to 0 exactly as the SDK does when it computes fees. Legacy scalar
+    shapes are basis points with the usual ``p*(1-p)`` curve.
+    """
     fee_data = _dict_get(raw, "fd", None)
     if fee_data is not None:
         try:
-            rate = Decimal(str(_dict_get(fee_data, "r"))) * (Decimal(10) ** -int(_dict_get(fee_data, "e")))
-            result = float(rate)
-            return result if 0 <= result <= 1 else None
+            rate = float(Decimal(str(_dict_get(fee_data, "r"))))
+            exponent = float(Decimal(str(_dict_get(fee_data, "e", 0))))
         except (InvalidOperation, TypeError, ValueError):
             return None
+        if not (math.isfinite(rate) and math.isfinite(exponent)) or not 0 <= rate <= 1 or exponent < 0:
+            return None
+        return FeeSchedule(rate=rate, exponent=exponent)
     if isinstance(raw, (int, float, Decimal, str)):
         value = raw
         is_bps = True
@@ -607,4 +637,4 @@ def _fee_rate_fraction(raw: Any) -> float | None:
         result = float(rate)
     except (InvalidOperation, TypeError, ValueError):
         return None
-    return result if 0 <= result <= 1 else None
+    return FeeSchedule(rate=result) if 0 <= result <= 1 else None
