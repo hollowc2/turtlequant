@@ -32,25 +32,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from turtlequant.data.binance import fetch_klines
+from turtlequant.data.binance import ASSET_TO_SYMBOL, fetch_klines
 from turtlequant.probability_engine import (
+    RISK_FREE_RATE,
     barrier_down_probability,
     barrier_probability,
     digital_probability,
 )
 
-ASSET_TO_SYMBOL = {
-    "btc": "BTCUSDT",
-    "eth": "ETHUSDT",
-    "sol": "SOLUSDT",
-    "xrp": "XRPUSDT",
-}
-
 # Simulated market parameters
 DAYS_TO_EXPIRY = [7, 14, 30, 60, 90]  # multiple horizons
 STRIKE_MONEYNESS = [0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.15, 1.20]  # K/S0
 REALIZED_VOL_LOOKBACK_DAYS = 30
-RISK_FREE_RATE = 0.05
 
 BRIER_THRESHOLD = 0.25
 RMSE_THRESHOLD = 0.05

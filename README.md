@@ -56,16 +56,22 @@ edge = model_probability − executable_yes_price
 ```
 Enter when `edge > threshold` after crossing the executable ask. Size via fractional Kelly (25% default in code and compose) capped by per-market, per-expiry, and total NAV limits.
 
-| Entry edge | ≥5% |
-| Per-market NAV | 10% |
-| Total exposure | 40% |
+| Entry edge | ≥5% (`--entry-threshold`) |
+| Per-market NAV | 10% (`--max-per-market-pct`) |
+| Per-expiry NAV | 15% (`--max-per-expiry-pct`) |
+| Total exposure | 40% (`--max-total-exposure-pct`) |
+| Entry price band | 0.02–0.98 (`--min/max-entry-price`) |
+| Re-entry cooldown | 2h (`--reentry-cooldown-hours`) |
 | Scan interval | 60s |
+
+Every knob also reads an env var of the same name in upper case (e.g. `MAX_PER_EXPIRY_PCT`). `python scripts/turtlequant_bot.py --help` lists them all.
 
 ### 6. Position Management & Exit
 State persists to JSON across restarts. Positions close on three triggers:
 - **Edge reversed** — model prob < market price
-- **Edge decayed** — current edge drops below 40% of entry edge
-- **Time cleanup** — <= 6h remaining and edge <= 5%
+- **Edge decayed**: current edge drops below 40% of entry edge (`--edge-decay-ratio`)
+- **Time cleanup**: <= 6h remaining (`--cleanup-hours`) and edge <= 5% (`--cleanup-edge`)
+- **Resolved**: paper/shadow positions settle at the Gamma payout once the market resolves
 
 The bot also persists the last observed YES quote per open position so exits do not fall back to entry price if a market drops out of the active scan set.
 
@@ -76,7 +82,7 @@ TurtleQuant supports four runtime modes:
 |------|----------|
 | `--dry-run` | Evaluates entries and exits against the current state and logs `[DRY_RUN]` would-buy / would-exit lines. Writes nothing: no position, risk, history or corpus files. |
 | `--paper` | Simulated fills using executable bid/ask depth. |
-| `--shadow` | Same as paper, plus explicit CLOB/Gamma quote and order events for live-readiness review. |
+| `--shadow` | Same simulated fills, plus a `shadow_quote` diagnostic for every candidate, which feeds the shadow-soak metrics and alerts. This is the deployed mode. |
 | `--live --i-accept-live-risk` | **Currently hard-disabled in code** pending supervised broker acceptance. When enabled: FAK market orders through `py_clob_client_v2`, with actual/partial fills journaled and reconciled. |
 
 Paper and shadow mode read only public CLOB endpoints and never load a wallet key. Live mode expects `POLYMARKET_PRIVATE_KEY` plus API credentials (`POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, `POLYMARKET_API_PASSPHRASE`) in the environment. Optional `POLYMARKET_SIGNATURE_TYPE` and `POLYMARKET_FUNDER` are passed through for proxy-wallet setups.
@@ -93,6 +99,8 @@ Gamma API → MarketScanner → MarketParser → ProbabilityEngine → Execution
                                               ↑
                                          Binance OHLCV
 ```
+
+`src/turtlequant/trader.py` runs one reprice pass (settle, exit) and one scan pass (update held positions, enter) with every dependency injected. `scripts/turtlequant_bot.py` only parses arguments, wires components and calls the two passes on a timer. `tests/test_trader.py` drives the loop against a fake scanner, CLOB and spot source.
 
 ---
 
