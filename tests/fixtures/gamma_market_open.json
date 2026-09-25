@@ -1,0 +1,26 @@
+{
+  "id": "3866000",
+  "question": "Will Ethereum dip to $2,250 by December 31, 2026?",
+  "conditionId": "0x99a1879635bc8873891cc472d5e39ca0efaf2017c562ae244810747a7f8edbd5",
+  "slug": "will-ethereum-dip-to-2250-by-december-31-2026",
+  "endDate": "2027-01-01T05:00:00Z",
+  "closed": false,
+  "active": true,
+  "umaResolutionStatus": null,
+  "outcomes": "[\"Yes\", \"No\"]",
+  "outcomePrices": "[\"0.355\", \"0.645\"]",
+  "clobTokenIds": "[\"66335306745821529065179061745515953781644081595464464996921948603911228936814\", \"63382519856399132244485492020084100091374236550290181904952415637486462703240\"]",
+  "bestBid": 0.35,
+  "bestAsk": 0.36,
+  "spread": 0.01,
+  "lastTradePrice": 0.35,
+  "liquidityNum": 44224.181,
+  "volume24hr": 23256.732516999993,
+  "feeSchedule": {
+    "exponent": 1,
+    "rate": 0.07,
+    "takerOnly": true,
+    "rebateRate": 0.2
+  },
+  "price": null
+}

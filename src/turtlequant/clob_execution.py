@@ -295,7 +295,9 @@ class ExecutionClient:
                         return book
                 except Exception as exc:
                     last_exc = exc
-                    if attempt >= _BOOK_RETRIES:
+                    # 404 "No orderbook exists" is permanent (closed or resolved
+                    # market); retrying only delays the loop.
+                    if attempt >= _BOOK_RETRIES or getattr(exc, "status_code", None) == 404:
                         break
                     time.sleep(_BOOK_RETRY_BACKOFF_SECS * (attempt + 1))
             if last_exc is not None:

@@ -83,7 +83,10 @@ class MarketScanner:
         self._session = session or self._make_session()
         self._markets_cache: list[dict] = []
         self._markets_cache_at = 0.0
-        self._price_cache: dict[str, tuple[float, float]] = {}
+        # When the market list last came fresh from Gamma (taken before the
+        # request). Cache fallbacks keep the old value so staleness shows.
+        self.markets_fetched_at: datetime | None = None
+        self._price_cache: dict[str, tuple[tuple[float, float], float]] = {}
         self._last_warning_at: dict[str, float] = {}
 
     @staticmethod
@@ -123,6 +126,7 @@ class MarketScanner:
         results: list[dict] = []
         offset = 0
         page_count = 0
+        started_at = datetime.now(UTC)
         while page_count < _MAX_PAGES:
             try:
                 page = self._get_json(
@@ -153,6 +157,7 @@ class MarketScanner:
         if results:
             self._markets_cache = results
             self._markets_cache_at = time.time()
+            self.markets_fetched_at = started_at
         elif (
             self._markets_cache
             and time.time() - self._markets_cache_at <= _CACHE_TTL_SECS
@@ -251,38 +256,30 @@ class MarketScanner:
             )
             return None
 
-    def fetch_market_price(self, market_id: str) -> float | None:
-        """Fetch the current (or resolved) YES price for a single market by ID.
+    def fetch_market_quote(self, market_id: str) -> tuple[float, float] | None:
+        """Return Gamma's current YES ``(bestBid, bestAsk)`` for one market.
 
-        For resolved markets the Gamma API returns the final settlement price
-        (1.0 for YES, 0.0 for NO).  Returns None on any error.
+        A missing side is 0.0. The last trade price is deliberately not used:
+        it can be arbitrarily stale and is not a price anyone will fill at.
+        Gamma has no ``price``/``resolutionPrice`` field on market objects.
+        Returns None when Gamma is unreachable (after a short-lived cache).
         """
         try:
             raw = self._get_json(f"{GAMMA_API_BASE}/markets/{market_id}")
-            # Prefer explicit resolution price fields; fall back to last trade price
-            for key in (
-                "resolutionPrice",
-                "resolution_price",
-                "price",
-                "lastTradePrice",
-            ):
-                val = raw.get(key)
-                if val is not None:
-                    price = float(val)
-                    self._price_cache[market_id] = (price, time.time())
-                    return price
+            bid = float(raw.get("bestBid") or 0.0)
+            ask = float(raw.get("bestAsk") or 0.0)
+            if not (0.0 <= bid <= 1.0 and 0.0 <= ask <= 1.0):
+                return None
+            self._price_cache[market_id] = ((bid, ask), time.time())
+            return bid, ask
         except Exception as exc:
             cached = self._price_cache.get(market_id)
             if cached and time.time() - cached[1] <= _CACHE_TTL_SECS:
-                logger.info(
-                    "fetch_market_price(%s) failed; using cached price %.4f",
-                    market_id,
-                    cached[0],
-                )
+                logger.info("fetch_market_quote(%s) failed; using cached quote", market_id)
                 return cached[0]
             self._log_api_warning(
                 f"price:{market_id}",
-                "fetch_market_price(%s) failed: %s",
+                "fetch_market_quote(%s) failed: %s",
                 market_id,
                 exc,
             )
