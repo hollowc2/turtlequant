@@ -1,5 +1,10 @@
 services:
   turtlequant-bot:
+    # The bot exits non-zero on purpose when live trading must not start (live
+    # is currently hard-disabled in code; an unreconciled order intent also
+    # blocks startup). Retry a few times for transient faults, then stay down
+    # for an operator instead of crash-looping.
+    restart: "on-failure:3"
     command:
       - "python"
       - "scripts/turtlequant_bot.py"

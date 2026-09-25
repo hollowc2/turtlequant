@@ -118,3 +118,12 @@ def test_risk_state_round_trips_without_persist_field(tmp_path):
 
     assert "persist" not in (tmp_path / "turtlequant-risk.json").read_text()
     assert RiskControls.load(tmp_path, 1000.0).consecutive_failures == 1
+
+
+def test_unreconciled_order_intents_halt_entries(tmp_path):
+    controls = RiskControls.load(tmp_path, 100.0)
+
+    allowed, reason = controls.entries_allowed(100.0, market_data_at=datetime.now(UTC), unreconciled_orders=2)
+
+    assert not allowed
+    assert reason == "2 unreconciled order intent(s)"

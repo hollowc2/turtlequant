@@ -49,7 +49,7 @@ from turtlequant.market_parser import parse_market, set_corpus_file, strike_is_p
 from turtlequant.market_scanner import MarketScanner
 from turtlequant.notifications import NotificationQueue
 from turtlequant.order_intents import OrderIntentLedger
-from turtlequant.order_reconciliation import ReconciliationError, reconcile_outstanding
+from turtlequant.order_reconciliation import ReconciliationError, reconcile_intent, reconcile_outstanding
 from turtlequant.position_manager import PositionManager, StatePersistenceError, make_position
 from turtlequant.probability_engine import compute_probability
 from turtlequant.history import append_history
@@ -397,6 +397,7 @@ def main() -> None:
             max_daily_loss=args.max_daily_loss,
             market_data_at=market_data_at,
             max_market_data_age_secs=args.max_market_data_age_secs,
+            unreconciled_orders=len(intent_ledger.outstanding()) if intent_ledger is not None else 0,
         )
         if risk_controls.record_entry_gate(reason):
             if reason:
@@ -424,8 +425,58 @@ def main() -> None:
         try:
             reconcile_outstanding(intent_ledger, executor, pos_mgr)
         except ReconciliationError as exc:
-            logger.error("Live trading blocked: unresolved order intent: %s", exc)
+            logger.error(
+                "Live trading blocked: unresolved order intent: %s. Check the order at the "
+                "broker, then resolve it with scripts/order_intents.py.",
+                exc,
+            )
             sys.exit(1)
+
+    def journal_result(intent_id: int | None, result) -> None:
+        """Record the broker's answer on its intent; an unsent order is terminal."""
+        if intent_id is None:
+            return
+        if not result.sent:
+            intent_ledger.fail(intent_id, result.error or result.status)
+            return
+        intent_ledger.submitted(intent_id, result.order_id, result.raw)
+        if result.broker_failure:
+            logger.warning(
+                "[ORDER_AMBIGUOUS] intent %d %s: entries halt until it is reconciled",
+                intent_id,
+                result.error or result.status,
+            )
+
+    def market_has_open_intent(market_id: str) -> bool:
+        return intent_ledger is not None and bool(intent_ledger.outstanding(market_id))
+
+    reconcile_warned_at: dict[int, float] = {}
+
+    def reconcile_in_process() -> None:
+        """Retry ambiguous broker actions; a confirmed fill updates positions."""
+        if intent_ledger is None:
+            return
+        for intent in intent_ledger.outstanding():
+            if not intent.order_id:
+                continue  # no broker order id: needs an operator (scripts/order_intents.py)
+            try:
+                reconcile_intent(intent, executor, pos_mgr)
+            except ReconciliationError as exc:
+                if time.time() - reconcile_warned_at.get(intent.id, 0.0) >= 300:
+                    logger.warning("[UNRECONCILED] %s", exc)
+                    reconcile_warned_at[intent.id] = time.time()
+                continue
+            intent_ledger.reconcile(intent.id)
+            record(
+                {
+                    "event": "intent_reconciled",
+                    "intent_id": intent.id,
+                    "market_id": intent.market_id,
+                    "side": intent.side,
+                    "order_id": intent.order_id,
+                    "ts": datetime.now(UTC).isoformat(),
+                }
+            )
     discord = DiscordTrades(state_dir, execution_mode)
     notifier = NotificationQueue()
 
@@ -453,6 +504,7 @@ def main() -> None:
 
         # ── Reprice open positions every 30s ─────────────────────────────────
         if now - last_reprice_time >= REPRICE_INTERVAL_SECS:
+            reconcile_in_process()
             latest_spots = fetch_latest_closes(
                 [ASSET_TO_SYMBOL[pos.asset] for pos in pos_mgr.all_positions()]
             )
@@ -590,6 +642,9 @@ def main() -> None:
                                 executable_exit_price,
                             )
                             continue
+                        if market_has_open_intent(pos.market_id):
+                            logger.info("[EXIT_BLOCKED] %s has an unreconciled order intent", pos.market_id[:16])
+                            continue
                         shares = (
                             pos.token_size
                             if pos.token_size > 0
@@ -604,8 +659,7 @@ def main() -> None:
                             pos.yes_token_id, shares, book,
                             fee=exit_fee if exit_fee is not None else DEFAULT_CRYPTO_FEE,
                         )
-                        if exit_intent_id is not None:
-                            intent_ledger.submitted(exit_intent_id, exit_result.order_id, exit_result.raw)
+                        journal_result(exit_intent_id, exit_result)
                         if exit_result.sent or exit_result.success:
                             record(
                                 {
@@ -858,6 +912,11 @@ def main() -> None:
                                     executable_exit_price,
                                 )
                                 continue
+                            if market_has_open_intent(market.market_id):
+                                logger.info(
+                                    "[EXIT_BLOCKED] %s has an unreconciled order intent", market.market_id[:16]
+                                )
+                                continue
                             exit_result = None
                             pos = pos_mgr.get_position(market.market_id)
                             if pos:
@@ -876,8 +935,7 @@ def main() -> None:
                                     token_id, shares, book,
                                     fee=exit_fee if exit_fee is not None else DEFAULT_CRYPTO_FEE,
                                 )
-                                if exit_intent_id is not None:
-                                    intent_ledger.submitted(exit_intent_id, exit_result.order_id, exit_result.raw)
+                                journal_result(exit_intent_id, exit_result)
                                 if exit_result.sent or exit_result.success:
                                     record(
                                         {
@@ -1138,10 +1196,7 @@ def main() -> None:
                         max_price=min(0.99, model_prob - args.entry_threshold),
                         fee=fee,
                     )
-                    if intent_id is not None:
-                        intent_ledger.submitted(
-                            intent_id, entry_result.order_id, entry_result.raw
-                        )
+                    journal_result(intent_id, entry_result)
                     record(
                         {
                             "event": "order",
