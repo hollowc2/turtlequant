@@ -339,3 +339,17 @@ def test_collector_follows_diagnostics_rotation_without_double_counting(tmp_path
     assert _shadow_total(collector) == 4.0
     # A fresh exporter reads the rotated file plus the live one.
     assert _shadow_total(TurtleQuantCollector(str(tmp_path))) == 4.0
+
+
+def test_partial_close_pnl_is_part_of_its_round_trip(tmp_path):
+    (tmp_path / "turtlequant-history.jsonl").write_text(
+        '{"event":"open","market_id":"m","yes_price":0.4,"size_usd":40,"ts":"2026-05-01T00:00:00+00:00"}\n'
+        '{"event":"partial_close","market_id":"m","pnl":-3.0,"ts":"2026-05-01T01:00:00+00:00"}\n'
+        '{"event":"close","market_id":"m","asset":"btc","pnl":2.0,"ts":"2026-05-01T02:00:00+00:00"}\n'
+    )
+
+    families = {f.name: f for f in TurtleQuantCollector(str(tmp_path)).collect()}
+
+    assert families["turtlequant_closed_trades_total"].samples[0].value == 1.0
+    assert families["turtlequant_avg_pnl_per_trade_usd"].samples[0].value == -1.0
+    assert families["turtlequant_win_rate"].samples[0].value == 0.0  # net loser, not a win
