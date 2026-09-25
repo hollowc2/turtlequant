@@ -280,6 +280,11 @@ class PositionManager:
             else:
                 pos.token_size = tokens - closed_tokens
                 pos.size_usd = max(0.0, pos.size_usd * (1.0 - close_ratio))
+                if pos.entry_fee_usd is not None:
+                    # Only the unclosed remainder's share of the entry fee is
+                    # still owed; charging the full fee pro rata on every
+                    # partial close would over-count it.
+                    pos.entry_fee_usd = max(0.0, pos.entry_fee_usd - entry_fee)
                 pos.realized_exit_fees_usd += exit_fee
                 pos.last_yes_price = exit_price
                 pos.last_yes_price_at = datetime.now(UTC).isoformat()
