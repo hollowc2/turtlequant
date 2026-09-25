@@ -127,15 +127,25 @@ class VolSurface:
         return {}
 
     def _fetch_access_token(self, client_id: str, client_secret: str) -> str | None:
-        """Exchange client_id/secret for a short-lived access token."""
+        """Exchange client_id/secret for a short-lived access token.
+
+        Sent as a JSON-RPC POST body so the secret never appears in a URL
+        (proxy/access logs, exception messages).
+        """
         try:
-            resp = self._get(
+            resp = self._session.post(
                 f"{DERIBIT_API_BASE}/auth",
-                params={
-                    "grant_type": "client_credentials",
-                    "client_id": client_id,
-                    "client_secret": client_secret,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "public/auth",
+                    "params": {
+                        "grant_type": "client_credentials",
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                    },
                 },
+                timeout=REQUEST_TIMEOUT,
             )
             resp.raise_for_status()
             token = resp.json().get("result", {}).get("access_token")
