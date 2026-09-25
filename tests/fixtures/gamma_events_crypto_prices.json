@@ -1,0 +1,282 @@
+[
+  {
+    "id": "1043486",
+    "slug": "bitcoin-above-on-september-25-2026",
+    "title": "Bitcoin above ___ on September 25?",
+    "endDate": "2026-09-25T16:00:00Z",
+    "closed": false,
+    "seriesSlug": "btc-multi-strikes-weekly",
+    "tags": [
+      {
+        "id": "235",
+        "slug": "bitcoin"
+      },
+      {
+        "id": "102264",
+        "slug": "weekly"
+      },
+      {
+        "id": "102516",
+        "slug": "multi-strikes"
+      },
+      {
+        "id": "21",
+        "slug": "crypto"
+      },
+      {
+        "id": "1312",
+        "slug": "crypto-prices"
+      },
+      {
+        "id": "101757",
+        "slug": "recurring"
+      },
+      {
+        "id": "102169",
+        "slug": "hide-from-new"
+      }
+    ],
+    "markets": [
+      {
+        "id": "4689171",
+        "question": "Will the price of Bitcoin be above $70,000 on September 25?",
+        "conditionId": "0x55cb2a8f838ca03dcf6eff319593762caa162729edbf28b5cd0483f50676867d",
+        "endDate": "2026-09-25T16:00:00Z",
+        "closed": false,
+        "active": true,
+        "outcomes": "[\"Yes\", \"No\"]",
+        "outcomePrices": "[\"0.9995\", \"0.0005\"]",
+        "clobTokenIds": "[\"18993884134333743497599195638349949417288929767023423200347499766474078909102\", \"38542780820043310527408276081659230237866813998579913082830018452605919356622\"]",
+        "bestBid": 0.999,
+        "bestAsk": 1,
+        "spread": 0.001,
+        "lastTradePrice": 0.999,
+        "liquidity": "174875.83803",
+        "liquidityNum": 174875.83803,
+        "volume24hr": 15411.01,
+        "feeSchedule": {
+          "exponent": 1,
+          "rate": 0.07,
+          "takerOnly": true,
+          "rebateRate": 0.2
+        }
+      },
+      {
+        "id": "4689174",
+        "question": "Will the price of Bitcoin be above $72,000 on September 25?",
+        "conditionId": "0xfdddb9cf876ecb946afc898c51143b0554e9844fbd161924650fc72ebe500057",
+        "endDate": "2026-09-25T16:00:00Z",
+        "closed": false,
+        "active": true,
+        "outcomes": "[\"Yes\", \"No\"]",
+        "outcomePrices": "[\"0.9995\", \"0.0005\"]",
+        "clobTokenIds": "[\"100337388514085424694264172159674416882039355720694632851244671725835878189087\", \"70203232278182545898379878362800927711965701276997915467246767358750114398202\"]",
+        "bestBid": 0.999,
+        "bestAsk": 1,
+        "spread": 0.001,
+        "lastTradePrice": 0.999,
+        "liquidity": "110417.87071",
+        "liquidityNum": 110417.87071,
+        "volume24hr": 15338.489,
+        "feeSchedule": {
+          "exponent": 1,
+          "rate": 0.07,
+          "takerOnly": true,
+          "rebateRate": 0.2
+        }
+      },
+      {
+        "id": "4689177",
+        "question": "Will the price of Bitcoin be above $74,000 on September 25?",
+        "conditionId": "0x9793dc5ae707df42fc4fc7aae63046f8b7ea09ac130f2c007b53485b1123ce60",
+        "endDate": "2026-09-25T16:00:00Z",
+        "closed": false,
+        "active": true,
+        "outcomes": "[\"Yes\", \"No\"]",
+        "outcomePrices": "[\"0.9995\", \"0.0005\"]",
+        "clobTokenIds": "[\"40649937371312706236677552639054676755660387771739635989508008533424500535386\", \"98736971825576162417688953426036065511814710043869972568437434533937556369026\"]",
+        "bestBid": 0.999,
+        "bestAsk": 1,
+        "spread": 0.001,
+        "lastTradePrice": 0.999,
+        "liquidity": "84299.66918",
+        "liquidityNum": 84299.66918,
+        "volume24hr": 59299.052499,
+        "feeSchedule": {
+          "exponent": 1,
+          "rate": 0.07,
+          "takerOnly": true,
+          "rebateRate": 0.2
+        }
+      }
+    ]
+  },
+  {
+    "id": "946004",
+    "slug": "what-price-will-bitcoin-hit-in-september-2026",
+    "title": "What price will Bitcoin hit in September?",
+    "endDate": "2026-10-01T04:00:00Z",
+    "closed": false,
+    "seriesSlug": "bitcoin-hit-price-monthly",
+    "tags": [
+      {
+        "id": "235",
+        "slug": "bitcoin"
+      },
+      {
+        "id": "102144",
+        "slug": "monthly"
+      },
+      {
+        "id": "102134",
+        "slug": "hit-price"
+      },
+      {
+        "id": "21",
+        "slug": "crypto"
+      },
+      {
+        "id": "1312",
+        "slug": "crypto-prices"
+      },
+      {
+        "id": "101757",
+        "slug": "recurring"
+      }
+    ],
+    "markets": [
+      {
+        "id": "4052413",
+        "question": "Will Bitcoin reach $100,000 in September?",
+        "conditionId": "0x913581dc6f16ad7018bbfb51f6e2fa0a4bdd305212ef7976efb5cf0209304cb6",
+        "endDate": "2026-10-01T04:00:00Z",
+        "closed": false,
+        "active": true,
+        "outcomes": "[\"Yes\", \"No\"]",
+        "outcomePrices": "[\"0.0085\", \"0.9915\"]",
+        "clobTokenIds": "[\"8311037427502185580288498577713852658107445693333243027687152653006657478496\", \"102769914256228655651171298758376305089702497078714870469824100043858473644473\"]",
+        "bestBid": 0.008,
+        "bestAsk": 0.009,
+        "spread": 0.001,
+        "lastTradePrice": 0.008,
+        "liquidity": "177279.67772",
+        "liquidityNum": 177279.67772,
+        "volume24hr": 62770.189482,
+        "feeSchedule": {
+          "exponent": 1,
+          "rate": 0.07,
+          "takerOnly": true,
+          "rebateRate": 0.2
+        }
+      },
+      {
+        "id": "4052414",
+        "question": "Will Bitcoin reach $97,500 in September?",
+        "conditionId": "0x77e0be26980ec4b22b11935eae0a23243093487829969fe65ef22a55c4120116",
+        "endDate": "2026-10-01T04:00:00Z",
+        "closed": false,
+        "active": true,
+        "outcomes": "[\"Yes\", \"No\"]",
+        "outcomePrices": "[\"0.013\", \"0.987\"]",
+        "clobTokenIds": "[\"1834908198226756283857290953193722770367280082967943909171301362254585863886\", \"60515175275481393142598372992715965016254139905289115598014775874058673879530\"]",
+        "bestBid": 0.012,
+        "bestAsk": 0.014,
+        "spread": 0.002,
+        "lastTradePrice": 0.015,
+        "liquidity": "139295.0752",
+        "liquidityNum": 139295.0752,
+        "volume24hr": 38358.627601,
+        "feeSchedule": {
+          "exponent": 1,
+          "rate": 0.07,
+          "takerOnly": true,
+          "rebateRate": 0.2
+        }
+      },
+      {
+        "id": "4052415",
+        "question": "Will Bitcoin reach $95,000 in September?",
+        "conditionId": "0xccbeeab3ef57db883aaf5f347ae969ab647cc7220cd3231980a100aa675cf389",
+        "endDate": "2026-10-01T04:00:00Z",
+        "closed": false,
+        "active": true,
+        "outcomes": "[\"Yes\", \"No\"]",
+        "outcomePrices": "[\"0.0245\", \"0.9755\"]",
+        "clobTokenIds": "[\"14856985972654452030413349006673776143957008179669951683214418101064543140813\", \"14104329494818789553277517497182141526991746128566541396376949277465885160222\"]",
+        "bestBid": 0.024,
+        "bestAsk": 0.025,
+        "spread": 0.001,
+        "lastTradePrice": 0.025,
+        "liquidity": "134455.59166",
+        "liquidityNum": 134455.59166,
+        "volume24hr": 54140.551818,
+        "feeSchedule": {
+          "exponent": 1,
+          "rate": 0.07,
+          "takerOnly": true,
+          "rebateRate": 0.2
+        }
+      }
+    ]
+  },
+  {
+    "id": "89502",
+    "slug": "what-price-will-bitcoin-hit-before-2027",
+    "title": "What price will Bitcoin hit in 2026?",
+    "endDate": "2027-01-01T05:00:00Z",
+    "closed": false,
+    "seriesSlug": "bitcoin-hit-price-monthly",
+    "tags": [
+      {
+        "id": "235",
+        "slug": "bitcoin"
+      },
+      {
+        "id": "102536",
+        "slug": "yearly"
+      },
+      {
+        "id": "102134",
+        "slug": "hit-price"
+      },
+      {
+        "id": "1312",
+        "slug": "crypto-prices"
+      },
+      {
+        "id": "21",
+        "slug": "crypto"
+      },
+      {
+        "id": "102458",
+        "slug": "earn-4"
+      }
+    ],
+    "markets": [
+      {
+        "id": "701486",
+        "question": "Will Bitcoin reach $200,000 by December 31, 2026?",
+        "conditionId": "0xac32e73aa9e0dae801d88d4f81efd2ef3fa0f04b815f3a0e74426f0762e668cd",
+        "endDate": "2027-01-01T05:00:00Z",
+        "closed": false,
+        "active": true,
+        "outcomes": "[\"Yes\", \"No\"]",
+        "outcomePrices": "[\"0.0145\", \"0.9855\"]",
+        "clobTokenIds": "[\"61368943128255287414565270336856615453000675377332178800733742873558311943412\", \"96993471854400156408670527613150944443359272190785251193551242374636006072800\"]",
+        "bestBid": 0.013,
+        "bestAsk": 0.016,
+        "spread": 0.003,
+        "lastTradePrice": 0.013,
+        "liquidity": "122575.81571",
+        "liquidityNum": 122575.81571,
+        "volume24hr": 88.99,
+        "feeSchedule": {
+          "exponent": 1,
+          "rate": 0.07,
+          "takerOnly": true,
+          "rebateRate": 0.2
+        }
+      }
+    ]
+  }
+]

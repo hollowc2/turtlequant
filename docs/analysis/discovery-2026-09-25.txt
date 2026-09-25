@@ -1,0 +1,27 @@
+# Output of docs/analysis/compare_discovery.py, 2026-09-25 ~04:10 UTC (BTC 84,087 / ETH 2,675). Default bot filters, assets btc,eth.
+[data] Binance geo-blocked (451) — falling back to OKX
+[data] Binance geo-blocked (451) — falling back to OKX
+BEFORE raw fetched: 500 | sample: ['Spread: Packers (-4.5)', 'Falcons vs. Packers: O/U 43.5', 'Houston Astros vs. Athletics']
+
+== BEFORE (markets?tag_slug=crypto top 500, relative spread <= 3%): fetched=(n/a) funnel={}
+stage                <1d    1-7d   7-30d  30-90d    >90d   total
+passed_filters        14       9       0       0       2      25
+parsed                11       9       0       0       2      22
+plausible             11       9       0       0       2      22
+mid_edge>=5%           0       1       0       0       1       2
+
+== AFTER (events tag 1312 minus up/down, absolute spread <= 3c): fetched=1398 funnel={'fetched': 1398, 'near_expiry': 115, 'asset': 724, 'spread': 55, 'liquidity': 158}
+stage                <1d    1-7d   7-30d  30-90d    >90d   total
+passed_filters        43     230       0       0      73     346
+parsed                24     196       0       0      65     285
+plausible             24     196       0       0      57     277
+mid_edge>=5%           0       8       0       0       6      14
+
+== AFTER, min_liquidity=0 (for reference): fetched=1398 funnel={'fetched': 1398, 'near_expiry': 115, 'asset': 724, 'spread': 144}
+stage                <1d    1-7d   7-30d  30-90d    >90d   total
+passed_filters        64     268       0       0      83     415
+parsed                44     199       0       0      65     308
+plausible             44     199       0       0      57     300
+mid_edge>=5%           0       8       0       0       6      14
+
+spot: {'btc': 84086.7, 'eth': 2675.1}

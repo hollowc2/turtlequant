@@ -12,7 +12,7 @@ A probabilistic trading system for cryptocurrency prediction markets on [Polymar
 
 Polymarket offers binary outcome markets like _"Will BTC be above $75,000 by March 30?"_ These are structurally equivalent to digital options. TurtleQuant prices them using standard options theory and trades when the market is mispriced.
 
-**TurtleQuant** — Long-dated markets (weeks–months). Black-Scholes pricing with Deribit implied volatility.
+**TurtleQuant** — BTC/ETH price-threshold markets, from daily expiries out to year-end ("above X on <date>", "reach / dip to X in <month>", "… by December 31"). Black-Scholes digital and barrier pricing with Deribit implied volatility.
 
 It runs as a Docker service in shadow mode by default: orders stay simulated, but each signal records the executable bid/ask snapshot used for fill modeling.
 
@@ -27,7 +27,7 @@ Phase 1 shadow-soak monitoring expects exporter metrics for quote/source quality
 ## How It Works
 
 ### 1. Market Discovery
-Polls the Polymarket Gamma API every scan cycle. Filters ~500 markets by liquidity (>$5k), spread (<3%), and time-to-expiry (>4h).
+Every scan reads the Gamma API's `/events` tagged "Crypto Prices" (tag 1312), excluding "Up or Down" events (tag 102127). That is about 150 events and 1,400 open markets in two requests. Markets are then filtered by time to expiry (>4h), asset, liquidity (>$5k) and an absolute bid-ask spread (≤3¢, `--max-spread`). Each scan's `scan_summary` records how many markets every filter rejected (`scanner_funnel`). Which expiries exist depends on what Polymarket lists: daily and weekly series are always open, and monthly and year-end series appear as they are created.
 
 ### 2. Market Parsing
 Classifies each question using regex into a structured contract: `(asset, strike, expiry, type)`.
