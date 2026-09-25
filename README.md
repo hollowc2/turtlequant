@@ -74,7 +74,7 @@ TurtleQuant supports four runtime modes:
 
 | Mode | Behavior |
 |------|----------|
-| `--dry-run` | Signals only; no order or position state changes. |
+| `--dry-run` | Evaluates entries and exits against the current state and logs `[DRY_RUN]` would-buy / would-exit lines. Writes nothing: no position, risk, history or corpus files. |
 | `--paper` | Simulated fills using executable bid/ask depth. |
 | `--shadow` | Same as paper, plus explicit CLOB/Gamma quote and order events for live-readiness review. |
 | `--live --i-accept-live-risk` | Sends FAK market orders through `py_clob_client_v2` and records actual/partial fills. |

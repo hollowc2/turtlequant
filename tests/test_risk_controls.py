@@ -40,3 +40,20 @@ def test_entry_gate_persists_daily_loss_and_rejects_stale_data(tmp_path):
 
     restored.record_realized_pnl(0.0, now + timedelta(days=1))
     assert restored.daily_realized_loss == 0.0
+
+
+def test_non_persistent_risk_controls_never_write(tmp_path):
+    controls = RiskControls.load(tmp_path, 1000.0, persist=False)
+    controls.record_failure("boom")
+    controls.record_realized_pnl(-5.0)
+    controls.record_success(1000.0)
+
+    assert not (tmp_path / "turtlequant-risk.json").exists()
+
+
+def test_risk_state_round_trips_without_persist_field(tmp_path):
+    controls = RiskControls.load(tmp_path, 1000.0)
+    controls.record_failure("boom")
+
+    assert "persist" not in (tmp_path / "turtlequant-risk.json").read_text()
+    assert RiskControls.load(tmp_path, 1000.0).consecutive_failures == 1

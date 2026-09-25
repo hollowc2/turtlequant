@@ -339,3 +339,19 @@ def test_save_raises_when_state_cannot_be_persisted(tmp_path, monkeypatch):
                 model_prob=0.6,
             )
         )
+
+
+def test_non_persistent_manager_never_writes_state(tmp_path):
+    positions_file = tmp_path / "positions.json"
+    manager = PositionManager(starting_nav=1000.0, positions_file=positions_file, persist=False)
+    manager.open_position(
+        make_position(
+            market_id="m1", question="q", asset="btc", strike=100_000.0,
+            expiry=datetime.now(UTC) + timedelta(days=5), option_type="european",
+            yes_token_id="yes", yes_price=0.40, size_usd=40.0, model_prob=0.55,
+        )
+    )
+    manager.close_position("m1", exit_price=0.50)
+
+    assert not positions_file.exists()
+    assert manager.current_nav != 1000.0  # in-memory accounting still runs

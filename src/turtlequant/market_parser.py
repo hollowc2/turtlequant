@@ -150,8 +150,14 @@ _ASSET_MAP: dict[str, str] = {
     "ripple": "xrp",
 }
 
-# Corpus file for unclassified markets
-_CORPUS_FILE = Path("unclassified_markets.jsonl")
+# Corpus file for unclassified markets; None disables it (dry-run, tests).
+_CORPUS_FILE: Path | None = Path("unclassified_markets.jsonl")
+
+
+def set_corpus_file(path: Path | None) -> None:
+    """Point the unclassified-question corpus at ``path``, or disable it."""
+    global _CORPUS_FILE
+    _CORPUS_FILE = path
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +394,8 @@ def _parse_date(raw: str) -> datetime | None:
 
 def _log_unclassified(question: str) -> None:
     """Append unclassified question to corpus file for weekly manual review."""
+    if _CORPUS_FILE is None:
+        return
     try:
         entry = {
             "question": question,

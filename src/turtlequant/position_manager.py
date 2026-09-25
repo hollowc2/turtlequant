@@ -94,6 +94,7 @@ class PositionManager:
     max_per_expiry_pct: float = DEFAULT_MAX_PER_EXPIRY_PCT
     max_total_exposure_pct: float = DEFAULT_MAX_TOTAL_EXPOSURE_PCT
     positions_file: Path = field(default_factory=lambda: DEFAULT_POSITIONS_FILE)
+    persist: bool = True  # False (dry-run) keeps every change in memory only
     _positions: dict[str, Position] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -438,6 +439,8 @@ class PositionManager:
         self._positions = loaded
 
     def _save(self) -> None:
+        if not self.persist:
+            return
         try:
             self.positions_file.parent.mkdir(parents=True, exist_ok=True)
             data = {

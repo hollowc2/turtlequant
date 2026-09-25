@@ -45,7 +45,7 @@ from pathlib import Path
 from turtlequant.discord_trades import DiscordTrades
 from turtlequant.data.binance import fetch_klines, fetch_latest_closes
 from turtlequant.clob_execution import DEFAULT_CRYPTO_FEE, ExecutionClient, estimate_buy_fill
-from turtlequant.market_parser import parse_market, strike_is_plausible
+from turtlequant.market_parser import parse_market, set_corpus_file, strike_is_plausible
 from turtlequant.market_scanner import MarketScanner
 from turtlequant.notifications import NotificationQueue
 from turtlequant.order_intents import OrderIntentLedger
@@ -369,17 +369,32 @@ def main() -> None:
 
     vol_surfaces: dict[str, VolSurface] = {a: VolSurface(asset=a) for a in assets}
 
+    # Dry-run evaluates signals against the real state but never writes it:
+    # no position/NAV/risk saves, no history events, no intent journal.
+    persist = not args.dry_run
     pos_mgr = PositionManager(
         starting_nav=args.starting_nav,
         kelly_fraction=args.kelly_fraction,
         positions_file=state_dir / "turtlequant-positions.json",
+        persist=persist,
     )
-    risk_controls = RiskControls.load(state_dir, pos_mgr.current_nav)
+    risk_controls = RiskControls.load(state_dir, pos_mgr.current_nav, persist=persist)
     executor = ExecutionClient.from_env(
         mode=execution_mode, allow_live=args.i_accept_live_risk
     )
-    intent_ledger = OrderIntentLedger(state_dir / "turtlequant-order-intents.sqlite3")
-    if execution_mode == "live" and intent_ledger.outstanding():
+
+    def record(entry: dict[str, object]) -> None:
+        if persist:
+            append_history(state_dir, entry)
+
+    set_corpus_file(state_dir / "unclassified_markets.jsonl" if persist else None)
+
+    intent_ledger = (
+        OrderIntentLedger(state_dir / "turtlequant-order-intents.sqlite3")
+        if execution_mode == "live"
+        else None
+    )
+    if intent_ledger is not None and intent_ledger.outstanding():
         try:
             reconcile_outstanding(intent_ledger, executor, pos_mgr)
         except ReconciliationError as exc:
@@ -462,8 +477,7 @@ def main() -> None:
                                     resolved_price,
                                 )
                                 pos_mgr.mark_pending_redemption(pos.market_id, resolved_price)
-                                append_history(
-                                    state_dir,
+                                record(
                                     {
                                         "event": "pending_redemption",
                                         "market_id": pos.market_id,
@@ -480,8 +494,7 @@ def main() -> None:
                         shares = pos.token_size
                         _pos, pnl = pos_mgr.settle_position(pos.market_id, resolved_price)
                         risk_controls.record_realized_pnl(pnl)
-                        append_history(
-                            state_dir,
+                        record(
                             {
                                 "event": "close",
                                 "market_id": pos.market_id,
@@ -547,56 +560,61 @@ def main() -> None:
                         now=datetime.now(UTC),
                     )
                     if decision.should_exit:
-                        exit_result = None
-                        if not args.dry_run:
-                            shares = (
-                                pos.token_size
-                                if pos.token_size > 0
-                                else pos.size_usd / pos.entry_price
+                        if args.dry_run:
+                            logger.info(
+                                "[DRY_RUN] Would exit %s reason=%s model_p=%.4f bid=%.4f",
+                                pos.market_id[:16],
+                                decision.reason,
+                                model_prob,
+                                executable_exit_price,
                             )
-                            exit_intent_id = (
-                                intent_ledger.pending(pos.market_id, pos.yes_token_id, "SELL", shares)
-                                if execution_mode == "live" else None
+                            continue
+                        shares = (
+                            pos.token_size
+                            if pos.token_size > 0
+                            else pos.size_usd / pos.entry_price
+                        )
+                        exit_intent_id = (
+                            intent_ledger.pending(pos.market_id, pos.yes_token_id, "SELL", shares)
+                            if execution_mode == "live" else None
+                        )
+                        exit_fee = executor.get_market_fee(pos.condition_id, pos.yes_token_id)
+                        exit_result = executor.sell_yes(
+                            pos.yes_token_id, shares, book,
+                            fee=exit_fee if exit_fee is not None else DEFAULT_CRYPTO_FEE,
+                        )
+                        if exit_intent_id is not None:
+                            intent_ledger.submitted(exit_intent_id, exit_result.order_id, exit_result.raw)
+                        record(
+                            {
+                                "event": "order",
+                                "market_id": pos.market_id,
+                                "asset": pos.asset,
+                                "reason": decision.reason or "edge_reversed",
+                                **exit_result.to_history(),
+                                "ts": datetime.now(UTC).isoformat(),
+                            },
+                        )
+                        if not exit_result.success:
+                            risk_controls.record_failure(
+                                exit_result.error or exit_result.status
                             )
-                            exit_fee = executor.get_market_fee(pos.condition_id, pos.yes_token_id)
-                            exit_result = executor.sell_yes(
-                                pos.yes_token_id, shares, book,
-                                fee=exit_fee if exit_fee is not None else DEFAULT_CRYPTO_FEE,
-                            )
-                            if exit_intent_id is not None:
-                                intent_ledger.submitted(exit_intent_id, exit_result.order_id, exit_result.raw)
-                            append_history(
-                                state_dir,
+                            record(
                                 {
-                                    "event": "order",
+                                    "event": "failed_order",
                                     "market_id": pos.market_id,
                                     "asset": pos.asset,
+                                    "side": "SELL",
                                     "reason": decision.reason or "edge_reversed",
-                                    **exit_result.to_history(),
+                                    "remaining_shares": shares,
+                                    "remaining_size_usd": pos.size_usd,
+                                    "unhedged_exposure": True,
+                                    "error": exit_result.error
+                                    or exit_result.status,
                                     "ts": datetime.now(UTC).isoformat(),
                                 },
                             )
-                            if not exit_result.success:
-                                risk_controls.record_failure(
-                                    exit_result.error or exit_result.status
-                                )
-                                append_history(
-                                    state_dir,
-                                    {
-                                        "event": "failed_order",
-                                        "market_id": pos.market_id,
-                                        "asset": pos.asset,
-                                        "side": "SELL",
-                                        "reason": decision.reason or "edge_reversed",
-                                        "remaining_shares": shares,
-                                        "remaining_size_usd": pos.size_usd,
-                                        "unhedged_exposure": True,
-                                        "error": exit_result.error
-                                        or exit_result.status,
-                                        "ts": datetime.now(UTC).isoformat(),
-                                    },
-                                )
-                                continue
+                            continue
                         filled_price = (
                             exit_result.avg_price
                             if exit_result and exit_result.avg_price > 0
@@ -618,8 +636,7 @@ def main() -> None:
                         risk_controls.record_success(pos_mgr.marked_equity())
                         if exit_result is None or exit_result.complete:
                             recently_closed[pos.market_id] = datetime.now(UTC)
-                        append_history(
-                            state_dir,
+                        record(
                             {
                                 "event": "close"
                                 if exit_result is None or exit_result.complete
@@ -794,61 +811,67 @@ def main() -> None:
                             now=datetime.now(UTC),
                         )
                         if decision.should_exit:
+                            if args.dry_run:
+                                logger.info(
+                                    "[DRY_RUN] Would exit %s reason=%s model_p=%.4f bid=%.4f",
+                                    market.market_id[:16],
+                                    decision.reason,
+                                    model_prob,
+                                    executable_exit_price,
+                                )
+                                continue
                             exit_result = None
-                            if not args.dry_run:
-                                pos = pos_mgr.get_position(market.market_id)
-                                if pos:
-                                    token_id = pos.yes_token_id or market.yes_token_id
-                                    shares = (
-                                        pos.token_size
-                                        if pos.token_size > 0
-                                        else pos.size_usd / pos.entry_price
+                            pos = pos_mgr.get_position(market.market_id)
+                            if pos:
+                                token_id = pos.yes_token_id or market.yes_token_id
+                                shares = (
+                                    pos.token_size
+                                    if pos.token_size > 0
+                                    else pos.size_usd / pos.entry_price
+                                )
+                                exit_intent_id = (
+                                    intent_ledger.pending(market.market_id, token_id, "SELL", shares)
+                                    if execution_mode == "live" else None
+                                )
+                                exit_fee = executor.get_market_fee(market.condition_id, token_id)
+                                exit_result = executor.sell_yes(
+                                    token_id, shares, book,
+                                    fee=exit_fee if exit_fee is not None else DEFAULT_CRYPTO_FEE,
+                                )
+                                if exit_intent_id is not None:
+                                    intent_ledger.submitted(exit_intent_id, exit_result.order_id, exit_result.raw)
+                                record(
+                                    {
+                                        "event": "order",
+                                        "market_id": market.market_id,
+                                        "asset": params.asset,
+                                        "reason": decision.reason
+                                        or "edge_reversed",
+                                        **exit_result.to_history(),
+                                        "ts": datetime.now(UTC).isoformat(),
+                                    },
+                                )
+                                if not exit_result.success:
+                                    risk_controls.record_failure(
+                                        exit_result.error or exit_result.status
                                     )
-                                    exit_intent_id = (
-                                        intent_ledger.pending(market.market_id, token_id, "SELL", shares)
-                                        if execution_mode == "live" else None
-                                    )
-                                    exit_fee = executor.get_market_fee(market.condition_id, token_id)
-                                    exit_result = executor.sell_yes(
-                                        token_id, shares, book,
-                                        fee=exit_fee if exit_fee is not None else DEFAULT_CRYPTO_FEE,
-                                    )
-                                    if exit_intent_id is not None:
-                                        intent_ledger.submitted(exit_intent_id, exit_result.order_id, exit_result.raw)
-                                    append_history(
-                                        state_dir,
+                                    record(
                                         {
-                                            "event": "order",
+                                            "event": "failed_order",
                                             "market_id": market.market_id,
                                             "asset": params.asset,
+                                            "side": "SELL",
                                             "reason": decision.reason
                                             or "edge_reversed",
-                                            **exit_result.to_history(),
+                                            "remaining_shares": shares,
+                                            "remaining_size_usd": pos.size_usd,
+                                            "unhedged_exposure": True,
+                                            "error": exit_result.error
+                                            or exit_result.status,
                                             "ts": datetime.now(UTC).isoformat(),
                                         },
                                     )
-                                    if not exit_result.success:
-                                        risk_controls.record_failure(
-                                            exit_result.error or exit_result.status
-                                        )
-                                        append_history(
-                                            state_dir,
-                                            {
-                                                "event": "failed_order",
-                                                "market_id": market.market_id,
-                                                "asset": params.asset,
-                                                "side": "SELL",
-                                                "reason": decision.reason
-                                                or "edge_reversed",
-                                                "remaining_shares": shares,
-                                                "remaining_size_usd": pos.size_usd,
-                                                "unhedged_exposure": True,
-                                                "error": exit_result.error
-                                                or exit_result.status,
-                                                "ts": datetime.now(UTC).isoformat(),
-                                            },
-                                        )
-                                        continue
+                                    continue
                             filled_price = (
                                 exit_result.avg_price
                                 if exit_result and exit_result.avg_price > 0
@@ -870,8 +893,7 @@ def main() -> None:
                             risk_controls.record_success(pos_mgr.marked_equity())
                             if exit_result is None or exit_result.complete:
                                 recently_closed[market.market_id] = datetime.now(UTC)
-                            append_history(
-                                state_dir,
+                            record(
                                 {
                                     "event": "close"
                                     if exit_result is None or exit_result.complete
@@ -945,9 +967,6 @@ def main() -> None:
                     if yes_price <= 0.02 or yes_price >= 0.98:
                         continue  # near-certain markets — skip
 
-                    if args.dry_run:
-                        continue
-
                     # Place order
                     book = executor.get_order_book(
                         market.yes_token_id,
@@ -994,8 +1013,7 @@ def main() -> None:
                         if size_usd > 0
                         else 0.0
                     )
-                    append_history(
-                        state_dir,
+                    record(
                         {
                             "event": "signal_evaluation",
                             "parsed": True,
@@ -1034,8 +1052,7 @@ def main() -> None:
                         if entry_edge < args.entry_threshold
                         else "executable_edge"
                     )
-                    append_history(
-                        state_dir,
+                    record(
                         {
                             "event": "shadow_quote",
                             "market_id": market.market_id,
@@ -1056,6 +1073,16 @@ def main() -> None:
                         _inc_scan_stat("ask_erased_edge")
                         continue
                     _inc_scan_stat("executable_edge_candidates")
+                    if args.dry_run:
+                        logger.info(
+                            "[DRY_RUN] Would buy %s $%.2f at %.4f (model_p=%.4f edge=%.4f)",
+                            market.market_id[:16],
+                            size_usd,
+                            executable_entry_price,
+                            model_prob,
+                            entry_edge,
+                        )
+                        continue
                     intent_id = (
                         intent_ledger.pending(
                             market.market_id, market.yes_token_id, "BUY", size_usd,
@@ -1080,8 +1107,7 @@ def main() -> None:
                         intent_ledger.submitted(
                             intent_id, entry_result.order_id, entry_result.raw
                         )
-                    append_history(
-                        state_dir,
+                    record(
                         {
                             "event": "order",
                             "market_id": market.market_id,
@@ -1094,8 +1120,7 @@ def main() -> None:
                         risk_controls.record_failure(
                             entry_result.error or entry_result.status
                         )
-                        append_history(
-                            state_dir,
+                        record(
                             {
                                 "event": "failed_order",
                                 "market_id": market.market_id,
@@ -1135,8 +1160,7 @@ def main() -> None:
                     if intent_id is not None:
                         intent_ledger.reconcile(intent_id)
                     risk_controls.record_success(pos_mgr.marked_equity())
-                    append_history(
-                        state_dir,
+                    record(
                         {
                             "event": "open",
                             "market_id": market.market_id,
@@ -1180,7 +1204,7 @@ def main() -> None:
                     )
                     risk_controls.record_failure(str(exc))
 
-            append_history(state_dir, scan_stats)
+            record(scan_stats)
 
         # Sleep until next event
         time.sleep(5)
