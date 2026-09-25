@@ -355,3 +355,25 @@ def test_non_persistent_manager_never_writes_state(tmp_path):
 
     assert not positions_file.exists()
     assert manager.current_nav != 1000.0  # in-memory accounting still runs
+
+
+def test_partial_closes_charge_entry_fee_exactly_once(tmp_path):
+    manager = PositionManager(starting_nav=1000.0, positions_file=tmp_path / "positions.json")
+    manager.open_position(
+        make_position(
+            market_id="m1", question="q", asset="btc", strike=100_000.0,
+            expiry=datetime.now(UTC) + timedelta(days=5), option_type="european",
+            yes_token_id="yes", yes_price=0.50, size_usd=50.0, model_prob=0.60,
+            token_size=100.0,
+        )
+    )
+    manager.confirm_fill("m1", 0.50, size_usd=50.0, token_size=100.0, fee_usd=1.75)
+
+    _, first = manager.close_position("m1", exit_price=0.50, filled_shares=50.0, exit_fee_usd=0.0)
+    assert manager.get_position("m1").entry_fee_usd == pytest.approx(0.875)
+    _, second = manager.close_position("m1", exit_price=0.50, filled_shares=50.0, exit_fee_usd=0.0)
+
+    # Flat exit, no exit fees: total P&L is exactly minus the entry fee.
+    assert first + second == pytest.approx(-1.75)
+    assert manager.current_nav == pytest.approx(1000.0 - 1.75)
+    assert not manager.has_position("m1")
