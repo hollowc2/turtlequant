@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -36,11 +37,11 @@ def test_interpolate_uses_otm_wing_and_total_variance():
     now = datetime.now(UTC)
     surface = VolSurface(asset="btc")
     surface._iv_points = [
-        IVPoint(80, now + timedelta(days=20), 0.90, "C"),
-        IVPoint(100, now + timedelta(days=20), 0.20, "C"),
-        IVPoint(100, now + timedelta(days=20), 0.90, "P"),
-        IVPoint(100, now + timedelta(days=60), 0.40, "C"),
-        IVPoint(100, now + timedelta(days=60), 0.90, "P"),
+        IVPoint(80, now + timedelta(days=20), 0.90, "C", moneyness=0.8),
+        IVPoint(100, now + timedelta(days=20), 0.20, "C", moneyness=1.0),
+        IVPoint(100, now + timedelta(days=20), 0.90, "P", moneyness=1.0),
+        IVPoint(100, now + timedelta(days=60), 0.40, "C", moneyness=1.0),
+        IVPoint(100, now + timedelta(days=60), 0.90, "P", moneyness=1.0),
     ]
 
     iv = surface._interpolate(100, 100, now + timedelta(days=40))
@@ -77,3 +78,51 @@ def test_deribit_auth_sends_secret_in_post_body_not_url():
     assert "supersecret" not in url
     assert kwargs["json"]["method"] == "public/auth"
     assert kwargs["json"]["params"]["client_secret"] == "supersecret"
+
+
+def _smile_surface():
+    now = datetime.now(UTC)
+    surface = VolSurface(asset="btc")
+    expiry = now + timedelta(days=30)
+    # A put-skewed smile around a 101 forward: IV falls as strike rises.
+    surface._iv_points = [
+        IVPoint(80, expiry, 0.80, "P", forward=101.0),
+        IVPoint(90, expiry, 0.70, "P", forward=101.0),
+        IVPoint(110, expiry, 0.55, "C", forward=101.0),
+        IVPoint(120, expiry, 0.50, "C", forward=101.0),
+        IVPoint(100, expiry, 0.10, "C", forward=101.0),  # ITM call: not on the OTM wing
+    ]
+    surface._forwards = {expiry.timestamp(): 101.0}
+    surface._last_deribit_fetch = surface._last_deribit_attempt = time.time()
+    return surface, expiry
+
+
+def test_smile_lookup_uses_forward_moneyness_and_reports_slope():
+    surface, expiry = _smile_surface()
+
+    sigma, slope, forward = surface.smile(100.0, 100.0, expiry)
+
+    assert forward == pytest.approx(100.0 * (101.0 / 100.0) ** 1, rel=1e-3)
+    assert 0.55 < sigma < 0.70  # between the 90 put and 110 call, ignoring the ITM call
+    assert slope < 0  # put skew
+
+
+def test_forward_extrapolates_carry_beyond_last_expiry():
+    surface, expiry = _smile_surface()
+    later = expiry + timedelta(days=30)
+
+    assert surface.forward(100.0, later) == pytest.approx(100.0 * 1.01**2, rel=1e-2)
+
+
+def test_stale_surface_is_not_used_when_max_age_is_set():
+    surface, expiry = _smile_surface()
+    surface._last_deribit_fetch = time.time() - 3600
+    surface._last_deribit_attempt = time.time()  # no refetch in the test
+    surface._realized_vol_cache[f"btc_{datetime.now(UTC).date()}"] = 0.45
+
+    assert surface.get_iv(100.0, 100.0, expiry) != 0.45  # no limit: legacy uses old points
+    assert surface.last_source == "deribit"
+    surface.max_age_secs = 900
+    assert surface.get_iv(100.0, 100.0, expiry) == 0.45
+    assert surface.last_source == "stale"
+    assert surface.smile(100.0, 100.0, expiry) is None

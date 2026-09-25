@@ -42,10 +42,15 @@ class FakeScanner:
 
 
 class FakeVol:
-    last_source = "deribit"
+    def __init__(self, smile=None, source="deribit"):
+        self._smile = smile  # (sigma, dsigma_dk, forward) or None
+        self.last_source = source
 
     def get_iv(self, _spot, _strike, _expiry):
         return 0.60
+
+    def smile(self, _spot, _strike, _expiry):
+        return self._smile
 
 
 class FakeClob:
@@ -80,14 +85,17 @@ def market(bid=0.39, ask=0.41, market_id="m-1", days=90):
     )
 
 
-def make_trader(tmp_path: Path, *, mode="shadow", scanner=None, clob=None, dry_run=False, intents=None, executor=None):
+def make_trader(
+    tmp_path: Path, *, mode="shadow", scanner=None, clob=None, dry_run=False, intents=None, executor=None,
+    vol=None, **config,
+):
     persist = not dry_run
     positions = PositionManager(starting_nav=1000.0, positions_file=tmp_path / "positions.json", persist=persist)
     return Trader(
-        TraderConfig(execution_mode=mode, assets=("btc", "eth"), dry_run=dry_run),
+        TraderConfig(execution_mode=mode, assets=("btc", "eth"), dry_run=dry_run, **config),
         state_dir=tmp_path,
         scanner=scanner or FakeScanner([market()]),
-        vol_surfaces={"btc": FakeVol(), "eth": FakeVol()},
+        vol_surfaces={"btc": vol or FakeVol(), "eth": vol or FakeVol()},
         positions=positions,
         risk=RiskControls.load(tmp_path, positions.current_nav, persist=persist),
         executor=executor or ExecutionClient(mode=mode, clob_client=clob or FakeClob()),
@@ -310,3 +318,57 @@ def test_live_pre_send_rejection_closes_its_intent(tmp_path):
     assert ledger.outstanding() == []
     assert trader.positions.has_position("m-1")
     assert trader.risk.consecutive_failures == 0
+
+
+# A strong put skew around the 80k strike: the smile model prices "BTC above
+# 80k" well above the legacy N(d2), so the edge flips relative to the mid.
+SKEWED = (0.60, -0.00002, 84_500.0)
+
+
+def test_legacy_pricing_is_the_default_and_logs_both_models(tmp_path):
+    trader = make_trader(tmp_path, vol=FakeVol(smile=SKEWED))
+
+    trader.scan()
+
+    evaluation = [e for e in events(tmp_path, DIAGNOSTICS_JSONL) if e["event"] == "signal_evaluation"][0]
+    assert evaluation["pricing_model"] == "legacy"
+    assert evaluation["model_prob"] == evaluation["model_prob_legacy"]
+    assert evaluation["model_prob_smile"] > evaluation["model_prob_legacy"]
+    assert evaluation["forward"] == 84_500.0
+
+
+def test_smile_pricing_changes_the_decision(tmp_path):
+    # Mid 0.70: legacy (~0.52) sees no YES edge; the skewed smile does.
+    quiet = make_trader(tmp_path / "legacy", vol=FakeVol(smile=SKEWED),
+                        scanner=FakeScanner([market(bid=0.69, ask=0.71)]),
+                        clob=FakeClob(bids=((0.69, 500),), asks=((0.71, 500),)))
+    smile = make_trader(tmp_path / "smile", vol=FakeVol(smile=SKEWED), pricing_model="smile",
+                        scanner=FakeScanner([market(bid=0.69, ask=0.71)]),
+                        clob=FakeClob(bids=((0.69, 500),), asks=((0.71, 500),)))
+
+    quiet.scan()
+    smile.scan()
+
+    assert not quiet.positions.has_position("m-1")
+    assert smile.positions.has_position("m-1")
+    assert smile.positions.get_position("m-1").model_prob_at_entry > 0.76
+
+
+def test_smile_mode_without_a_smile_does_not_enter(tmp_path):
+    trader = make_trader(tmp_path, vol=FakeVol(smile=None), pricing_model="smile")
+
+    stats = trader.scan()
+
+    assert not trader.positions.has_position("m-1")
+    assert stats["vol_blocked"] == 1
+
+
+def test_stale_iv_blocks_entries_but_not_exits(tmp_path):
+    trader = make_trader(tmp_path, vol=FakeVol(source="stale"),
+                         clob=FakeClob(bids=((0.70, 500),), asks=((0.72, 500),)))
+    stats = trader.scan()
+    assert not trader.positions.has_position("m-1") and stats["vol_blocked"] == 1
+
+    hold(trader)
+    trader.reprice_positions()  # model ~0.52 < 0.70 bid: exits still run
+    assert not trader.positions.has_position("m-1")

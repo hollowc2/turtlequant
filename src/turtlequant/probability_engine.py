@@ -199,3 +199,60 @@ def compute_probability(params: MarketParams, spot: float, sigma: float) -> floa
         prob,
     )
     return prob
+
+
+# ---------------------------------------------------------------------------
+# Smile-consistent pricing (--pricing-model smile)
+# ---------------------------------------------------------------------------
+
+
+def terminal_above_probability(
+    forward: float, K: float, T: float, sigma: float, dsigma_dk: float = 0.0
+) -> float:
+    """P(S_T > K) = -dC/dK on the smile: N(d2) - vega * dsigma/dK, zero drift on F.
+
+    ``N(d2)`` alone evaluates the digital at the strike's own IV and ignores
+    how IV changes with strike; the vega term restores it. ``vega`` is the
+    undiscounted forward vega ``F * phi(d1) * sqrt(T)``.
+    """
+    if T <= 0 or sigma <= 0 or forward <= 0 or K <= 0:
+        return 1.0 if forward > K else 0.0
+    s = sigma * sqrt(T)
+    d1 = (log(forward / K) + 0.5 * s * s) / s
+    vega = forward * _NORMAL.pdf(d1) * sqrt(T)
+    p = _NORMAL.cdf(d1 - s) - vega * dsigma_dk
+    return max(1e-6, min(1.0 - 1e-6, p))
+
+
+def smile_probability(
+    params: MarketParams, spot: float, forward: float, sigma: float, dsigma_dk: float
+) -> float:
+    """Model probability using the Deribit forward and the smile's slope at K.
+
+    Terminal (european) markets use ``terminal_above_probability``. Touch
+    markets take the flat-vol reflection price with the forward's drift and
+    scale it by the skew correction of the matching terminal probability
+    (``P_touch ~ 2 P_terminal`` near zero drift, so the correction carries
+    over). This is an approximation; with no skew it equals the flat price.
+    """
+    now = datetime.now(UTC)
+    T = max((params.expiry - now).total_seconds() / (365 * 86400), 1e-6)
+    K = params.strike
+    kind = params.option_type
+    p_above_flat = terminal_above_probability(forward, K, T, sigma)
+    p_above = terminal_above_probability(forward, K, T, sigma, dsigma_dk)
+    if kind == OptionType.EUROPEAN:
+        return p_above
+    if kind == OptionType.EUROPEAN_PUT:
+        return max(1e-6, min(1.0 - 1e-6, 1.0 - p_above))
+
+    upward = kind == OptionType.BARRIER
+    if (upward and spot >= K) or (not upward and spot <= K):
+        return 1.0  # already touched
+    drift = log(forward / spot) / T if spot > 0 and forward > 0 else 0.0
+    touch = barrier_probability if upward else barrier_down_probability
+    flat_touch = touch(spot, K, T, sigma, drift)
+    flat_terminal = p_above_flat if upward else 1.0 - p_above_flat
+    smile_terminal = p_above if upward else 1.0 - p_above
+    p = flat_touch * smile_terminal / flat_terminal if flat_terminal > 1e-9 else flat_touch
+    return max(1e-6, min(1.0 - 1e-6, p))

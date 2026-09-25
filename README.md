@@ -50,6 +50,12 @@ P(digital) = N(d₂)
 P(barrier) = N(d₊) + (K/S₀)^(2μ/σ²) × N(d₋)   [reflection principle]
 ```
 
+**Smile model (`--pricing-model smile`, off by default):** the forward is Deribit's futures price for the expiry, with zero drift. IV is looked up on the forward-moneyness smile (sticky strike). Digitals add the skew term the flat formula omits:
+```
+P(S_T > K) = N(d₂) − vega · ∂σ/∂K        vega = F·φ(d₁)·√T
+```
+Touch markets use the flat reflection price with the forward's drift, scaled by the same skew correction of the matching terminal probability (an approximation). Every `signal_evaluation` logs both models (`model_prob_legacy`, `model_prob_smile`), whichever one trades. `--max-iv-age-secs N` (off by default) ignores Deribit IV older than N seconds and blocks entries until it refreshes. In smile mode, markets without a smile or forward are not entered.
+
 ### 5. Edge Detection & Sizing
 ```
 edge = model_probability − executable_yes_price

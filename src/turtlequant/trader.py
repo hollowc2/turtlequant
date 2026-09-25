@@ -42,13 +42,31 @@ from turtlequant.position_manager import (
     StatePersistenceError,
     make_position,
 )
-from turtlequant.probability_engine import compute_probability
+from turtlequant.probability_engine import compute_probability, smile_probability
 from turtlequant.risk_controls import RiskControls
 from turtlequant.vol_surface import VolSurface
 
 logger = logging.getLogger("turtlequant_bot")
 
 SpotSource = Callable[[Iterable[str]], dict[str, float]]
+
+PRICING_MODELS = ("legacy", "smile")
+# Vol sources that must not open positions: an over-age Deribit surface
+# (--max-iv-age-secs) or, in smile mode, no smile/forward for the market.
+NO_ENTRY_VOL_SOURCES = frozenset({"stale", "smile_unavailable"})
+
+
+@dataclass(frozen=True)
+class Pricing:
+    """One market's model probability plus the inputs behind it."""
+
+    prob: float  # the active pricing model's probability
+    sigma: float
+    vol_source: str
+    legacy_prob: float
+    smile_prob: float | None = None
+    forward: float | None = None
+    dsigma_dk: float | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +81,9 @@ class TraderConfig:
     min_entry_price: float = 0.02  # skip near-certain markets on either side
     max_entry_price: float = 0.98
     reentry_cooldown_secs: float = 2 * 3600
+    # "legacy": N(d2)/reflection at the strike's IV, spot with a 5% drift.
+    # "smile": Deribit forward, zero drift, plus the smile's -vega*dsigma/dK term.
+    pricing_model: str = "legacy"
 
     @property
     def persist(self) -> bool:
@@ -206,6 +227,27 @@ class Trader:
             )
 
     # ------------------------------------------------------------------
+    # Pricing
+    # ------------------------------------------------------------------
+
+    def price(self, params: MarketParams, spot: float) -> Pricing:
+        """Price a market under the configured model; the other is kept for diagnostics."""
+        vs = self.vol_surfaces[params.asset]
+        sigma = vs.get_iv(spot, params.strike, params.expiry)
+        source = vs.last_source
+        legacy = compute_probability(params, spot, sigma)
+        smile = vs.smile(spot, params.strike, params.expiry) if source == "deribit" else None
+        if smile is None:
+            if self.config.pricing_model == "smile" and source == "deribit":
+                source = "smile_unavailable"
+            return Pricing(legacy, sigma, source, legacy)
+        s_sigma, slope, forward = smile
+        smile_prob = smile_probability(params, spot, forward, s_sigma, slope)
+        if self.config.pricing_model == "smile":
+            return Pricing(smile_prob, s_sigma, source, legacy, smile_prob, forward, slope)
+        return Pricing(legacy, sigma, source, legacy, smile_prob, forward, slope)
+
+    # ------------------------------------------------------------------
     # Reprice pass
     # ------------------------------------------------------------------
 
@@ -233,13 +275,9 @@ class Trader:
                 self.reprice_errors += 1
 
     def _reprice(self, pos: Position, spot: float | None) -> None:
-        vs = self.vol_surfaces.get(pos.asset)
-        if spot is None or vs is None:
+        if spot is None or pos.asset not in self.vol_surfaces:
             return
-        params = MarketParams(
-            asset=pos.asset, strike=pos.strike, expiry=pos.expiry, option_type=OptionType(pos.option_type)
-        )
-        model_prob = compute_probability(params, spot, vs.get_iv(spot, pos.strike, pos.expiry))
+        model_prob = self.price(_position_params(pos), spot).prob
         # Fall back only to Gamma's live bid/ask. A stale last trade or a
         # persisted mark is never an executable exit price: with neither source
         # there is no bid, and the position holds.
@@ -511,11 +549,9 @@ class Trader:
             logger.info("[PARSE_REJECTED] K=%g vs spot %.2f: %s", params.strike, spot, market.question[:100])
             return
 
-        vs = self.vol_surfaces[params.asset]
-        sigma = vs.get_iv(spot, params.strike, params.expiry)
-        vol_source = vs.last_source
-        _inc(stats, "vol_sources", vol_source)
-        model_prob = compute_probability(params, spot, sigma)
+        pricing = self.price(params, spot)
+        _inc(stats, "vol_sources", pricing.vol_source)
+        model_prob = pricing.prob
 
         pos = self.positions.get_position(market.market_id)
         if pos is not None:
@@ -534,19 +570,18 @@ class Trader:
             self.evaluate_exit(pos, book=book, model_prob=model_prob)
             return
 
-        self.try_enter(market, params, model_prob, sigma, vol_source, market_data_at, stats)
+        self.try_enter(market, params, pricing, market_data_at, stats)
 
     def try_enter(
         self,
         market: ActiveMarket,
         params: MarketParams,
-        model_prob: float,
-        sigma: float,
-        vol_source: str,
+        pricing: Pricing,
         market_data_at: datetime | None,
         stats: dict[str, object],
     ) -> ExecutionResult | None:
         cfg = self.config
+        model_prob, sigma, vol_source = pricing.prob, pricing.sigma, pricing.vol_source
         if self.positions.closed_within(market.market_id, cfg.reentry_cooldown_secs):
             logger.debug("Cooldown active for %s — skip re-entry", market.market_id[:16])
             return None
@@ -558,6 +593,10 @@ class Trader:
             return None
         _inc(stats, "mid_edge_candidates")
         if yes_price <= cfg.min_entry_price or yes_price >= cfg.max_entry_price:
+            return None
+        if vol_source in NO_ENTRY_VOL_SOURCES:
+            _inc(stats, "vol_blocked")
+            logger.info("[ENTRY_SKIPPED] %s vol source %s", market.market_id[:16], vol_source)
             return None
 
         book = self.executor.get_order_book(market.yes_token_id, fallback_bid=market.bid, fallback_ask=market.ask)
@@ -585,6 +624,11 @@ class Trader:
                 "expiry": params.expiry.isoformat(),
                 "option_type": params.option_type.value,
                 "model_prob": model_prob,
+                "pricing_model": cfg.pricing_model,
+                "model_prob_legacy": pricing.legacy_prob,
+                "model_prob_smile": pricing.smile_prob,
+                "forward": pricing.forward,
+                "dsigma_dk": pricing.dsigma_dk,
                 # Diagnostics only: a 1.645*RMSE haircut on top of the entry
                 # threshold silently raised the bar from 5% to ~13% in July.
                 "conservative_prob": max(0.0, model_prob - 1.645 * cfg.calibration_rmse),
@@ -748,6 +792,12 @@ class Trader:
         )
         self.notify_entry(pos, model_prob=model_prob, bid=book.best_bid, ask=book.best_ask, sigma=sigma)
         return result
+
+
+def _position_params(pos: Position) -> MarketParams:
+    return MarketParams(
+        asset=pos.asset, strike=pos.strike, expiry=pos.expiry, option_type=OptionType(pos.option_type)
+    )
 
 
 def _now_iso() -> str:

@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -45,7 +46,8 @@ class IVPoint:
     expiry: datetime  # UTC
     mark_iv: float  # annualized (e.g., 0.65 = 65%)
     option_type: str  # "C" or "P"
-    moneyness: float = 0.0  # K / S0 at time of fetch
+    moneyness: float = 0.0  # K / S0 at time of fetch (legacy lookup)
+    forward: float = 0.0  # Deribit underlying (futures) price for this expiry
 
 
 @dataclass
@@ -62,6 +64,9 @@ class VolSurface:
     """
 
     asset: str  # "btc", "eth", "sol"
+    # Deribit points older than this are not used (0 = no limit, the legacy
+    # behaviour); get_iv then reports last_source "stale".
+    max_age_secs: float = 0.0
     _iv_points: list[IVPoint] = field(default_factory=list, repr=False)
     _last_deribit_fetch: float = field(default=0.0, repr=False)
     _realized_vol_cache: dict[str, float] = field(default_factory=dict, repr=False)
@@ -70,6 +75,7 @@ class VolSurface:
     _token_fetched_at: float = field(default=0.0, repr=False)
     _last_deribit_attempt: float = field(default=0.0, repr=False)
     _last_warning_at: dict[str, float] = field(default_factory=dict, repr=False)
+    _forwards: dict[float, float] = field(default_factory=dict, repr=False)  # expiry ts -> futures price
     last_source: str = field(default="unknown", init=False)
 
     def get_iv(self, spot: float, strike: float, expiry: datetime) -> float:
@@ -79,14 +85,15 @@ class VolSurface:
         Deribit data is unavailable or no points bracket the request.
         """
         self._maybe_refresh_deribit(spot)
-        if self._iv_points:
+        stale = self._iv_points and self._is_stale()
+        if self._iv_points and not stale:
             iv = self._interpolate(spot, strike, expiry)
             if iv is not None:
                 self.last_source = "deribit"
                 return iv
         # Fallback
         rv = self._get_realized_vol()
-        self.last_source = "wide_fallback" if rv == 0.80 else "realized"
+        self.last_source = "stale" if stale else "wide_fallback" if rv == 0.80 else "realized"
         logger.info(
             "Using realized vol fallback for %s: σ=%.3f (no Deribit data for K=%.0f)",
             self.asset.upper(),
@@ -94,6 +101,43 @@ class VolSurface:
             strike,
         )
         return rv
+
+    def smile(self, spot: float, strike: float, expiry: datetime) -> tuple[float, float, float] | None:
+        """``(sigma, dsigma/dK, forward)`` from the forward-moneyness smile, or None.
+
+        Strikes are stored as-is and moneyness is K/F with each expiry's own
+        Deribit futures price, computed at query time (sticky strike), so the
+        lookup does not drift with the spot seen when the surface was fetched.
+        """
+        self._maybe_refresh_deribit(spot)
+        if not self._iv_points or self._is_stale():
+            return None
+        forward = self.forward(spot, expiry)
+        sigma = self._interpolate_forward(strike, expiry)
+        if forward is None or sigma is None:
+            return None
+        h = 0.01 * strike
+        up, down = self._interpolate_forward(strike + h, expiry), self._interpolate_forward(strike - h, expiry)
+        slope = (up - down) / (2 * h) if up is not None and down is not None else 0.0
+        return sigma, slope, forward
+
+    def forward(self, spot: float, expiry: datetime) -> float | None:
+        """Forward for ``expiry``: log-linear in T through spot and the Deribit futures curve."""
+        now = time.time()
+        curve = sorted(((ts - now) / (365 * 86400), f) for ts, f in self._forwards.items() if ts > now and f > 0)
+        if spot <= 0 or not curve:
+            return None
+        t = max((expiry.timestamp() - now) / (365 * 86400), 0.0)
+        points = [(0.0, spot), *curve]
+        for (t0, f0), (t1, f1) in zip(points, points[1:]):
+            if t0 <= t <= t1:
+                w = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+                return float(np.exp((1 - w) * np.log(f0) + w * np.log(f1)))
+        t_last, f_last = points[-1]
+        return spot * (f_last / spot) ** (t / t_last)  # beyond the last expiry: same carry
+
+    def _is_stale(self) -> bool:
+        return self.max_age_secs > 0 and time.time() - self._last_deribit_fetch > self.max_age_secs
 
     # ------------------------------------------------------------------
     # Deribit authentication
@@ -174,6 +218,7 @@ class VolSurface:
             resp.raise_for_status()
             data = resp.json().get("result", [])
             points: list[IVPoint] = []
+            forwards: dict[float, float] = {}
             for item in data:
                 iv = (
                     _safe_float(item.get("mark_iv"))
@@ -188,6 +233,9 @@ class VolSurface:
                     continue
                 strike_d, expiry_d, option_type = parsed
                 moneyness = strike_d / spot if spot > 0 else 1.0
+                forward = _safe_float(item.get("underlying_price")) or 0.0
+                if forward > 0:
+                    forwards[expiry_d.timestamp()] = forward
                 points.append(
                     IVPoint(
                         strike=strike_d,
@@ -195,10 +243,12 @@ class VolSurface:
                         mark_iv=iv / 100.0,  # Deribit returns percent
                         option_type=option_type,
                         moneyness=moneyness,
+                        forward=forward,
                     )
                 )
             if points:
                 self._iv_points = points
+                self._forwards = forwards
                 self._last_deribit_fetch = time.time()
                 logger.info(
                     "Deribit: loaded %d IV points for %s",
@@ -231,84 +281,25 @@ class VolSurface:
     def _interpolate(
         self, spot: float, strike: float, expiry: datetime
     ) -> float | None:
-        """Log-linear interpolation in moneyness + linear total variance in T."""
-        points = [
-            p
-            for p in self._iv_points
-            if (p.strike >= spot and p.option_type == "C")
-            or (p.strike < spot and p.option_type == "P")
-        ]
-        if not points:
-            return None
+        """Legacy lookup: OTM wing and moneyness relative to spot, frozen at fetch time."""
+        buckets: dict[float, list[tuple[float, float]]] = {}
+        for p in self._iv_points:
+            if (p.strike >= spot and p.option_type == "C") or (p.strike < spot and p.option_type == "P"):
+                buckets.setdefault(p.expiry.timestamp(), []).append((p.moneyness, p.mark_iv))
+        target = strike / spot if spot > 0 else 1.0
+        return _interp_surface(buckets, lambda _bucket: target, expiry)
 
-        target_moneyness = strike / spot if spot > 0 else 1.0
-        target_expiry_ts = expiry.timestamp()
-        now_ts = datetime.now(UTC).timestamp()
-        target_T = max((target_expiry_ts - now_ts) / (365 * 86400), 1e-6)
-        # Group points by exact expiry to avoid mixing distinct maturities.
-        expiry_buckets: dict[float, list[IVPoint]] = {}
-        for p in points:
-            bucket = p.expiry.timestamp()
-            expiry_buckets.setdefault(bucket, []).append(p)
-
-        if not expiry_buckets:
-            return None
-
-        expiry_keys = sorted(expiry_buckets.keys())
-
-        # Find the two bracketing expiry buckets
-        below = [k for k in expiry_keys if k <= target_expiry_ts]
-        above = [k for k in expiry_keys if k > target_expiry_ts]
-
-        if not below and not above:
-            return None
-
-        def _strike_interp(pts: list[IVPoint], target_m: float) -> float | None:
-            """Log-linear interpolation in moneyness."""
-            if not pts:
-                return None
-            # Sort by moneyness
-            pts_sorted = sorted(pts, key=lambda p: p.moneyness)
-            ms = [p.moneyness for p in pts_sorted]
-            ivs = [p.mark_iv for p in pts_sorted]
-
-            if target_m <= ms[0]:
-                return ivs[0]
-            if target_m >= ms[-1]:
-                return ivs[-1]
-
-            for i in range(len(ms) - 1):
-                if ms[i] <= target_m <= ms[i + 1]:
-                    # Log-linear in moneyness
-                    log_m0, log_m1 = np.log(ms[i]), np.log(ms[i + 1])
-                    log_target = np.log(target_m)
-                    if log_m1 == log_m0:
-                        return (ivs[i] + ivs[i + 1]) / 2.0
-                    w = (log_target - log_m0) / (log_m1 - log_m0)
-                    return ivs[i] + w * (ivs[i + 1] - ivs[i])
-            return None
-
-        iv_at_T: dict[float, float] = {}
-        for k in below[-1:] + above[:1]:
-            v = _strike_interp(expiry_buckets[k], target_moneyness)
-            if v is not None:
-                iv_at_T[k] = v
-
-        if not iv_at_T:
-            return None
-        if len(iv_at_T) == 1:
-            return list(iv_at_T.values())[0]
-
-        # Linear interpolation in total variance, σ²T.
-        k0, k1 = sorted(iv_at_T.keys())
-        if k1 == k0:
-            return iv_at_T[k0]
-        T0 = max((k0 - now_ts) / (365 * 86400), 1e-6)
-        T1 = max((k1 - now_ts) / (365 * 86400), 1e-6)
-        w = (target_T - T0) / (T1 - T0)
-        w = max(0.0, min(1.0, w))
-        total_variance = (1.0 - w) * iv_at_T[k0] ** 2 * T0 + w * iv_at_T[k1] ** 2 * T1
-        return float(np.sqrt(max(total_variance, 0.0) / target_T))
+    def _interpolate_forward(self, strike: float, expiry: datetime) -> float | None:
+        """OTM wing and moneyness relative to each expiry's own forward (K/F)."""
+        buckets: dict[float, list[tuple[float, float]]] = {}
+        forwards: dict[float, float] = {}
+        for p in self._iv_points:
+            if p.forward <= 0 or (p.strike >= p.forward) != (p.option_type == "C"):
+                continue
+            key = p.expiry.timestamp()
+            buckets.setdefault(key, []).append((p.strike / p.forward, p.mark_iv))
+            forwards[key] = p.forward
+        return _interp_surface(buckets, lambda bucket: strike / forwards[bucket], expiry)
 
     # ------------------------------------------------------------------
     # Realized vol fallback
@@ -347,6 +338,63 @@ class VolSurface:
                 "Realized vol fetch failed for %s: %s", self.asset.upper(), exc
             )
             return 0.80
+
+
+# ---------------------------------------------------------------------------
+# Surface interpolation
+# ---------------------------------------------------------------------------
+
+
+def _interp_smile(points: list[tuple[float, float]], target_m: float) -> float | None:
+    """Log-linear interpolation in moneyness; flat beyond the quoted range."""
+    if not points:
+        return None
+    pts = sorted(points)
+    ms = [m for m, _ in pts]
+    ivs = [iv for _, iv in pts]
+    if target_m <= ms[0]:
+        return ivs[0]
+    if target_m >= ms[-1]:
+        return ivs[-1]
+    for i in range(len(ms) - 1):
+        if ms[i] <= target_m <= ms[i + 1]:
+            log_m0, log_m1 = np.log(ms[i]), np.log(ms[i + 1])
+            if log_m1 == log_m0:
+                return (ivs[i] + ivs[i + 1]) / 2.0
+            w = (np.log(target_m) - log_m0) / (log_m1 - log_m0)
+            return float(ivs[i] + w * (ivs[i + 1] - ivs[i]))
+    return None
+
+
+def _interp_surface(
+    buckets: dict[float, list[tuple[float, float]]],
+    target_of: Callable[[float], float],
+    expiry: datetime,
+) -> float | None:
+    """Smile per bracketing expiry, then linear in total variance (sigma^2 T)."""
+    if not buckets:
+        return None
+    target_ts = expiry.timestamp()
+    now_ts = datetime.now(UTC).timestamp()
+    target_T = max((target_ts - now_ts) / (365 * 86400), 1e-6)
+    keys = sorted(buckets)
+    below = [k for k in keys if k <= target_ts]
+    above = [k for k in keys if k > target_ts]
+    iv_at_T: dict[float, float] = {}
+    for k in below[-1:] + above[:1]:
+        v = _interp_smile(buckets[k], target_of(k))
+        if v is not None:
+            iv_at_T[k] = v
+    if not iv_at_T:
+        return None
+    if len(iv_at_T) == 1:
+        return next(iter(iv_at_T.values()))
+    k0, k1 = sorted(iv_at_T)
+    T0 = max((k0 - now_ts) / (365 * 86400), 1e-6)
+    T1 = max((k1 - now_ts) / (365 * 86400), 1e-6)
+    w = max(0.0, min(1.0, (target_T - T0) / (T1 - T0)))
+    total_variance = (1.0 - w) * iv_at_T[k0] ** 2 * T0 + w * iv_at_T[k1] ** 2 * T1
+    return float(np.sqrt(max(total_variance, 0.0) / target_T))
 
 
 # ---------------------------------------------------------------------------
