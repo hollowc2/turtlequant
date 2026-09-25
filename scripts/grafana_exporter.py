@@ -83,6 +83,7 @@ _HALT_CATEGORIES = (
     ("drawdown", "drawdown"),
     ("daily loss", "daily_loss"),
     ("broker failures", "broker_failures"),
+    ("unreconciled order", "unreconciled_orders"),
     ("data errors", "data_errors"),
     ("stale market data", "stale_data"),
 )

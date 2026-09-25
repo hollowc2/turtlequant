@@ -94,6 +94,7 @@ class RiskControls:
         max_daily_loss: float = float("inf"),
         market_data_at: datetime | None = None,
         max_market_data_age_secs: float = 90.0,
+        unreconciled_orders: int = 0,
         now: datetime | None = None,
     ) -> tuple[bool, str]:
         now = now or datetime.now(UTC)
@@ -104,6 +105,10 @@ class RiskControls:
             return False, "15% drawdown"
         if self.daily_realized_loss >= max_daily_loss:
             return False, "daily loss limit"
+        if unreconciled_orders:
+            # A broker action with an unknown outcome may already have filled;
+            # trading on top of it could double a position.
+            return False, f"{unreconciled_orders} unreconciled order intent(s)"
         if self.broker_halted(now):
             return False, f"{self.consecutive_failures} consecutive broker failures ({self.halt_reason})"
         if self.data_degraded:

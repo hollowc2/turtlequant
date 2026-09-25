@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from datetime import datetime
 
-from turtlequant.clob_execution import ExecutionClient, OrderSide, confirmed_fill
+from turtlequant.clob_execution import ExecutionClient, FeeSchedule, OrderSide, confirmed_fill
 from turtlequant.order_intents import OrderIntent, OrderIntentLedger
 from turtlequant.position_manager import PositionManager, make_position
 
@@ -14,8 +14,14 @@ class ReconciliationError(RuntimeError):
     """Broker evidence cannot safely be reflected in local state."""
 
 
-def _actual_taker_fee(executor: ExecutionClient, intent: OrderIntent) -> float:
-    """Derive the charged fee from confirmed authenticated trade records."""
+def _actual_taker_fee(executor: ExecutionClient, intent: OrderIntent, schedule: FeeSchedule | None = None) -> float:
+    """Derive the charged fee from confirmed authenticated trade records.
+
+    Prefer the market's published fee schedule (``fd`` rate and exponent, the
+    same values the SDK charges with). A trade's ``fee_rate_bps`` may be the
+    market's base fee (1000 = 0.10 on crypto markets whose taker rate is
+    0.07), so it is only used when the schedule is unavailable.
+    """
     raw = executor.get_trades(intent.token_id)
     trades = raw.get("data", []) if isinstance(raw, dict) else raw
     if not isinstance(trades, list):
@@ -30,10 +36,13 @@ def _actual_taker_fee(executor: ExecutionClient, intent: OrderIntent) -> float:
         try:
             shares = Decimal(str(trade["size"])) / Decimal("1000000")
             price = Decimal(str(trade["price"]))
-            rate = Decimal(str(trade["fee_rate_bps"])) / Decimal("10000")
+            if schedule is not None:
+                fee += Decimal(str(schedule.fee(float(shares), float(price))))
+            else:
+                rate = Decimal(str(trade["fee_rate_bps"])) / Decimal("10000")
+                fee += shares * rate * price * (1 - price)
         except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
             raise ReconciliationError(f"intent {intent.id} has invalid trade fee evidence") from exc
-        fee += shares * rate * price * (1 - price)
         matched = True
     if not matched:
         raise ReconciliationError(f"intent {intent.id} has no confirmed taker trade")
@@ -48,11 +57,13 @@ def reconcile_intent(intent: OrderIntent, executor: ExecutionClient, positions: 
         fill = confirmed_fill(executor.get_order(intent.order_id), OrderSide(intent.side), intent.requested)
     except (RuntimeError, ValueError) as exc:
         raise ReconciliationError(f"intent {intent.id} is ambiguous: {exc}") from exc
+    meta = intent.metadata or {}
+    existing = positions.get_position(intent.market_id)
+    condition_id = str(meta.get("condition_id") or (existing.condition_id if existing else ""))
+    schedule = executor.get_market_fee(condition_id, intent.token_id) if condition_id else None
     if intent.side == OrderSide.BUY.value:
-        fee_usd = _actual_taker_fee(executor, intent)
-        meta = intent.metadata or {}
+        fee_usd = _actual_taker_fee(executor, intent, schedule)
         required = ("question", "asset", "strike", "expiry_iso", "option_type", "model_prob")
-        existing = positions.get_position(intent.market_id)
         if existing is not None:
             if (
                 existing.fill_confirmed and existing.yes_token_id == intent.token_id
@@ -77,7 +88,7 @@ def reconcile_intent(intent: OrderIntent, executor: ExecutionClient, positions: 
         positions.open_position(position)
         positions.confirm_fill(intent.market_id, fill.avg_price, size_usd=fill.filled_usd, token_size=fill.filled_shares, fee_usd=fee_usd)
     else:
-        fee_usd = _actual_taker_fee(executor, intent)
+        fee_usd = _actual_taker_fee(executor, intent, schedule)
         if not positions.has_position(intent.market_id):
             raise ReconciliationError(f"intent {intent.id} SELL has no local position")
         positions.close_position(intent.market_id, fill.avg_price, reason="broker_recovery", filled_shares=fill.filled_shares, exit_fee_usd=fee_usd)

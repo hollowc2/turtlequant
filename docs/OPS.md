@@ -53,6 +53,13 @@ Trading mode is **CLI only**: `--shadow` (compose default), `--paper`, or `--liv
 
 ## Live trading prep (CLOB v2)
 
+> **Live trading is hard-disabled in code** (`scripts/turtlequant_bot.py` exits with
+> "Live trading is disabled pending supervised broker acceptance"). The steps below
+> describe the path once that gate is lifted after supervised broker acceptance. They
+> cannot run today, and the live compose override stops after 3 failed starts rather
+> than crash-looping. On-chain redemption of resolved positions is not implemented:
+> live positions stay `pending_redemption` until redeemed by hand.
+
 TurtleQuant uses `py-clob-client-v2` (pUSD collateral). Wallet USDC.e + V1 exchange approvals are **not** sufficient.
 
 ### 1. Fund wallet
@@ -102,6 +109,24 @@ uv run python scripts/turtlequant_bot.py \
 ```
 
 Verify: order in `turtlequant-bot.log`, fill fields on position, exit on test size.
+
+### Order-intent journal
+
+Every live order is journaled in `turtlequant-order-intents.sqlite3` before it is sent:
+`pending` → `submitted` → `reconciled` | `failed` | `cancelled`. An order that never
+reached the broker is marked `failed` at once. An ambiguous answer (timeout, unconfirmed
+status) stays outstanding. While any intent is outstanding, new entries halt (entry-gate
+reason `unreconciled_orders`), and that market gets no further orders. The bot retries
+reconciliation every 30s and applies a confirmed fill to positions. An outstanding intent
+also blocks startup. Check the order at the broker, then:
+
+```bash
+uv run python scripts/order_intents.py --state-dir /opt/turtlequant/state/live-state list
+uv run python scripts/order_intents.py --state-dir /opt/turtlequant/state/live-state resolve <id> failed "no order at broker"
+```
+
+Only mark an intent `failed`/`cancelled` if nothing filled. For a filled order, restart
+and let reconciliation apply it.
 
 ### 5. NAV reconciliation
 
