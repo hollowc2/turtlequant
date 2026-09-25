@@ -40,6 +40,15 @@ groups:
           summary: "TurtleQuant failed order spike"
           description: "More than 3 failed_order events in 15 minutes."
 
+      - alert: TurtleQuantEntriesHalted
+        expr: max by (strategy, reason) (turtlequant_entries_halted{strategy="turtlequant"}) == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TurtleQuant entries halted ({{ $labels.reason }})"
+          description: "The entry gate has blocked new positions for >15m. Exits still run. See halt reason in turtlequant-risk.json / the bot log ([ENTRY_HALTED])."
+
       - alert: TurtleQuantNavDrawdown
         expr: turtlequant_current_drawdown_pct{strategy="turtlequant"} > 0.15
         for: 15m

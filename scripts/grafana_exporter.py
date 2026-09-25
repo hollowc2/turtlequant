@@ -22,6 +22,11 @@ Trade statistics (from *-history.json close events):
   turtlequant_last_trade_age_sec        — seconds since last close event
   turtlequant_exit_reason_count         — count per exit reason (labeled by reason)
 
+Entry gate (from *-risk.json):
+  turtlequant_entries_halted            — 1 while entries are blocked (labeled by reason category)
+  turtlequant_entry_halt_age_sec        — seconds the gate has been closed
+  turtlequant_consecutive_broker_failures
+
 Per active position (labeled strategy, market_id, asset, option_type):
   turtlequant_position_size_usd
   turtlequant_position_edge_at_entry
@@ -59,7 +64,19 @@ PORT = int(os.environ.get("EXPORTER_PORT", "8004"))
 
 STRATEGY = "turtlequant"
 POSITIONS_FILE = "turtlequant-positions.json"
+RISK_FILE = "turtlequant-risk.json"
 BOT_LOG_FILE = "turtlequant-bot.log"
+
+# Entry-gate reasons map to a fixed label set; the raw text carries error
+# messages and counts that would otherwise mint a new series per failure.
+_HALT_CATEGORIES = (
+    ("HALT file", "halt_file"),
+    ("drawdown", "drawdown"),
+    ("daily loss", "daily_loss"),
+    ("broker failures", "broker_failures"),
+    ("data errors", "data_errors"),
+    ("stale market data", "stale_data"),
+)
 
 # Flat taker rate used to discount open-position marks for an estimated exit fee.
 TAKER_FEE_RATE = 0.003
@@ -149,6 +166,16 @@ def _effective_close_events(history_events: list[dict]) -> list[dict]:
         closes.append(close_event)
 
     return closes
+
+
+def halt_category(reason: str) -> str:
+    """Bounded label for a free-text entry-gate reason ("" when entries are open)."""
+    if not reason:
+        return ""
+    for needle, category in _HALT_CATEGORIES:
+        if needle in reason:
+            return category
+    return "other"
 
 
 def _file_age_sec(path: str) -> float | None:
@@ -728,6 +755,21 @@ class TurtleQuantCollector:
             "Age of bot log file in seconds (staleness indicates scan loop stopped)",
             labels=["strategy"],
         )
+        entries_halted_g = GaugeMetricFamily(
+            "turtlequant_entries_halted",
+            "1 while the bot's entry gate blocks new entries, labelled by reason category",
+            labels=["strategy", "reason"],
+        )
+        entry_halt_age_g = GaugeMetricFamily(
+            "turtlequant_entry_halt_age_sec",
+            "Seconds the entry gate has been closed; 0 when open",
+            labels=["strategy"],
+        )
+        broker_failures_g = GaugeMetricFamily(
+            "turtlequant_consecutive_broker_failures",
+            "Broker order failures since the last filled order",
+            labels=["strategy"],
+        )
         scrape_success_g = GaugeMetricFamily(
             "turtlequant_exporter_scrape_success",
             "1 when both positions and history files were readable; 0 otherwise",
@@ -807,6 +849,16 @@ class TurtleQuantCollector:
         pos_age = _file_age_sec(pos_path)
         if pos_age is not None:
             state_file_age_g.add_metric([strategy, "positions"], pos_age)
+
+        risk = _load_json(os.path.join(self.state_dir, RISK_FILE))
+        if isinstance(risk, dict):
+            reason = str(risk.get("entry_halt") or "")
+            entries_halted_g.add_metric([strategy, halt_category(reason)], 1.0 if reason else 0.0)
+            since = _parse_ts(risk.get("entry_halt_since"))
+            entry_halt_age_g.add_metric(
+                [strategy], max(0.0, time.time() - since) if reason and since is not None else 0.0
+            )
+            broker_failures_g.add_metric([strategy], _safe_float(risk.get("consecutive_failures")))
 
         log_age = _file_age_sec(os.path.join(self.state_dir, BOT_LOG_FILE))
         if log_age is not None:
@@ -1014,6 +1066,9 @@ class TurtleQuantCollector:
         yield closed_pnl_g
         yield closed_hold_g
         yield state_file_age_g
+        yield entries_halted_g
+        yield entry_halt_age_g
+        yield broker_failures_g
         yield bot_log_age_g
         yield scrape_success_g
 

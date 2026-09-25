@@ -163,6 +163,14 @@ class ExecutionResult:
     error: str = ""
     quote: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
+    # True once an order reached (or may have reached) the broker. Pre-send
+    # rejections and simulated fills with no depth are liquidity outcomes,
+    # not broker failures, and must not trip the circuit breaker.
+    sent: bool = False
+
+    @property
+    def broker_failure(self) -> bool:
+        return self.sent and not self.success
 
     def to_history(self) -> dict[str, Any]:
         return {
@@ -181,6 +189,7 @@ class ExecutionResult:
             "error": self.error,
             "quote": self.quote,
             "raw": self.raw,
+            "sent": self.sent,
         }
 
 
@@ -460,12 +469,15 @@ class ExecutionClient:
                 order_type=OrderType.FAK,
             )
         except Exception as exc:
-            return _failed_result(token_id, estimate, book, str(exc))
+            # The request may have reached the exchange before failing.
+            return _failed_result(token_id, estimate, book, str(exc), status="pending_reconciliation", sent=True)
 
         try:
             parsed = _parse_order_response(raw, side, amount_usd, shares)
         except RuntimeError as exc:
-            return _failed_result(token_id, estimate, book, str(exc), status="pending_reconciliation", raw=raw)
+            return _failed_result(
+                token_id, estimate, book, str(exc), status="pending_reconciliation", raw=raw, sent=True
+            )
         return ExecutionResult(
             side=side,
             token_id=token_id,
@@ -480,6 +492,7 @@ class ExecutionClient:
             order_id=str(_dict_get(raw, "orderID", _dict_get(raw, "order_id", ""))),
             quote=book.to_dict(),
             raw=raw if isinstance(raw, dict) else {"response": str(raw)},
+            sent=True,
         )
 
 
@@ -503,7 +516,8 @@ def _paper_result(
 
 
 def _failed_result(
-    token_id: str, estimate: FillEstimate, book: OrderBook, error: str, *, status: str = "failed", raw: Any = None
+    token_id: str, estimate: FillEstimate, book: OrderBook, error: str, *,
+    status: str = "failed", raw: Any = None, sent: bool = False,
 ) -> ExecutionResult:
     return ExecutionResult(
         side=estimate.side,
@@ -519,6 +533,7 @@ def _failed_result(
         error=error,
         quote=book.to_dict(),
         raw=raw if isinstance(raw, dict) else {},
+        sent=sent,
     )
 
 
