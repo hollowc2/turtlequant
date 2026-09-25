@@ -126,6 +126,11 @@ class TraderConfig:
     # Outcome tokens the bot may buy: ("YES",) is the legacy behaviour;
     # ("YES", "NO") also buys NO when the model is below the market.
     sides: tuple[str, ...] = ("YES",)
+    # "legacy": edge reversed / edge decayed / time cleanup.
+    # "ev": sell only when bid - fee >= model + exit_margin, else hold to
+    # resolution; with a degraded vol source (not live Deribit) hold.
+    exit_rule: str = "legacy"
+    exit_margin: float = 0.01
 
     @property
     def persist(self) -> bool:
@@ -404,7 +409,8 @@ class Trader:
     def _reprice(self, pos: Position, spot: float | None) -> None:
         if spot is None or pos.asset not in self.vol_surfaces:
             return
-        model_prob = side_prob(pos.outcome, self.price(_position_params(pos), spot).prob)
+        pricing = self.price(_position_params(pos), spot)
+        model_prob = side_prob(pos.outcome, pricing.prob)
         # Fall back only to Gamma's live bid/ask. A stale last trade or a
         # persisted mark is never an executable exit price: with neither source
         # there is no bid, and the position holds.
@@ -416,7 +422,7 @@ class Trader:
             self.positions.record_market_data(
                 pos.market_id, yes_price=book.mid, bid=book.best_bid, ask=book.best_ask, observed_at=datetime.now(UTC)
             )
-        self.evaluate_exit(pos, book=book, model_prob=model_prob, log_hold=True)
+        self.evaluate_exit(pos, book=book, model_prob=model_prob, vol_source=pricing.vol_source, log_hold=True)
 
     def settle(self, pos: Position) -> None:
         """Realise an expired position once Gamma confirms its resolution."""
@@ -485,10 +491,30 @@ class Trader:
     # ------------------------------------------------------------------
 
     def evaluate_exit(
-        self, pos: Position, *, book: OrderBook, model_prob: float, log_hold: bool = False
+        self,
+        pos: Position,
+        *,
+        book: OrderBook,
+        model_prob: float,
+        vol_source: str = "deribit",
+        log_hold: bool = False,
     ) -> ExitDecision:
         """Decide on the book's bid and, if the decision says so, sell."""
-        decision = self.positions.exit_decision(pos.market_id, model_prob, book.best_bid, now=datetime.now(UTC))
+        cfg = self.config
+        bid = book.best_bid
+        if cfg.exit_rule == "ev" and vol_source != "deribit":
+            # No trustworthy model value: nothing shows the bid beats holding,
+            # and selling pays the spread and fee. Hold until inputs recover.
+            logger.info("[HOLD_DEGRADED] %s vol source %s", pos.market_id[:16], vol_source)
+            return self.positions.exit_decision(pos.market_id, model_prob, 0.0, rule="ev")
+        fee_per_share = 0.0
+        if cfg.exit_rule == "ev" and 0.0 < bid <= 1.0:
+            fee = self.executor.get_market_fee(pos.condition_id, pos.token_id)
+            fee_per_share = (fee if fee is not None else DEFAULT_CRYPTO_FEE).fee(1.0, bid)
+        decision = self.positions.exit_decision(
+            pos.market_id, model_prob, bid, now=datetime.now(UTC),
+            rule=cfg.exit_rule, fee_per_share=fee_per_share, margin=cfg.exit_margin,
+        )
         if decision.should_exit:
             self.exit_position(pos, book=book, model_prob=model_prob, decision=decision)
         elif log_hold:
@@ -716,7 +742,7 @@ class Trader:
                 observed_at=datetime.now(UTC),
             )
             book = self.executor.get_order_book(pos.token_id, fallback_bid=held.bid, fallback_ask=held.ask)
-            self.evaluate_exit(pos, book=book, model_prob=held.prob)
+            self.evaluate_exit(pos, book=book, model_prob=held.prob, vol_source=pricing.vol_source)
             return
 
         self.try_enter(market, params, pricing, market_data_at, stats, spot=spot)

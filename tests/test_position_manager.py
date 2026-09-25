@@ -432,3 +432,24 @@ def test_legacy_state_loads_as_yes_and_no_requires_its_token(tmp_path):
         json.dumps({"nav": 1000.0, "positions": [{**legacy, "outcome": "NO", "no_token_id": "no"}]})
     )
     assert PositionManager(positions_file=positions_file).get_position("m1").token_id == "no"
+
+
+def test_ev_exit_rule_sells_only_when_the_net_bid_beats_the_model(tmp_path):
+    manager = PositionManager(positions_file=tmp_path / "positions.json")
+    manager.open_position(make_position(
+        market_id="m1", question="q", asset="btc", strike=100_000.0,
+        expiry=datetime.now(UTC) + timedelta(days=5), option_type="european",
+        yes_token_id="yes", yes_price=0.30, size_usd=30.0, model_prob=0.80,  # entry edge 0.50
+    ))
+
+    # Edge decayed to 0.10 (< 40% of 0.50): legacy sells below model value, ev holds.
+    assert manager.exit_decision("m1", 0.52, 0.42).reason == "edge_decayed"
+    assert not manager.exit_decision("m1", 0.52, 0.42, rule="ev", fee_per_share=0.017, margin=0.01).should_exit
+
+    # Net bid 0.545 - 0.017 = 0.528 is below model + margin (0.53): hold.
+    assert not manager.exit_decision("m1", 0.52, 0.545, rule="ev", fee_per_share=0.017, margin=0.01).should_exit
+    # Net bid 0.56 - 0.017 = 0.543 clears it: sell.
+    decision = manager.exit_decision("m1", 0.52, 0.56, rule="ev", fee_per_share=0.017, margin=0.01)
+    assert (decision.should_exit, decision.reason) == (True, "ev_exit")
+    # No bid: never an ev exit.
+    assert not manager.exit_decision("m1", 0.0001, 0.0, rule="ev").should_exit

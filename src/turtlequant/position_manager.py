@@ -397,8 +397,18 @@ class PositionManager:
         model_prob: float,
         yes_price: float,
         now: datetime | None = None,
+        *,
+        rule: str = "legacy",
+        fee_per_share: float = 0.0,
+        margin: float = 0.0,
     ) -> ExitDecision:
-        """Evaluate all exit triggers for an open position."""
+        """Evaluate the exit rule for an open position at executable bid ``yes_price``.
+
+        ``legacy``: edge reversed (bid >= model), edge decayed, or time cleanup.
+        The last two sell while the bid is still below the model's value.
+        ``ev``: sell only when the bid net of the taker fee beats holding to
+        resolution by ``margin`` (bid - fee >= model + margin); otherwise hold.
+        """
         pos = self.get_position(market_id)
         if pos is None:
             return ExitDecision(False)
@@ -408,6 +418,10 @@ class PositionManager:
         now = now or datetime.now(UTC)
         hours_to_expiry = max((pos.expiry - now).total_seconds() / 3600.0, 0.0)
 
+        if rule == "ev":
+            if yes_price > 0 and yes_price - fee_per_share >= model_prob + margin:
+                return ExitDecision(True, "ev_exit", current_edge, entry_edge, hours_to_expiry)
+            return ExitDecision(False, None, current_edge, entry_edge, hours_to_expiry)
         if current_edge <= 0:
             return ExitDecision(True, "edge_reversed", current_edge, entry_edge, hours_to_expiry)
         if entry_edge > 0 and current_edge <= self.edge_decay_ratio * entry_edge:
