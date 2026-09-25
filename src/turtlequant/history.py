@@ -8,6 +8,10 @@ Two journals:
 * ``turtlequant-diagnostics.jsonl`` — per-scan diagnostics (scan_summary,
   signal_evaluation, shadow_quote with book depth). High volume, best-effort
   (no fsync) and size-rotated to ``.1`` … ``.N`` so disk use is bounded.
+* ``turtlequant-marks.jsonl`` — periodic ``market_marks`` snapshots (every
+  priced market's quote and model probabilities) for model evaluation
+  against resolutions (scripts/evaluate_models.py). Rotated the same way,
+  with its own budget so weeks of snapshots survive.
 """
 
 from __future__ import annotations
@@ -24,6 +28,10 @@ DIAGNOSTICS_JSONL = "turtlequant-diagnostics.jsonl"
 DIAGNOSTIC_EVENTS = frozenset({"scan_summary", "signal_evaluation", "shadow_quote"})
 DIAGNOSTICS_MAX_BYTES = int(os.getenv("DIAGNOSTICS_MAX_BYTES", str(64 * 1024 * 1024)))
 DIAGNOSTICS_BACKUPS = int(os.getenv("DIAGNOSTICS_BACKUP_COUNT", "3"))
+MARKS_JSONL = "turtlequant-marks.jsonl"
+MARKS_EVENTS = frozenset({"market_marks"})
+MARKS_MAX_BYTES = int(os.getenv("MARKS_MAX_BYTES", str(64 * 1024 * 1024)))
+MARKS_BACKUPS = int(os.getenv("MARKS_BACKUP_COUNT", "4"))
 
 
 def append_history(state_dir: Path, entry: dict[str, Any]) -> None:
@@ -32,6 +40,9 @@ def append_history(state_dir: Path, entry: dict[str, Any]) -> None:
     line = json.dumps(entry, separators=(",", ":")) + "\n"
     if entry.get("event") in DIAGNOSTIC_EVENTS:
         _append_diagnostic(state_dir / DIAGNOSTICS_JSONL, line)
+        return
+    if entry.get("event") in MARKS_EVENTS:
+        _append_diagnostic(state_dir / MARKS_JSONL, line, MARKS_MAX_BYTES, MARKS_BACKUPS)
         return
     with (state_dir / HISTORY_JSONL).open("a") as history:
         history.write(line)
@@ -66,9 +77,14 @@ def rotate(path: Path, backups: int) -> None:
 
 def diagnostics_paths(state_dir: Path) -> list[Path]:
     """Existing diagnostics files, oldest first, ending with the live file."""
-    live = state_dir / DIAGNOSTICS_JSONL
+    return rotated_paths(state_dir, DIAGNOSTICS_JSONL)
+
+
+def rotated_paths(state_dir: Path, name: str) -> list[Path]:
+    """Existing ``name`` files, oldest rotation first, ending with the live file."""
+    live = state_dir / name
     rotated = sorted(
-        (p for p in state_dir.glob(f"{DIAGNOSTICS_JSONL}.*") if p.suffix[1:].isdigit()),
+        (p for p in state_dir.glob(f"{name}.*") if p.suffix[1:].isdigit()),
         key=lambda p: int(p.suffix[1:]),
         reverse=True,
     )
