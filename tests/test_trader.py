@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from turtlequant.clob_execution import ExecutionClient
-from turtlequant.history import DIAGNOSTICS_JSONL, HISTORY_JSONL
+from turtlequant.history import DIAGNOSTICS_JSONL, HISTORY_JSONL, MARKS_JSONL
 from turtlequant.market_scanner import ActiveMarket
 from turtlequant.order_intents import OrderIntentLedger
 from turtlequant.position_manager import PositionManager, make_position
@@ -362,6 +362,45 @@ def test_smile_pricing_changes_the_decision(tmp_path):
     assert not quiet.positions.has_position("m-1")
     assert smile.positions.has_position("m-1")
     assert smile.positions.get_position("m-1").model_prob_at_entry > 0.76
+
+
+def test_model_consensus_prices_the_entry_on_the_lower_model(tmp_path):
+    # Smile active and skewed to ~0.83; legacy ~0.52 still clears the 0.40 mid.
+    trader = make_trader(tmp_path, vol=FakeVol(smile=SKEWED), pricing_model="smile", model_consensus=True)
+
+    trader.scan()
+
+    evaluation = [e for e in events(tmp_path, DIAGNOSTICS_JSONL) if e["event"] == "signal_evaluation"][0]
+    assert evaluation["model_prob"] == evaluation["model_prob_legacy"] < evaluation["model_prob_smile"]
+    pos = trader.positions.get_position("m-1")
+    assert pos is not None and pos.model_prob_at_entry == pytest.approx(evaluation["model_prob_legacy"])
+
+
+@pytest.mark.parametrize("smile", [(0.60, 0.00002, 84_500.0), None], ids=["smile_disagrees", "no_smile"])
+def test_model_consensus_blocks_entries_the_smile_does_not_confirm(tmp_path, smile):
+    # Legacy (~0.52) sees a 12pp edge over the 0.40 mid; the call-skewed smile
+    # prices ~0.20, and without a smile there is nothing to agree with.
+    trader = make_trader(tmp_path, vol=FakeVol(smile=smile), model_consensus=True)
+
+    stats = trader.scan()
+
+    assert not trader.positions.has_position("m-1")
+    assert stats["consensus_blocked"] == 1 and stats["mid_edge_candidates"] == 0
+
+
+def test_min_entry_hours_skips_short_dated_entries_but_still_marks_them(tmp_path):
+    trader = make_trader(tmp_path, scanner=FakeScanner([market(days=3)]), min_entry_hours=168.0)
+
+    stats = trader.scan()
+
+    assert not trader.positions.has_position("m-1")
+    assert stats["tenor_skipped"] == 1
+    marks = [json.loads(line) for line in (tmp_path / MARKS_JSONL).read_text().splitlines()]
+    assert [row["id"] for row in marks[0]["rows"]] == ["m-1"]
+
+    trader.scanner.markets = [market(days=30)]
+    trader.scan()
+    assert trader.positions.has_position("m-1")
 
 
 def test_smile_mode_without_a_smile_does_not_enter(tmp_path):

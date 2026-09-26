@@ -307,6 +307,13 @@ def main() -> None:
         "smile: Deribit forward, zero drift, plus the smile's skew term",
     )
     parser.add_argument(
+        "--model-consensus",
+        action=argparse.BooleanOptionalAction,
+        default=os.getenv("MODEL_CONSENSUS", "").lower() in ("1", "true", "yes"),
+        help="Enter only when the legacy and smile models both clear the entry threshold, "
+        "pricing and sizing on the lower of the two (exits use --pricing-model)",
+    )
+    parser.add_argument(
         "--sides",
         default=os.getenv("SIDES", "yes"),
         help="Outcome tokens to buy: 'yes' (default) or 'yes,no' to also buy NO when the model is below the market",
@@ -344,6 +351,8 @@ def main() -> None:
         ("--min-entry-price", "MIN_ENTRY_PRICE", 0.02, "Skip entries whose side's mid is at or below this"),
         ("--max-entry-price", "MAX_ENTRY_PRICE", 0.98, "Skip entries whose side's mid is at or above this"),
         ("--reentry-cooldown-hours", "REENTRY_COOLDOWN_HOURS", 2.0, "No re-entry this soon after a full close"),
+        ("--min-entry-hours", "MIN_ENTRY_HOURS", 0.0,
+         "No new entries in markets resolving sooner than this; they are still priced, marked and exited"),
         ("--edge-decay-ratio", "EDGE_DECAY_RATIO", 0.4, "Exit when edge falls to this fraction of entry edge"),
         ("--cleanup-hours", "CLEANUP_HOURS", 6.0, "Time-cleanup window before expiry"),
         ("--cleanup-edge", "CLEANUP_EDGE", 0.05, "Time-cleanup exits when edge is at or below this"),
@@ -456,6 +465,8 @@ def main() -> None:
             min_entry_price=args.min_entry_price,
             max_entry_price=args.max_entry_price,
             reentry_cooldown_secs=args.reentry_cooldown_hours * 3600,
+            min_entry_hours=args.min_entry_hours,
+            model_consensus=args.model_consensus,
             pricing_model=args.pricing_model,
             marks_interval_secs=args.marks_interval_secs,
             max_asset_exposure_pct=args.max_asset_exposure_pct,
@@ -490,8 +501,9 @@ def main() -> None:
         "Entry thresh: %.3f (%.1f%%)", args.entry_threshold, args.entry_threshold * 100
     )
     logger.info("Kelly frac  : %.2f", args.kelly_fraction)
-    logger.info("Pricing     : %s", args.pricing_model)
+    logger.info("Pricing     : %s%s", args.pricing_model, " (entries need legacy+smile consensus)" if args.model_consensus else "")
     logger.info("Sides       : %s", ",".join(sides))
+    logger.info("Min entry   : %.0fh to resolution", args.min_entry_hours)
     logger.info("Exit rule   : %s", args.exit_rule)
     logger.info("Starting NAV: $%.2f", args.starting_nav)
     logger.info("State dir   : %s", state_dir)

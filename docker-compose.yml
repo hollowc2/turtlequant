@@ -42,6 +42,15 @@ services:
       DISCORD_TRADES: "${DISCORD_TRADES:-all}"
       DISCORD_CHART_INTERVAL: "${DISCORD_CHART_INTERVAL:-1h}"
       MAX_ASSET_DELTA_PCT: "0.20"
+      # The legacy model prices <3-day barrier markets 5-7pp above the market
+      # mid (marks 2026-09-25/26), so enter nothing resolving within a week.
+      # Those markets are still marked for scripts/evaluate_models.py.
+      MIN_ENTRY_HOURS: "168"
+      # Enter only where the smile model also sees the edge, until
+      # scripts/evaluate_models.py can say which model to trust.
+      MODEL_CONSENSUS: "true"
+      # Hold to resolution unless the bid, net of fee, beats the model.
+      EXIT_RULE: "ev"
     healthcheck:
       test:
         [

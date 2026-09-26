@@ -111,6 +111,13 @@ class TraderConfig:
     min_entry_price: float = 0.02  # skip near-certain markets on either side
     max_entry_price: float = 0.98
     reentry_cooldown_secs: float = 2 * 3600
+    # No new entries in markets resolving sooner than this (0 = only the
+    # scanner's floor). Short-dated markets are still priced and marked.
+    min_entry_hours: float = 0.0
+    # Enter only when the legacy and smile models both clear the threshold;
+    # the entry is then priced and sized on the lower of the two. Exits
+    # still use the active pricing model.
+    model_consensus: bool = False
     # "legacy": N(d2)/reflection at the strike's IV, spot with a 5% drift.
     # "smile": Deribit forward, zero drift, plus the smile's -vega*dsigma/dK term.
     pricing_model: str = "legacy"
@@ -764,6 +771,9 @@ class Trader:
             return None
         if not self.check_entry_gate(market_data_at):
             return None
+        if market.hours_to_resolution < cfg.min_entry_hours:
+            _inc(stats, "tenor_skipped")
+            return None
         # Edges on YES and NO have opposite signs, so at most one side clears.
         side = max(
             (side_quote(market, o, pricing.prob) for o in cfg.sides if o == "YES" or market.no_token_id),
@@ -773,6 +783,16 @@ class Trader:
         mid_edge = model_prob - mid_price
         if mid_edge < cfg.entry_threshold:
             return None
+        if cfg.model_consensus:
+            if pricing.smile_prob is None:
+                _inc(stats, "consensus_blocked")
+                return None
+            model_prob = min(side_prob(side.outcome, p) for p in (pricing.legacy_prob, pricing.smile_prob))
+            mid_edge = model_prob - mid_price
+            if mid_edge < cfg.entry_threshold:
+                _inc(stats, "consensus_blocked")
+                return None
+            side = replace(side, prob=model_prob)
         _inc(stats, "mid_edge_candidates")
         if side.outcome == "NO":
             _inc(stats, "no_side_candidates")
@@ -821,6 +841,7 @@ class Trader:
                 # token's terms; model_prob_legacy/_smile are always P(YES).
                 "model_prob": model_prob,
                 "pricing_model": cfg.pricing_model,
+                "model_consensus": cfg.model_consensus,
                 "model_prob_legacy": pricing.legacy_prob,
                 "model_prob_smile": pricing.smile_prob,
                 "forward": pricing.forward,

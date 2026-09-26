@@ -34,6 +34,8 @@ Gamma API → Scanner → Parser → Probability Engine → Execution → Positi
 Every 60 seconds, the scanner reads Polymarket's "Crypto Prices" events and skips "Up or Down" events. That is about 1,400 open markets in two requests. It keeps markets that meet all of these:
 
 - More than 4 hours to expiry
+
+Entries have a separate floor, `--min-entry-hours`. Compose sets it to 168 (one week), because the legacy model overprices short-dated barrier markets. Markets under the floor are still priced and marked for `evaluate_models.py`.
 - Over $5k of liquidity
 - A bid-ask spread of 3¢ or less
 
@@ -99,6 +101,8 @@ The bot enters when the edge clears the threshold after crossing the ask. It siz
 
 **NO side (`--sides yes,no`, off by default):** When the model is below the market, the bot buys the NO token. It prices NO as `1 − P(YES)` against NO's own order book. Positions, fees, exits and reports are all tracked in the held token's terms.
 
+**Model consensus (`--model-consensus`, the Compose setting):** An entry needs both the legacy and the smile model to clear the entry threshold. It is then priced and sized on the lower of the two probabilities. Markets without a Deribit smile get no entries. Exits still use `--pricing-model`. The gate stays on until `evaluate_models.py` shows which model to trust.
+
 Every flag can also be set with an upper-case environment variable of the same name, such as `MAX_PER_EXPIRY_PCT`. To list them all:
 ```bash
 python scripts/turtlequant_bot.py --help
@@ -112,7 +116,7 @@ Positions are saved to JSON and survive restarts. By default, a position closes 
 - **Time cleanup:** 6h or less remain (`--cleanup-hours`) and the edge is 5% or less (`--cleanup-edge`).
 - **Resolved:** paper and shadow positions settle at the market's payout.
 
-**EV exit (`--exit-rule ev`):** replaces the first three rules. The bot sells only when the bid, after the taker fee, beats the model value by `--exit-margin` (default 1pp). Otherwise it holds to resolution. It also holds whenever vol comes from anything other than live Deribit IV.
+**EV exit (`--exit-rule ev`, the Compose setting):** replaces the first three rules. The bot sells only when the bid, after the taker fee, beats the model value by `--exit-margin` (default 1pp). Otherwise it holds to resolution. It also holds whenever vol comes from anything other than live Deribit IV.
 
 `scripts/exit_counterfactual.py` compares each past exit with what holding would have paid.
 
