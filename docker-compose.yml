@@ -41,6 +41,7 @@ services:
       # books and fees. They are passed by docker-compose.live.yml alone.
       DISCORD_TRADES: "${DISCORD_TRADES:-all}"
       DISCORD_CHART_INTERVAL: "${DISCORD_CHART_INTERVAL:-1h}"
+      MAX_ASSET_DELTA_PCT: "0.20"
     healthcheck:
       test:
         [
