@@ -2,159 +2,202 @@
 
 # TurtleQuant
 
-![TurtleQuant](data/images/turtlequant.png)
+TurtleQuant trades crypto price markets on [Polymarket](https://polymarket.com) by pricing them as options.
 
-A probabilistic trading system for cryptocurrency prediction markets on [Polymarket](https://polymarket.com). **TurtleQuant** continuously scans markets, prices them using options math, and trades the edge between model probability and market price.
+A market like _"Will BTC be above $75,000 on March 30?"_ is a digital option. TurtleQuant prices it with Black-Scholes and Deribit implied volatility. When the model's probability beats the executable market price by enough, it trades the difference.
 
----
-
-## What It Does
-
-Polymarket offers binary outcome markets like _"Will BTC be above $75,000 by March 30?"_ These are structurally equivalent to digital options. TurtleQuant prices them using standard options theory and trades when the market is mispriced.
-
-**TurtleQuant** — BTC/ETH price-threshold markets, from daily expiries out to year-end ("above X on <date>", "reach / dip to X in <month>", "… by December 31"). Black-Scholes digital and barrier pricing with Deribit implied volatility.
-
-It runs as a Docker service in shadow mode by default: orders stay simulated, but each signal records the executable bid/ask snapshot used for fill modeling.
-
-Phase 1 shadow-soak monitoring expects exporter metrics for quote/source quality:
-`turtlequant_ask_erased_edge_ratio`, `turtlequant_synthetic_book_ratio`,
-`turtlequant_parser_hit_rate`, `turtlequant_realized_vol_fallback_ratio`,
-`turtlequant_shadow_quotes_total`, `turtlequant_order_book_source_total`, and
-`turtlequant_vol_source_total`.
-
----
-
-## How It Works
-
-### 1. Market Discovery
-Every scan reads the Gamma API's `/events` tagged "Crypto Prices" (tag 1312), excluding "Up or Down" events (tag 102127). That is about 150 events and 1,400 open markets in two requests. Markets are then filtered by time to expiry (>4h), asset, liquidity (>$5k) and an absolute bid-ask spread (≤3¢, `--max-spread`). Each scan's `scan_summary` records how many markets every filter rejected (`scanner_funnel`). Which expiries exist depends on what Polymarket lists: daily and weekly series are always open, and monthly and year-end series appear as they are created.
-
-### 2. Market Parsing
-Classifies each question using regex into a structured contract: `(asset, strike, expiry, type)`.
-
-| Type | Example Question |
-|------|-----------------|
-| European | "Will BTC be above $75k by March 30?" |
-| Barrier | "Will BTC reach $100k before March?" |
-| Barrier Down | "Will ETH fall to $2,000 before expiry?" |
-
-### 3. Volatility Surface
-Fetches mark IV from Deribit, interpolates across moneyness (log-linear) and expiry (√T-linear). Falls back to 30-day realized vol from Binance if Deribit has no matching instruments.
-
-### 4. Pricing
-
-**TurtleQuant — Black-Scholes:**
-```
-d₂ = (ln(S₀/K) + (r − σ²/2)T) / (σ√T)
-P(digital) = N(d₂)
-P(barrier) = N(d₊) + (K/S₀)^(2μ/σ²) × N(d₋)   [reflection principle]
-```
-
-**Smile model (`--pricing-model smile`, off by default):** the forward is Deribit's futures price for the expiry, with zero drift. IV is looked up on the forward-moneyness smile (sticky strike). Digitals add the skew term the flat formula omits:
-```
-P(S_T > K) = N(d₂) − vega · ∂σ/∂K        vega = F·φ(d₁)·√T
-```
-Touch markets use the flat reflection price with the forward's drift, scaled by the same skew correction of the matching terminal probability (an approximation). Every `signal_evaluation` logs both models (`model_prob_legacy`, `model_prob_smile`), whichever one trades. `--max-iv-age-secs N` (off by default) ignores Deribit IV older than N seconds and blocks entries until it refreshes. In smile mode, markets without a smile or forward are not entered.
-
-### 5. Edge Detection & Sizing
-```
-edge = model_probability − executable_yes_price
-```
-Enter when `edge > threshold` after crossing the executable ask. Size via fractional Kelly (25% default in code and compose) capped by per-market, per-expiry, and total NAV limits.
-
-| Entry edge | ≥5% (`--entry-threshold`) |
-| Per-market NAV | 10% (`--max-per-market-pct`) |
-| Per-expiry NAV | 15% (`--max-per-expiry-pct`) |
-| Total exposure | 40% (`--max-total-exposure-pct`) |
-| Entry price band | 0.02–0.98 (`--min/max-entry-price`) |
-| Re-entry cooldown | 2h (`--reentry-cooldown-hours`) |
-| Scan interval | 60s |
-
-NO side (`--sides yes,no`, off by default): when the model is below the market, the bot buys the NO token, using its own CLOB book (which mirrors YES, with NO bid = 1 − YES ask) and P(NO) = 1 − P(YES). Positions, exits, settlement, fees, the intent journal, delta, the exporter (`outcome` label) and the performance page (Side column) all work in the held token's terms.
-
-Portfolio caps (all off by default): `--max-asset-exposure-pct` limits gross USD per asset. `--max-asset-delta-pct` limits net dollar delta per asset, Σ shares·∂p/∂S·S from a ±1% spot bump under the active pricing model. Divide dollar delta by 100 to get the P&L per 1% spot move. Short-dated near-the-money digitals carry a lot of it: on 2026-09-25, $53 of BTC positions held −$1,765. `--kelly-shrink w` sizes on `w·model + (1−w)·mid` while still gating on the raw model's edge. Each scan persists per-asset gross and delta to `turtlequant-risk.json`, exported as `turtlequant_asset_delta_usd{asset}`, so you can choose cap values from real numbers before turning them on.
-
-Every knob also reads an env var of the same name in upper case (e.g. `MAX_PER_EXPIRY_PCT`). `python scripts/turtlequant_bot.py --help` lists them all.
-
-### 6. Position Management & Exit
-State persists to JSON across restarts. Positions close on three triggers:
-- **Edge reversed** — model prob < market price
-- **Edge decayed**: current edge drops below 40% of entry edge (`--edge-decay-ratio`)
-- **Time cleanup**: <= 6h remaining (`--cleanup-hours`) and edge <= 5% (`--cleanup-edge`)
-- **Resolved**: paper/shadow positions settle at the Gamma payout once the market resolves
-
-`--exit-rule ev` (off by default) replaces the first three triggers. It sells only when the bid, net of the taker fee, beats the model's value by `--exit-margin` (default 1pp); otherwise it holds to resolution. It also holds while the vol source is degraded (anything but live Deribit IV). `scripts/exit_counterfactual.py` compares every past exit with what holding to resolution would have paid.
-
-The bot also persists the last observed YES quote per open position so exits do not fall back to entry price if a market drops out of the active scan set.
-
-### 7. Execution
-TurtleQuant supports four runtime modes:
-
-| Mode | Behavior |
-|------|----------|
-| `--dry-run` | Evaluates entries and exits against the current state and logs `[DRY_RUN]` would-buy / would-exit lines. Writes nothing: no position, risk, history or corpus files. |
-| `--paper` | Simulated fills using executable bid/ask depth. |
-| `--shadow` | Same simulated fills, plus a `shadow_quote` diagnostic for every candidate, which feeds the shadow-soak metrics and alerts. This is the deployed mode. |
-| `--live --i-accept-live-risk` | **Currently hard-disabled in code** pending supervised broker acceptance. When enabled: FAK market orders through `py_clob_client_v2`, with actual/partial fills journaled and reconciled. |
-
-Paper and shadow mode read only public CLOB endpoints and never load a wallet key. Live mode expects `POLYMARKET_PRIVATE_KEY` plus API credentials (`POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, `POLYMARKET_API_PASSPHRASE`) in the environment. Optional `POLYMARKET_SIGNATURE_TYPE` and `POLYMARKET_FUNDER` are passed through for proxy-wallet setups.
-
----
-
-## Architecture
-
-```
-Gamma API → MarketScanner → MarketParser → ProbabilityEngine → ExecutionClient → PositionManager
-                                              ↑           ↑
-                                         VolSurface
-                                          (Deribit)
-                                              ↑
-                                         Binance OHLCV
-```
-
-`src/turtlequant/trader.py` runs one reprice pass (settle, exit) and one scan pass (update held positions, enter) with every dependency injected. `scripts/turtlequant_bot.py` only parses arguments, wires components and calls the two passes on a timer. `tests/test_trader.py` drives the loop against a fake scanner, CLOB and spot source.
-
----
-
-## Data Sources
-
-| Source | Use |
-|--------|-----|
-| Polymarket Gamma API | Market prices & discovery |
-| Deribit Options API | Implied volatility surface |
-| Binance (OKX on geo-block) | Spot price and realized vol |
-
-Spot and realized vol come from Binance. Only a 451 geo-block response falls back, and only to OKX. `DATA_SOURCE=okx|bybit|gateio` pins a single exchange instead.
+It covers BTC and ETH threshold markets, from daily expiries out to year-end. That includes "above X on date", "reach / dip to X in month" and "by December 31" markets. By default it runs in Docker in **shadow mode**, where fills are simulated against real order books.
 
 ---
 
 ## Quickstart
 
 ```bash
-./scripts/setup-vps.sh        # create /opt/turtlequant/{state,data} + monitoring_net
-cp .env.example .env          # configure secrets on the VPS (never commit)
-docker compose up -d          # runs TurtleQuant in shadow mode (--shadow)
+./scripts/setup-vps.sh     # create /opt/turtlequant/{state,data} and monitoring_net
+cp .env.example .env       # add secrets (never commit)
+docker compose up -d       # start in shadow mode
 ```
 
-Runtime state is outside this repo:
+For secrets, monitoring, alerts, healthchecks and rollback, see [docs/OPS.md](docs/OPS.md).
 
-| Path | Meaning |
+---
+
+## How It Works
+
+```
+Gamma API → Scanner → Parser → Probability Engine → Execution → Position Manager
+                                      ↑
+                          Vol Surface (Deribit, Binance fallback)
+```
+
+### 1. Discover markets
+Every 60 seconds, the scanner reads Polymarket's "Crypto Prices" events and skips "Up or Down" events. That is about 1,400 open markets in two requests. It keeps markets that meet all of these:
+
+- More than 4 hours to expiry
+- Over $5k of liquidity
+- A bid-ask spread of 3¢ or less
+
+The `scanner_funnel` field in each scan's log shows how many markets each filter removed.
+
+### 2. Parse questions
+The parser turns each market's question into a contract: `(asset, strike, expiry, type)`.
+
+| Type | Example |
 |------|---------|
-| `/opt/turtlequant-app` | Source and compose files (standalone checkout of this repo) |
-| `/opt/turtlequant/state` | Active shadow-mode positions, history, and bot log |
-| `/opt/turtlequant/state/live-state` | Separate live-mode state when `docker-compose.live.yml` is used |
-| `/opt/polymarket/state` | Other `crypto_up_or_down` bot state, not TurtleQuant runtime state |
+| European | "Will BTC be above $75k on March 30?" |
+| Barrier up | "Will BTC reach $100k before March?" |
+| Barrier down | "Will ETH fall to $2,000 before expiry?" |
 
-State files persist in `/opt/turtlequant/state`. `turtlequant-history.jsonl` is the trade ledger (`open`, `close`, `order`, `failed_order` events with fills, fees and partial-fill fields). Per-scan diagnostics (`scan_summary`, `signal_evaluation` with bid/ask depth, `shadow_quote`) go to the size-rotated `turtlequant-diagnostics.jsonl`. See [docs/OPS.md](docs/OPS.md#state-files-and-growth).
+### 3. Build the vol surface
+The bot takes mark IV from Deribit and interpolates it across moneyness (log-linear) and expiry (√T-linear). If Deribit has no matching instruments, it falls back to 30-day realized vol from Binance.
 
-See [docs/OPS.md](docs/OPS.md) for secrets, Grafana/Prometheus wiring, alerts, healthchecks, and rollback.
+### 4. Price
+**Default (`legacy`) model:**
+```
+d₂ = (ln(S₀/K) + (r − σ²/2)T) / (σ√T)
+P(digital) = N(d₂)
+P(barrier) = N(d₊) + (K/S₀)^(2μ/σ²) · N(d₋)      [reflection principle]
+```
 
-For Phase 1 promotion, run a shadow soak first and review the Grafana `Phase 1 Shadow Soak` row plus Prometheus alerts before enabling live execution.
+**Smile model (`--pricing-model smile`):**
+- Uses Deribit's futures price as a zero-drift forward.
+- Reads IV from the sticky-strike smile.
+- Adds a skew correction to digitals:
+  ```
+  P(S_T > K) = N(d₂) − vega · ∂σ/∂K        vega = F·φ(d₁)·√T
+  ```
+- Prices touch markets with the reflection formula, then applies the same skew correction as an approximation.
+- Skips markets that have no smile or no forward.
+
+Every `signal_evaluation` log line records both models' prices, whichever one is trading.
+
+`--max-iv-age-secs N` blocks new entries when Deribit IV is more than N seconds old.
+
+### 5. Enter and size
+```
+edge = model_probability − executable_price
+```
+The bot enters when the edge clears the threshold after crossing the ask. It sizes with fractional Kelly, capped by the NAV limits below.
+
+| Setting | Default | Flag |
+|---------|---------|------|
+| Entry edge | 5% | `--entry-threshold` |
+| Kelly fraction | 25% | `--kelly-fraction` |
+| Per-market cap | 10% of NAV | `--max-per-market-pct` |
+| Per-expiry cap | 15% of NAV | `--max-per-expiry-pct` |
+| Total exposure | 40% of NAV | `--max-total-exposure-pct` |
+| Net delta per asset | off in code, **20% in Compose** | `--max-asset-delta-pct` |
+| Gross exposure per asset | off | `--max-asset-exposure-pct` |
+| Entry price band | 0.02–0.98 | `--min-entry-price`, `--max-entry-price` |
+| Re-entry cooldown | 2h | `--reentry-cooldown-hours` |
+| Kelly shrink toward mid | 1.0 (raw model) | `--kelly-shrink` |
+
+**How the delta cap is measured:**
+- Net dollar delta is `Σ shares · ∂p/∂S · S`, found by bumping spot ±1% under the active model. Divide it by 100 to get P&L per 1% spot move.
+- Near-the-money, short-dated digitals carry large delta. On 2026-09-25, $53 of BTC positions held −$1,765 of delta.
+- Each scan writes per-asset gross and delta to `turtlequant-risk.json`, exported as `turtlequant_asset_delta_usd{asset}`.
+
+**NO side (`--sides yes,no`, off by default):** When the model is below the market, the bot buys the NO token. It prices NO as `1 − P(YES)` against NO's own order book. Positions, fees, exits and reports are all tracked in the held token's terms.
+
+Every flag can also be set with an upper-case environment variable of the same name, such as `MAX_PER_EXPIRY_PCT`. To list them all:
+```bash
+python scripts/turtlequant_bot.py --help
+```
+
+### 6. Exit
+Positions are saved to JSON and survive restarts. By default, a position closes when any of these happens:
+
+- **Edge reversed:** the model probability drops below the market price.
+- **Edge decayed:** the edge falls below 40% of the entry edge (`--edge-decay-ratio`).
+- **Time cleanup:** 6h or less remain (`--cleanup-hours`) and the edge is 5% or less (`--cleanup-edge`).
+- **Resolved:** paper and shadow positions settle at the market's payout.
+
+**EV exit (`--exit-rule ev`):** replaces the first three rules. The bot sells only when the bid, after the taker fee, beats the model value by `--exit-margin` (default 1pp). Otherwise it holds to resolution. It also holds whenever vol comes from anything other than live Deribit IV.
+
+`scripts/exit_counterfactual.py` compares each past exit with what holding would have paid.
+
+If a held market drops out of the scan, the bot keeps using the last quote it saw for exit decisions instead of the entry price.
+
+### 7. Execute
+
+| Mode | Behavior |
+|------|----------|
+| `--dry-run` | Logs what it would buy or exit. Writes no files. |
+| `--paper` | Simulates fills against real bid/ask depth. |
+| `--shadow` | Paper mode plus a `shadow_quote` record for every candidate. **This is the deployed mode.** |
+| `--live --i-accept-live-risk` | **Disabled in code** until live order handling is tested under supervision. Once enabled, it sends fill-and-kill (FAK) orders through `py_clob_client_v2` and records and reconciles actual and partial fills. |
+
+Paper and shadow modes use only public endpoints and never load a wallet key.
+
+Live mode needs these environment variables:
+- `POLYMARKET_PRIVATE_KEY`
+- `POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, `POLYMARKET_API_PASSPHRASE`
+- `POLYMARKET_SIGNATURE_TYPE` and `POLYMARKET_FUNDER` (optional, for proxy wallets)
+
+---
+
+## Data Sources
+
+| Source | Used for |
+|--------|----------|
+| Polymarket Gamma API and CLOB | Market discovery, prices and order books |
+| Deribit | Implied volatility and futures forwards |
+| Binance | Spot price and realized vol |
+
+If Binance returns a geo-block (HTTP 451), the bot falls back to OKX. To use a single exchange instead, set `DATA_SOURCE=okx|bybit|gateio`.
+
+---
+
+## State and Logs
+
+Runtime state lives outside the repo:
+
+| Path | Contents |
+|------|----------|
+| `/opt/turtlequant-app` | Checkout of this repo, including the Compose files |
+| `/opt/turtlequant/state` | Shadow-mode positions, history and the bot log |
+| `/opt/turtlequant/state/live-state` | Live-mode state, used with `docker-compose.live.yml` |
+
+Key files:
+- **`turtlequant-history.jsonl`** is the trade ledger: `open`, `close`, `order` and `failed_order` events with fills and fees.
+- **`turtlequant-diagnostics.jsonl`** holds per-scan diagnostics: `scan_summary`, `signal_evaluation` and `shadow_quote`. It rotates when it reaches a size limit.
+
+See [docs/OPS.md](docs/OPS.md#state-files-and-growth) for file growth and retention.
+
+---
+
+## Architecture
+
+`src/turtlequant/trader.py` runs two passes on each tick:
+1. **Reprice:** settle resolved positions and apply exit rules.
+2. **Scan:** update held positions and make new entries.
+
+All of its dependencies are injected. `scripts/turtlequant_bot.py` only parses arguments, wires up components and runs the loop. `tests/test_trader.py` tests the loop against a fake scanner, CLOB and spot feed.
+
+---
+
+## Monitoring
+
+The Grafana exporter publishes shadow-soak quality metrics:
+
+| Metric |
+|--------|
+| `turtlequant_ask_erased_edge_ratio` |
+| `turtlequant_synthetic_book_ratio` |
+| `turtlequant_parser_hit_rate` |
+| `turtlequant_realized_vol_fallback_ratio` |
+| `turtlequant_shadow_quotes_total` |
+| `turtlequant_order_book_source_total` |
+| `turtlequant_vol_source_total` |
+
+Before enabling live trading, run a shadow soak. Then review the **Phase 1 Shadow Soak** row in Grafana and the Prometheus alerts.
 
 ---
 
 ## Calibration
 
-Backtested on 5 years of BTC and ETH data. Brier loss: **0.178–0.199** (lower is better; 0.25 = random).
+A 5-year backtest on BTC and ETH gives a Brier score of **0.178–0.199**. Lower is better, and 0.25 is a coin flip.
 
-Caveat: `scripts/evaluate_models.py` scores the legacy and smile models against real resolved markets and prices, from snapshots the bot takes every 15 minutes. `scripts/calibrate_turtlequant.py` prices with 30-day realized vol, while the live bot prices with Deribit implied vol. The score therefore describes a related model, not the one that trades, and it does not test whether "model − market ≥ threshold" trades win. See review item 7 in [docs/REVIEW-2026-09-24.md](docs/REVIEW-2026-09-24.md).
+**Caveat:** the backtest (`scripts/calibrate_turtlequant.py`) uses 30-day realized vol, but the live bot uses Deribit implied vol. The score therefore describes a related model, not the one that trades. It also doesn't show whether trades that pass the edge threshold actually win.
+
+`scripts/evaluate_models.py` gives a closer test. It scores both models against real resolved markets, using quote snapshots the bot takes every 15 minutes. See review item 7 in [docs/REVIEW-2026-09-24.md](docs/REVIEW-2026-09-24.md).
