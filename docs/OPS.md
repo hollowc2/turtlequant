@@ -88,8 +88,8 @@ docker compose -f /opt/monitoring/docker-compose.yml exec prometheus \
 | Exporter down | `exporter_scrape_success == 0` for 5m |
 | Exporter restarted | The exporter process restarted in the last 15m |
 | Failed orders | More than 3 failed orders in 15m |
-| Entries halted | `entries_halted == 1` for 15m. The `reason` label is one of `broker_failures`, `data_errors`, `stale_data`, `drawdown`, `daily_loss` or `halt_file` |
-| NAV drawdown | Drawdown above 15% for 15m |
+| Entries halted | `entries_halted == 1` for 15m. The `reason` label is one of `broker_failures`, `data_errors`, `stale_data`, `drawdown`, `daily_loss` or `halt_file`. Drawdown gating uses marked equity (realized NAV plus open positions at the executable bid) |
+| NAV drawdown | Closed-trade/realized equity-curve drawdown above 15% for 15m; this intentionally excludes open positions |
 
 **Shadow-soak quality:**
 
@@ -148,7 +148,7 @@ Watch the **Phase 1 Shadow Soak** row in Grafana:
 These checks block **new entries** but never exits. They run in this order:
 
 1. A `HALT` file in the state directory
-2. Drawdown of 15% from the high-water mark
+2. Marked-equity drawdown of 15% from the high-water mark. After tripping, it reopens only below 14% drawdown to prevent threshold flapping
 3. The daily loss limit
 4. The broker breaker
 5. The data gate
@@ -170,6 +170,7 @@ These checks block **new entries** but never exits. They run in this order:
 - Written as an `entry_gate` history event
 - Saved in `turtlequant-risk.json` (`entry_halt`)
 - Exported as `turtlequant_entries_halted{reason}`, which drives the Entries halted alert and the dashboard's **Entry Gate** panel
+- The exact gate inputs are exported as `turtlequant_marked_equity_usd`, `turtlequant_risk_high_water_usd`, and `turtlequant_risk_drawdown_pct`
 
 **Fail closed.** If the bot can't write position, risk or history state, it stops.
 

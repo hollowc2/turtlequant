@@ -47,7 +47,7 @@ groups:
           severity: warning
         annotations:
           summary: "TurtleQuant entries halted ({{ $labels.reason }})"
-          description: "The entry gate has blocked new positions for >15m. Exits still run. See halt reason in turtlequant-risk.json / the bot log ([ENTRY_HALTED])."
+          description: "The marked-equity entry gate has blocked new positions for >15m. Exits still run. Inspect turtlequant_risk_drawdown_pct and the bot log ([ENTRY_HALTED])."
 
       - alert: TurtleQuantNavDrawdown
         expr: turtlequant_current_drawdown_pct{strategy="turtlequant"} > 0.15
@@ -55,8 +55,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "TurtleQuant NAV drawdown >15%"
-          description: "Realized equity curve drawdown exceeded 15% from peak."
+          summary: "TurtleQuant realized NAV drawdown >15%"
+          description: "The closed-trade equity curve exceeded 15% drawdown from its realized peak. This is separate from the mark-to-bid entry gate."
 
       - alert: TurtleQuantExporterRestarted
         expr: changes(process_start_time_seconds{job="turtlequant"}[15m]) > 0

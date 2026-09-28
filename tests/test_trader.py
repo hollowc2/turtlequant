@@ -214,6 +214,7 @@ def test_resolved_position_settles_at_payout(tmp_path):
     assert not trader.positions.has_position("m-1")
     close = [e for e in events(tmp_path) if e["event"] == "close"][0]
     assert close["reason"] == "resolved" and close["pnl"] == pytest.approx((1.0 - 0.40) * 100)
+    assert trader.risk.high_water == pytest.approx(1060.0)
 
 
 def test_unresolved_expired_position_waits(tmp_path):

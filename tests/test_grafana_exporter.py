@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 _EXPORTER_PATH = Path(__file__).resolve().parents[1] / "scripts" / "grafana_exporter.py"
 _SPEC = importlib.util.spec_from_file_location("grafana_exporter", _EXPORTER_PATH)
@@ -363,6 +365,22 @@ def test_asset_delta_gauge_reads_the_risk_file(tmp_path):
     families = {family.name: family for family in TurtleQuantCollector(str(tmp_path)).collect()}
 
     assert _sample_value(families["turtlequant_asset_delta_usd"], asset="btc") == -85.5
+
+
+def test_risk_drawdown_metrics_match_the_entry_gate_mark(tmp_path):
+    (tmp_path / "turtlequant-positions.json").write_text(
+        '{"nav":1000,"total_pnl":0,"positions":['
+        '{"market_id":"m","asset":"btc","option_type":"european",'
+        '"size_usd":40,"entry_price":0.4,"token_size":100,"last_bid":0.3,'
+        '"opened_at":"2026-09-01T00:00:00+00:00"}]}'
+    )
+    (tmp_path / "turtlequant-risk.json").write_text('{"high_water":1050}')
+
+    families = {family.name: family for family in TurtleQuantCollector(str(tmp_path)).collect()}
+
+    assert _sample_value(families["turtlequant_marked_equity_usd"]) == 990.0
+    assert _sample_value(families["turtlequant_risk_high_water_usd"]) == 1050.0
+    assert _sample_value(families["turtlequant_risk_drawdown_pct"]) == pytest.approx(60.0 / 1050.0)
 
 
 def test_position_gauges_carry_the_outcome(tmp_path):

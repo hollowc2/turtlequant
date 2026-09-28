@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from turtlequant.risk_controls import RiskControls
+from turtlequant.risk_controls import DRAWDOWN_REASON, RiskControls
 
 
 def test_entry_gate_persists_failure_circuit_breaker(tmp_path):
@@ -80,6 +80,29 @@ def test_entry_gate_honors_halt_and_drawdown(tmp_path):
 
     (tmp_path / "HALT").touch()
     assert controls.entries_allowed(120.0, market_data_at=datetime.now(UTC)) == (False, "HALT file present")
+
+
+def test_drawdown_gate_requires_recovery_hysteresis(tmp_path):
+    controls = RiskControls.load(tmp_path, 100.0)
+
+    assert controls.entries_allowed(84.0, market_data_at=datetime.now(UTC)) == (False, DRAWDOWN_REASON)
+    controls.record_entry_gate(DRAWDOWN_REASON)
+
+    # A small move back across 15% must not flap the gate open.
+    assert controls.entries_allowed(85.5, market_data_at=datetime.now(UTC)) == (False, DRAWDOWN_REASON)
+    assert controls.entries_allowed(86.1, market_data_at=datetime.now(UTC)) == (True, "")
+
+
+def test_record_equity_persists_new_high_without_resetting_breaker(tmp_path):
+    controls = RiskControls.load(tmp_path, 100.0)
+    controls.record_failure("broker timeout")
+
+    assert controls.record_equity(125.0)
+    assert not controls.record_equity(120.0)
+
+    restored = RiskControls.load(tmp_path, 90.0)
+    assert restored.high_water == 125.0
+    assert restored.consecutive_failures == 1
 
 
 def test_entry_gate_persists_daily_loss_and_rejects_stale_data(tmp_path):

@@ -586,6 +586,21 @@ class TurtleQuantCollector:
             "Open unrealized P&L marked to last executable bid by asset",
             labels=["strategy", "asset"],
         )
+        marked_equity_g = GaugeMetricFamily(
+            "turtlequant_marked_equity_usd",
+            "Bookkeeping NAV plus open P&L marked exactly as the entry drawdown gate",
+            labels=["strategy"],
+        )
+        risk_high_water_g = GaugeMetricFamily(
+            "turtlequant_risk_high_water_usd",
+            "Persisted marked-equity high-water mark used by the entry drawdown gate",
+            labels=["strategy"],
+        )
+        risk_drawdown_pct_g = GaugeMetricFamily(
+            "turtlequant_risk_drawdown_pct",
+            "Current marked-equity drawdown from the entry gate high-water mark as a fraction",
+            labels=["strategy"],
+        )
         avg_entry_slippage_g = GaugeMetricFamily(
             "turtlequant_avg_entry_slippage",
             "Average open-entry slippage versus signal mid price",
@@ -871,6 +886,7 @@ class TurtleQuantCollector:
         history_groups = self._get_history_groups(hist_path)
         nav: float | None = None
         total_pnl: float | None = None
+        marked_equity: float | None = None
         positions: list[dict] = []
 
         # ---- Positions file ----
@@ -891,6 +907,7 @@ class TurtleQuantCollector:
             by_asset: dict[str, float] = {}
             unrealized_by_asset: dict[str, float] = {}
             unrealized_total = 0.0
+            marked_pnl_total = 0.0
             for pos in positions:
                 asset = str(pos.get("asset", "unknown"))
                 by_asset[asset] = by_asset.get(asset, 0.0) + _safe_float(pos.get("size_usd"))
@@ -899,8 +916,13 @@ class TurtleQuantCollector:
                     entry = _safe_float(pos.get("entry_price"))
                     size_usd = _safe_float(pos.get("size_usd"))
                     tokens = size_usd / entry if entry > 0 else 0.0
-                mark = _safe_float(pos.get("last_bid")) or _safe_float(pos.get("last_yes_price"))
                 entry = _safe_float(pos.get("entry_price"))
+                mark = (
+                    _safe_float(pos.get("resolution_price"))
+                    if pos.get("status") == "pending_redemption" and pos.get("resolution_price") is not None
+                    else _safe_float(pos.get("last_bid")) or _safe_float(pos.get("last_yes_price")) or entry
+                )
+                marked_pnl_total += (mark - entry) * tokens
                 # Discount the bid mark by the taker fee a sale would pay (r * p(1-p)).
                 exit_fee = DEFAULT_CRYPTO_FEE.fee(tokens, mark) if 0.0 < mark <= 1.0 else 0.0
                 unrealized = (mark - entry) * tokens - exit_fee
@@ -911,6 +933,9 @@ class TurtleQuantCollector:
             open_unrealized_pnl_g.add_metric([strategy], unrealized_total)
             for asset, value in unrealized_by_asset.items():
                 open_unrealized_pnl_by_asset_g.add_metric([strategy, asset], value)
+            if nav is not None:
+                marked_equity = nav + marked_pnl_total
+                marked_equity_g.add_metric([strategy], marked_equity)
             largest = max((_safe_float(p.get("size_usd")) for p in positions), default=0.0)
             largest_position_pct_nav_g.add_metric([strategy], largest / nav if nav and nav > 0 else 0.0)
 
@@ -944,6 +969,12 @@ class TurtleQuantCollector:
         risk_path = os.path.join(self.state_dir, RISK_FILE)
         risk = _load_json(risk_path) if os.path.exists(risk_path) else None
         if isinstance(risk, dict):
+            high_water = _safe_float(risk.get("high_water"))
+            risk_high_water_g.add_metric([strategy], high_water)
+            if marked_equity is not None and high_water > 0:
+                risk_drawdown_pct_g.add_metric(
+                    [strategy], max(0.0, (high_water - marked_equity) / high_water)
+                )
             reason = str(risk.get("entry_halt") or "")
             entries_halted_g.add_metric([strategy, halt_category(reason)], 1.0 if reason else 0.0)
             since = _parse_ts(risk.get("entry_halt_since"))
@@ -1095,6 +1126,9 @@ class TurtleQuantCollector:
         yield exposure_by_asset_g
         yield open_unrealized_pnl_g
         yield open_unrealized_pnl_by_asset_g
+        yield marked_equity_g
+        yield risk_high_water_g
+        yield risk_drawdown_pct_g
         yield avg_entry_slippage_g
         yield avg_fill_ratio_g
         yield failed_orders_g

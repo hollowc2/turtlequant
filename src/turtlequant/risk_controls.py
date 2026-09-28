@@ -14,6 +14,7 @@ Two independent breakers block new entries:
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -25,6 +26,13 @@ DEFAULT_MAX_BROKER_FAILURES = 3
 DEFAULT_BROKER_COOLDOWN_SECS = 30 * 60
 _DATA_ERROR_MIN = 3
 _DATA_ERROR_RATIO = 0.5
+MAX_DRAWDOWN_PCT = 0.15
+# Once the drawdown breaker trips, require a full percentage point of recovery
+# before reopening.  Without hysteresis, a quote moving around the 15% boundary
+# can alternate ENTRY_RESUMED/ENTRY_HALTED and admit a new position between the
+# two evaluations.
+DRAWDOWN_RECOVERY_PCT = 0.14
+DRAWDOWN_REASON = "15% drawdown"
 
 # Fields that are runtime configuration, not persisted state.
 _RUNTIME_FIELDS = ("state_dir", "persist", "max_broker_failures", "broker_cooldown_secs", "data_degraded")
@@ -104,8 +112,13 @@ class RiskControls:
         self._roll_day(now)
         if (self.state_dir / "HALT").exists():
             return False, "HALT file present"
-        if equity <= 0.85 * self.high_water:
-            return False, "15% drawdown"
+        drawdown_limit = (
+            DRAWDOWN_RECOVERY_PCT
+            if self.entry_halt == DRAWDOWN_REASON
+            else MAX_DRAWDOWN_PCT
+        )
+        if self.drawdown_pct(equity) >= drawdown_limit:
+            return False, DRAWDOWN_REASON
         if self.daily_realized_loss >= max_daily_loss:
             return False, "daily loss limit"
         if unreconciled_orders:
@@ -122,6 +135,22 @@ class RiskControls:
         ):
             return False, "stale market data"
         return True, ""
+
+    def drawdown_pct(self, equity: float) -> float:
+        """Current marked-equity drawdown from the persisted high-water mark."""
+        if self.high_water <= 0:
+            return 0.0
+        return max(0.0, (self.high_water - equity) / self.high_water)
+
+    def record_equity(self, equity: float) -> bool:
+        """Persist a new marked-equity high without changing breaker state."""
+        if not math.isfinite(equity) or equity <= 0:
+            raise ValueError("equity must be a positive finite number")
+        if equity <= self.high_water:
+            return False
+        self.high_water = equity
+        self.save()
+        return True
 
     def broker_halted(self, now: datetime | None = None) -> bool:
         """True while the broker breaker is tripped and its cooldown is running."""

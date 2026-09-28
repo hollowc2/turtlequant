@@ -249,8 +249,13 @@ class Trader:
 
     def check_entry_gate(self, market_data_at: datetime | None) -> bool:
         """Evaluate the entry gate; log and record only when its state changes."""
+        marked_equity = self.positions.marked_equity()
+        # Observe peaks on every gate evaluation, not only when an order fills.
+        # This keeps the persisted high-water mark faithful to the equity curve
+        # while leaving the broker breaker untouched.
+        self.risk.record_equity(marked_equity)
         allowed, reason = self.risk.entries_allowed(
-            self.positions.marked_equity(),
+            marked_equity,
             max_daily_loss=self.config.max_daily_loss,
             market_data_at=market_data_at,
             max_market_data_age_secs=self.config.max_market_data_age_secs,
@@ -473,6 +478,7 @@ class Trader:
         shares = pos.token_size
         closed, pnl = self.positions.settle_position(pos.market_id, resolved_price)
         self.risk.record_realized_pnl(pnl)
+        self.risk.record_equity(self.positions.marked_equity())
         self.record(
             {
                 "event": "close",
