@@ -178,8 +178,9 @@ def test_data_block_escapes_script_breakouts():
     assert "<script>alert" not in page
 
 
-def test_generator_end_to_end(tmp_path):
+def _load_generator():
     import importlib.util
+    import sys
     from pathlib import Path
 
     spec = importlib.util.spec_from_file_location(
@@ -187,7 +188,13 @@ def test_generator_end_to_end(tmp_path):
         Path(__file__).resolve().parents[1] / "scripts" / "generate_performance_page.py",
     )
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # dataclasses resolve their module through sys.modules
     spec.loader.exec_module(module)
+    return module
+
+
+def test_generator_end_to_end(tmp_path):
+    module = _load_generator()
 
     state_dir = tmp_path / "state"
     for event in _history():
@@ -203,6 +210,42 @@ def test_generator_end_to_end(tmp_path):
     assert "Shadow Trading" in page
     assert "+$35.00" in page
     assert "https://github.com/hollowc2/turtlequant" in page
+
+
+def test_generator_writes_a_page_per_archived_run(tmp_path):
+    module = _load_generator()
+    state_dir = tmp_path / "state"
+    old_run = state_dir / "archive" / "20260510T120000Z"
+    for event in _history():
+        append_history(old_run, event)
+    (old_run / "turtlequant-positions.json").write_text(json.dumps({"nav": 1035.0, "total_pnl": 35.0, "positions": []}))
+    (state_dir / "archive" / "notes").mkdir()  # not a timestamp: ignored
+    append_history(state_dir, _open("m-5", "2026-05-11T00:00:00+00:00"))
+    append_history(state_dir, _close("m-5", "2026-05-11T06:00:00+00:00", -4.0))
+    (state_dir / "turtlequant-positions.json").write_text(json.dumps({"nav": 996.0, "total_pnl": -4.0, "positions": []}))
+    site = tmp_path / "site"
+
+    assert module.main(["--state-dir", str(state_dir), "--output", str(site / "index.html")]) == 0
+
+    main_page = (site / "index.html").read_text()
+    archived = (site / "runs" / "20260510T120000Z" / "index.html").read_text()
+    chained = (site / "runs" / "all" / "index.html").read_text()
+    assert not (site / "runs" / "notes").exists()
+    # Main page stays on the current run and links to the others.
+    assert "1 closed trades" in main_page and "-$4.00" in main_page
+    assert 'href="runs/20260510T120000Z/"' in main_page and 'href="runs/all/"' in main_page
+    # The archived run keeps its own numbers and links back to the current run.
+    assert "Archived" in archived and "+$35.00" in archived and "4 closed trades" in archived
+    assert 'href="../../"' in archived and "Open When Archived" in archived
+    # All runs chained: 35 - 4 on the first run's $1,000.
+    assert "5 closed trades" in chained and "+$31.00" in chained
+    # Pages differ only in data; the CSP-pinned script is shared.
+    assert _inline_scripts(main_page) == _inline_scripts(archived) == _inline_scripts(chained)
+
+
+def test_no_runs_strip_without_archives():
+    page = render_page(trades=[], open_positions=[], starting_nav=1000.0, generated_at=NOW)
+    assert 'class="runs"' not in page
 
 
 def test_side_column_shows_the_held_token():

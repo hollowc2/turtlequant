@@ -16,6 +16,7 @@ import datetime as dt
 import html
 import json
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,6 +30,23 @@ MODE_LABELS = {
     "paper": ("Paper Trading", "Simulated fills against live Polymarket order books"),
     "live": ("Live Trading", "Real orders on the Polymarket CLOB"),
 }
+
+
+@dataclass(frozen=True)
+class RunSummary:
+    """One shadow run: the live state dir, an archived snapshot, or all runs chained.
+
+    A reset moves the state files into archive/<ts>/ and restarts NAV, so each run
+    gets its own page; the runs strip links them together.
+    """
+
+    run_id: str
+    path: str  # page directory relative to the performance page root; "" for the current run
+    label: str
+    started_at: dt.datetime | None
+    ended_at: dt.datetime | None  # None while the run is still trading
+    trade_count: int
+    total_pnl: float
 
 
 @dataclass(frozen=True)
@@ -565,6 +583,24 @@ def distribution_description(stats: Stats) -> str:
     )
 
 
+def _runs_nav(runs: Sequence[RunSummary], active_run: str, root_href: str) -> str:
+    if len(runs) < 2:
+        return ""
+    links = []
+    for run in runs:
+        active = run.run_id == active_run
+        span = f"{_date(run.started_at)} → {_date(run.ended_at) if run.ended_at else 'now'}"
+        href = root_href + run.path or "./"
+        links.append(
+            f'<a class="run-link{" active" if active else ""}" href="{html.escape(href)}"'
+            f'{' aria-current="page"' if active else ""}>'
+            f'<span class="run-name">{html.escape(run.label)}</span>'
+            f'<span class="run-meta">{span} · {run.trade_count} trades · '
+            f'<span class="{_tone(run.total_pnl)}">{_usd(run.total_pnl, signed=True)}</span></span></a>'
+        )
+    return f'<nav class="runs" aria-label="Trading runs">{"".join(links)}</nav>'
+
+
 # ---------------------------------------------------------------------------
 # Page
 # ---------------------------------------------------------------------------
@@ -577,8 +613,22 @@ def render_page(
     starting_nav: float,
     generated_at: dt.datetime,
     mode: str = "shadow",
+    runs: Sequence[RunSummary] = (),
+    active_run: str = "current",
+    root_href: str = "",
 ) -> str:
+    """Render one run's page. root_href points from this page back to the current run's page."""
     badge, mode_note = MODE_LABELS[mode]
+    run = next((r for r in runs if r.run_id == active_run), None)
+    archived = run is not None and run.ended_at is not None
+    if run is None:
+        run_note = ""
+    elif archived:
+        run_note = f"Run {_date(run.started_at)} → {_date(run.ended_at, '%Y-%m-%d %H:%M UTC')} · "
+    elif run.run_id == "current":
+        run_note = f"Run started {_date(run.started_at, '%Y-%m-%d %H:%M UTC')} · "
+    else:
+        run_note = f"{html.escape(run.label)} · "
     stats = compute_stats(trades, starting_nav, generated_at)
     data_block = _json_data_block(chart_payload(trades, starting_nav))
     stamp = generated_at.astimezone(dt.UTC).strftime("%Y-%m-%d %H:%M UTC")
@@ -621,7 +671,7 @@ def render_page(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TurtleQuant — Polymarket Performance</title>
+  <title>TurtleQuant — {"Polymarket Performance" if run is None or run.run_id == "current" else html.escape(run.label)}</title>
   <meta name="description" content="TurtleQuant prices Polymarket crypto markets as digital options and trades the edge. Equity curve, drawdown, return distribution and every trade.">
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/assets/fonts/inter-var-latin.woff2">
   <link rel="stylesheet" href="/assets/fonts.css">
@@ -631,7 +681,7 @@ def render_page(
 <body>
 <main>
   <nav class="top-links">
-    <a class="site-link" href="/"><span aria-hidden="true">←</span>billybitcoin.cloud</a>
+    <a class="site-link" href="{html.escape(root_href or "/")}"><span aria-hidden="true">←</span>{"current run" if root_href else "billybitcoin.cloud"}</a>
     <a class="site-link" href="{GITHUB_URL}" target="_blank" rel="noopener noreferrer">source on GitHub<span aria-hidden="true">↗</span></a>
   </nav>
 
@@ -644,9 +694,10 @@ def render_page(
       exposure caps.
     </p>
     <div class="sub">
-      <span class="badge">{html.escape(badge)}</span>
-      {html.escape(mode_note)} · {stats.trade_count} closed trades{through} · Regenerated hourly, last built {html.escape(stamp)}
+      <span class="badge">{html.escape(badge)}</span>{'<span class="badge badge-archived">Archived</span>' if archived else ""}
+      {run_note}{html.escape(mode_note)} · {stats.trade_count} closed trades{through} · {"Frozen snapshot" if archived else "Regenerated hourly"}, last built {html.escape(stamp)}
     </div>
+    {_runs_nav(runs, active_run, root_href)}
   </header>
 
   <section class="stats">{headline}</section>
@@ -689,7 +740,7 @@ def render_page(
   <h2>By Asset</h2>
   <section class="stats cohorts">{_cohort_tiles(trades, "asset")}</section>
 
-  <h2>Open Positions</h2>
+  <h2>{"Open When Archived" if archived else "Open Positions"}</h2>
   <section class="stats cohorts">{open_tiles}</section>
   <section class="panel table-panel">
     <table>
@@ -1161,6 +1212,18 @@ td.empty-cell { text-align: center; color: var(--muted); padding: 28px; }
 .chart-note { margin: 12px 2px 0; max-width: 80ch; color: var(--muted); font-size: 12.5px; line-height: 1.55; }
 .chart-note b { color: var(--text); font-weight: 500; }
 .methodology ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px; line-height: 1.6; max-width: 90ch; }
+.badge-archived { color: var(--muted); background: transparent; border-color: var(--border); }
+.runs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.run-link {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 8px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); text-decoration: none; font-size: 13px;
+  transition: border-color 120ms ease;
+}
+.run-link:hover, .run-link:focus-visible { border-color: rgba(200, 146, 42, 0.45); }
+.run-link.active { border-color: var(--accent); }
+.run-meta { color: var(--muted); font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11.5px; }
+.run-meta .pos, .run-meta .neg { font-weight: 500; }
 @media (max-width: 980px) {
   main { padding: 16px; }
   .cohorts .stat { max-width: none; }
