@@ -617,7 +617,7 @@ def render_page(
     active_run: str = "current",
     root_href: str = "",
 ) -> str:
-    """Render one run's page. root_href points from this page back to the current run's page."""
+    """Render one run's page. root_href points from this page back to the main page ("" on it)."""
     badge, mode_note = MODE_LABELS[mode]
     run = next((r for r in runs if r.run_id == active_run), None)
     archived = run is not None and run.ended_at is not None
@@ -671,7 +671,7 @@ def render_page(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TurtleQuant — {"Polymarket Performance" if run is None or run.run_id == "current" else html.escape(run.label)}</title>
+  <title>TurtleQuant — {"Polymarket Performance" if not root_href or run is None else html.escape(run.label)}</title>
   <meta name="description" content="TurtleQuant prices Polymarket crypto markets as digital options and trades the edge. Equity curve, drawdown, return distribution and every trade.">
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/assets/fonts/inter-var-latin.woff2">
   <link rel="stylesheet" href="/assets/fonts.css">
@@ -681,7 +681,7 @@ def render_page(
 <body>
 <main>
   <nav class="top-links">
-    <a class="site-link" href="{html.escape(root_href or "/")}"><span aria-hidden="true">←</span>{"current run" if root_href else "billybitcoin.cloud"}</a>
+    <a class="site-link" href="{html.escape(root_href or "/")}"><span aria-hidden="true">←</span>{"all runs" if root_href else "billybitcoin.cloud"}</a>
     <a class="site-link" href="{GITHUB_URL}" target="_blank" rel="noopener noreferrer">source on GitHub<span aria-hidden="true">↗</span></a>
   </nav>
 

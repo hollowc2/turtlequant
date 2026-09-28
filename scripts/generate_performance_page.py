@@ -5,9 +5,10 @@ Reads the bot's state files and writes a static page. Run hourly from host cron
 (see scripts/performance_page.cron).
 
 A state reset moves the old files into <state-dir>/archive/<YYYYmmddTHHMMSSZ>/.
-Each archived run gets a frozen page at runs/<ts>/ next to the main page, and
-runs/all/ chains every run's closed trades onto the first run's starting NAV.
-The main page always shows the current run.
+Once an archive exists, the main page chains every run's closed trades onto the
+first run's starting NAV (the history Grafana shows), the current run moves to
+runs/current/, and each archived run gets a frozen page at runs/<ts>/. With no
+archive, the main page is simply the current run.
 
 Usage:
     uv run python scripts/generate_performance_page.py
@@ -125,13 +126,13 @@ def archived_runs(state_dir: Path) -> list[Run]:
     return runs
 
 
-def chain_runs(runs: list[Run]) -> Run:
+def chain_runs(runs: list[Run], *, path: str) -> Run:
     """Every run's closed trades on one curve, starting from the first run's NAV."""
     trades = sorted((t for run in runs for t in run.trades), key=lambda t: t.closed_at)
     return Run(
         summary=RunSummary(
             run_id="all",
-            path=f"{RUNS_DIR}/all/",
+            path=path,
             label="All runs, chained",
             started_at=min((r.summary.started_at for r in runs if r.summary.started_at), default=None),
             ended_at=None,
@@ -145,16 +146,18 @@ def chain_runs(runs: list[Run]) -> Run:
 
 
 def generate(*, state_dir: Path, output: Path, mode: str, nav_override: float | None) -> int:
-    current = load_run(
-        state_dir, run_id="current", path="", label="Current run", ended_at=None, nav_override=nav_override
-    )
     archived = archived_runs(state_dir)
-    # Strip order: current run, all runs chained, then archived runs newest first.
-    pages: list[tuple[Run, Path, str]] = [(current, output, "")]
-    if archived:
-        chained = chain_runs([*archived, current])
-        for run in [chained, *reversed(archived)]:
-            pages.append((run, output.parent / run.summary.path / output.name, "../../"))
+    current = load_run(
+        state_dir,
+        run_id="current",
+        path=f"{RUNS_DIR}/current/" if archived else "",
+        label="Current run",
+        ended_at=None,
+        nav_override=nav_override,
+    )
+    # Strip order: all runs chained (the main page), current run, then archived runs newest first.
+    runs = [chain_runs([*archived, current], path=""), current, *reversed(archived)] if archived else [current]
+    pages = [(run, output.parent / run.summary.path / output.name, "../../" if run.summary.path else "") for run in runs]
     summaries = [run.summary for run, _, _ in pages]
     generated_at = datetime.now(UTC)
     for run, path, root_href in pages:

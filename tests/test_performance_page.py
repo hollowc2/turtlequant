@@ -228,19 +228,19 @@ def test_generator_writes_a_page_per_archived_run(tmp_path):
     assert module.main(["--state-dir", str(state_dir), "--output", str(site / "index.html")]) == 0
 
     main_page = (site / "index.html").read_text()
+    current = (site / "runs" / "current" / "index.html").read_text()
     archived = (site / "runs" / "20260510T120000Z" / "index.html").read_text()
-    chained = (site / "runs" / "all" / "index.html").read_text()
     assert not (site / "runs" / "notes").exists()
-    # Main page stays on the current run and links to the others.
-    assert "1 closed trades" in main_page and "-$4.00" in main_page
-    assert 'href="runs/20260510T120000Z/"' in main_page and 'href="runs/all/"' in main_page
-    # The archived run keeps its own numbers and links back to the current run.
+    # A reset must not blank the main page: it chains all runs, 35 - 4 on the first run's $1,000.
+    assert "5 closed trades" in main_page and "+$31.00" in main_page
+    assert 'href="runs/20260510T120000Z/"' in main_page and 'href="runs/current/"' in main_page
+    # The current run has its own page.
+    assert "1 closed trades" in current and "-$4.00" in current and 'href="../../"' in current
+    # The archived run keeps its own numbers and links back to the main page.
     assert "Archived" in archived and "+$35.00" in archived and "4 closed trades" in archived
     assert 'href="../../"' in archived and "Open When Archived" in archived
-    # All runs chained: 35 - 4 on the first run's $1,000.
-    assert "5 closed trades" in chained and "+$31.00" in chained
     # Pages differ only in data; the CSP-pinned script is shared.
-    assert _inline_scripts(main_page) == _inline_scripts(archived) == _inline_scripts(chained)
+    assert _inline_scripts(main_page) == _inline_scripts(archived) == _inline_scripts(current)
 
 
 def test_no_runs_strip_without_archives():
