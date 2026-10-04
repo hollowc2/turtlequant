@@ -114,6 +114,10 @@ class TraderConfig:
     # No new entries in markets resolving sooner than this (0 = only the
     # scanner's floor). Short-dated markets are still priced and marked.
     min_entry_hours: float = 0.0
+    # No new entries in markets resolving later than this (0 = no limit).
+    # Kelly sizing ignores holding time, so far-dated edges tie up the
+    # exposure cap for a poor return per month. Held positions still exit.
+    max_entry_hours: float = 0.0
     # Enter only when the legacy and smile models both clear the threshold;
     # the entry is then priced and sized on the lower of the two. Exits
     # still use the active pricing model.
@@ -777,7 +781,9 @@ class Trader:
             return None
         if not self.check_entry_gate(market_data_at):
             return None
-        if market.hours_to_resolution < cfg.min_entry_hours:
+        if market.hours_to_resolution < cfg.min_entry_hours or (
+            cfg.max_entry_hours and market.hours_to_resolution > cfg.max_entry_hours
+        ):
             _inc(stats, "tenor_skipped")
             return None
         # Edges on YES and NO have opposite signs, so at most one side clears.

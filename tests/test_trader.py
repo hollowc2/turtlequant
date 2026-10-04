@@ -404,6 +404,21 @@ def test_min_entry_hours_skips_short_dated_entries_but_still_marks_them(tmp_path
     assert trader.positions.has_position("m-1")
 
 
+def test_max_entry_hours_skips_far_dated_entries_but_still_marks_them(tmp_path):
+    trader = make_trader(tmp_path, scanner=FakeScanner([market(days=120)]), max_entry_hours=90 * 24.0)
+
+    stats = trader.scan()
+
+    assert not trader.positions.has_position("m-1")
+    assert stats["tenor_skipped"] == 1
+    marks = [json.loads(line) for line in (tmp_path / MARKS_JSONL).read_text().splitlines()]
+    assert [row["id"] for row in marks[0]["rows"]] == ["m-1"]
+
+    trader.scanner.markets = [market(days=30)]
+    trader.scan()
+    assert trader.positions.has_position("m-1")
+
+
 def test_smile_mode_without_a_smile_does_not_enter(tmp_path):
     trader = make_trader(tmp_path, vol=FakeVol(smile=None), pricing_model="smile")
 

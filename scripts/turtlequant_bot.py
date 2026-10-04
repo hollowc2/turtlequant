@@ -353,6 +353,8 @@ def main() -> None:
         ("--reentry-cooldown-hours", "REENTRY_COOLDOWN_HOURS", 2.0, "No re-entry this soon after a full close"),
         ("--min-entry-hours", "MIN_ENTRY_HOURS", 0.0,
          "No new entries in markets resolving sooner than this; they are still priced, marked and exited"),
+        ("--max-entry-hours", "MAX_ENTRY_HOURS", 0.0,
+         "No new entries in markets resolving later than this (0 = no limit); they are still priced, marked and exited"),
         ("--edge-decay-ratio", "EDGE_DECAY_RATIO", 0.4, "Exit when edge falls to this fraction of entry edge"),
         ("--cleanup-hours", "CLEANUP_HOURS", 6.0, "Time-cleanup window before expiry"),
         ("--cleanup-edge", "CLEANUP_EDGE", 0.05, "Time-cleanup exits when edge is at or below this"),
@@ -466,6 +468,7 @@ def main() -> None:
             max_entry_price=args.max_entry_price,
             reentry_cooldown_secs=args.reentry_cooldown_hours * 3600,
             min_entry_hours=args.min_entry_hours,
+            max_entry_hours=args.max_entry_hours,
             model_consensus=args.model_consensus,
             pricing_model=args.pricing_model,
             marks_interval_secs=args.marks_interval_secs,
@@ -504,6 +507,7 @@ def main() -> None:
     logger.info("Pricing     : %s%s", args.pricing_model, " (entries need legacy+smile consensus)" if args.model_consensus else "")
     logger.info("Sides       : %s", ",".join(sides))
     logger.info("Min entry   : %.0fh to resolution", args.min_entry_hours)
+    logger.info("Max entry   : %s", f"{args.max_entry_hours:.0f}h to resolution" if args.max_entry_hours else "no limit")
     logger.info("Exit rule   : %s", args.exit_rule)
     logger.info("Starting NAV: $%.2f", args.starting_nav)
     logger.info("State dir   : %s", state_dir)

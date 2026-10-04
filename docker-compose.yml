@@ -46,6 +46,10 @@ services:
       # mid (marks 2026-09-25/26), so enter nothing resolving within a week.
       # Those markets are still marked for scripts/evaluate_models.py.
       MIN_ENTRY_HOURS: "168"
+      # Nor anything resolving beyond 90 days: Kelly ignores holding time, so a
+      # 5pp edge over a year earns ~5%/yr while tying up the exposure cap, and
+      # no far-dated marks have resolved to validate the model out there.
+      MAX_ENTRY_HOURS: "2160"
       # Price, mark and exit on the smile model: on resolved marks through
       # 2026-10-03 it beats the market mid on Brier (0.0177 vs 0.0185) while
       # legacy does not (0.0196). Entries still need legacy to agree.
