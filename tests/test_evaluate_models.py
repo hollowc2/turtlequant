@@ -74,3 +74,37 @@ def test_trader_writes_marks_snapshots_on_its_interval(tmp_path):
     assert len(lines) == 1
     (row,) = json.loads(lines[0])["rows"]
     assert row["id"] == "m-1" and row["ps"] > row["pl"]
+
+
+def test_consensus_trades_need_both_models_and_blocked_scores_the_rest(tmp_path):
+    t0 = datetime(2026, 9, 1, tzinfo=UTC)
+    expiry = t0 + timedelta(days=10)
+    # m1: smile sees NO (0.20 vs bid 0.30), legacy does not (0.32). Resolves NO.
+    # m2: both see NO; consensus prices it on the higher model (0.24 → 6pp). Resolves YES.
+    append_history(tmp_path, _snapshot(t0, [_row("m1", expiry, 0.30, 0.32, 0.32, 0.20),
+                                            _row("m2", expiry, 0.30, 0.32, 0.24, 0.18)]))
+
+    report = evaluate_models.evaluate(evaluate_models.load_observations(tmp_path), {"m1": 0.0, "m2": 1.0})
+
+    assert report["smile"]["no_trades"] == 2
+    consensus, blocked = report["consensus"], report["blocked"]
+    assert consensus["no_trades"] == 1 and consensus["yes_trades"] == 0
+    assert consensus["no_net_per_share"] == pytest.approx(0 - 0.70 - 0.07 * 0.70 * 0.30)
+    assert blocked["no_trades"] == 1
+    assert blocked["no_net_per_share"] == pytest.approx(1 - 0.70 - 0.07 * 0.70 * 0.30)
+    assert consensus["brier"] is None and blocked["reliability"] == []
+
+
+def test_entry_window_limits_trades_but_not_brier(tmp_path):
+    t0 = datetime(2026, 9, 1, tzinfo=UTC)
+    append_history(tmp_path, _snapshot(t0, [_row("short", t0 + timedelta(days=2), 0.39, 0.41, 0.60, 0.60),
+                                            _row("ok", t0 + timedelta(days=30), 0.39, 0.41, 0.60, 0.60),
+                                            _row("far", t0 + timedelta(days=200), 0.39, 0.41, 0.60, 0.60)]))
+    resolutions = {"short": 1.0, "ok": 1.0, "far": 1.0}
+
+    report = evaluate_models.evaluate(
+        evaluate_models.load_observations(tmp_path), resolutions, min_entry_hours=168, max_entry_hours=2160
+    )
+
+    assert report["smile"]["observations"] == 3
+    assert report["smile"]["yes_trades"] == report["consensus"]["yes_trades"] == 1

@@ -11,12 +11,20 @@ and reports, for p_legacy, p_smile and the market mid:
   first qualifying snapshot per market, and what that trade earned per share
   after the taker fee.
 
+Two extra rows score the deployed MODEL_CONSENSUS gate: ``consensus`` trades
+only when both models clear the threshold on the same side (YES on the lower
+probability, NO on the higher), and ``blocked`` is the smile trades in
+markets where consensus never traded. ``--min-entry-hours`` and
+``--max-entry-hours`` restrict trades (not Brier) to the deployed tenor window.
+
 The calibration script (calibrate_turtlequant.py) scores a realized-vol
 model on simulated contracts; this scores the models that trade, on the
 markets they trade, against real prices.
 
 Usage:
     uv run python scripts/evaluate_models.py --state-dir /opt/turtlequant/state
+    uv run python scripts/evaluate_models.py --state-dir /opt/turtlequant/state \
+        --min-entry-hours 168 --max-entry-hours 2160
 """
 
 from __future__ import annotations
@@ -100,40 +108,93 @@ def _reliability(pairs: list[tuple[float, float]]) -> list[tuple[str, int, float
     return table
 
 
+def _trade(o: Observation, payout: float, p_yes: float, p_no: float, threshold: float) -> tuple[str, float] | None:
+    """The side and net per share if YES clears on ``p_yes`` or NO clears on ``p_no`` (both P(YES))."""
+    if 0.02 < o.ask < 0.98 and p_yes - o.ask >= threshold:
+        side, price, value = "yes", o.ask, payout
+    elif 0.02 < o.bid < 0.98 and (1 - p_no) - (1 - o.bid) >= threshold:
+        side, price, value = "no", 1 - o.bid, 1 - payout  # buy NO at 1 - bid
+    else:
+        return None
+    return side, value - price - DEFAULT_CRYPTO_FEE.fee(1.0, price)
+
+
+def _first_trades(
+    resolved: list[Observation],
+    resolutions: dict[str, float],
+    probs: Callable[[Observation], tuple[float, float] | None],
+    threshold: float,
+) -> dict[str, tuple[str, float]]:
+    trades: dict[str, tuple[str, float]] = {}  # first qualifying snapshot per market
+    for o in resolved:
+        p = probs(o)
+        if p is None or o.market_id in trades:
+            continue
+        trade = _trade(o, resolutions[o.market_id], *p, threshold)
+        if trade is not None:
+            trades[o.market_id] = trade
+    return trades
+
+
+def _consensus_probs(o: Observation) -> tuple[float, float] | None:
+    # YES needs the lower model to clear, NO the higher, as MODEL_CONSENSUS does.
+    if o.smile is None:
+        return None
+    return min(o.legacy, o.smile), max(o.legacy, o.smile)
+
+
+def _trade_stats(trades: dict[str, tuple[str, float]]) -> dict[str, object]:
+    yes = [net for side, net in trades.values() if side == "yes"]
+    no = [net for side, net in trades.values() if side == "no"]
+    return {
+        "yes_trades": len(yes),
+        "yes_net_per_share": sum(yes) / len(yes) if yes else None,
+        "no_trades": len(no),
+        "no_net_per_share": sum(no) / len(no) if no else None,
+    }
+
+
 def evaluate(
-    observations: Iterable[Observation], resolutions: dict[str, float], *, threshold: float = 0.05
+    observations: Iterable[Observation],
+    resolutions: dict[str, float],
+    *,
+    threshold: float = 0.05,
+    min_entry_hours: float = 0.0,
+    max_entry_hours: float = 0.0,
 ) -> dict[str, dict[str, object]]:
     """Scores per predictor over observations of resolved markets."""
     resolved = sorted(
         (o for o in observations if o.market_id in resolutions and o.ts < o.expiry), key=lambda o: o.ts
     )
+
+    def in_window(o: Observation) -> bool:
+        hours = (o.expiry - o.ts).total_seconds() / 3600
+        return hours >= min_entry_hours and (not max_entry_hours or hours <= max_entry_hours)
+
+    tradable = [o for o in resolved if in_window(o)]
+    markets = len({o.market_id for o in resolved})
     report: dict[str, dict[str, object]] = {}
+    trades_by: dict[str, dict[str, tuple[str, float]]] = {}
     for predictor in PREDICTORS:
         pairs = [(o.prob(predictor), resolutions[o.market_id]) for o in resolved if o.prob(predictor) is not None]
-        trades: dict[str, tuple[str, float]] = {}  # first qualifying snapshot per market
-        for o in resolved:
+
+        def probs(o: Observation, predictor: str = predictor) -> tuple[float, float] | None:
             p = o.prob(predictor)
-            if predictor == "market" or p is None or o.market_id in trades:
-                continue
-            payout = resolutions[o.market_id]
-            if 0.02 < o.ask < 0.98 and p - o.ask >= threshold:
-                side, price, value = "yes", o.ask, payout
-            elif 0.02 < o.bid < 0.98 and (1 - p) - (1 - o.bid) >= threshold:
-                side, price, value = "no", 1 - o.bid, 1 - payout  # buy NO at 1 - bid
-            else:
-                continue
-            trades[o.market_id] = (side, value - price - DEFAULT_CRYPTO_FEE.fee(1.0, price))
-        yes = [net for side, net in trades.values() if side == "yes"]
-        no = [net for side, net in trades.values() if side == "no"]
+            return None if predictor == "market" or p is None else (p, p)
+
+        trades_by[predictor] = _first_trades(tradable, resolutions, probs, threshold)
         report[predictor] = {
             "observations": len(pairs),
-            "markets": len({o.market_id for o in resolved}),
+            "markets": markets,
             "brier": _brier(pairs),
             "reliability": _reliability(pairs),
-            "yes_trades": len(yes),
-            "yes_net_per_share": sum(yes) / len(yes) if yes else None,
-            "no_trades": len(no),
-            "no_net_per_share": sum(no) / len(no) if no else None,
+            **_trade_stats(trades_by[predictor]),
+        }
+    consensus = _first_trades(tradable, resolutions, _consensus_probs, threshold)
+    blocked = {m: t for m, t in trades_by["smile"].items() if m not in consensus}
+    for name, trades in (("consensus", consensus), ("blocked", blocked)):
+        report[name] = {
+            "observations": 0, "markets": markets, "brier": None, "reliability": [], **_trade_stats(trades)
         }
     return report
 
@@ -158,6 +219,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Score TurtleQuant's models against resolutions")
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--threshold", type=float, default=0.05)
+    parser.add_argument("--min-entry-hours", type=float, default=0.0, help="score trades only this far from expiry")
+    parser.add_argument("--max-entry-hours", type=float, default=0.0, help="and no further (0 = no limit)")
     args = parser.parse_args(argv)
 
     observations = load_observations(args.state_dir)
@@ -170,15 +233,20 @@ def main(argv: list[str] | None = None) -> int:
     resolutions = fetch_resolutions(expired, scanner.fetch_resolution)
     print(f"{len(observations)} observations, {len(expired)} expired markets, {len(resolutions)} resolved")
 
-    report = evaluate(observations, resolutions, threshold=args.threshold)
-    print(f"\n{'model':8s}{'obs':>7s}{'brier':>9s}{'YES n':>7s}{'YES net/sh':>12s}{'NO n':>6s}{'NO net/sh':>11s}")
+    report = evaluate(
+        observations, resolutions, threshold=args.threshold,
+        min_entry_hours=args.min_entry_hours, max_entry_hours=args.max_entry_hours,
+    )
+    print(f"\n{'model':10s}{'obs':>7s}{'brier':>9s}{'YES n':>7s}{'YES net/sh':>12s}{'NO n':>6s}{'NO net/sh':>11s}")
     for name, r in report.items():
         brier = "—" if r["brier"] is None else f"{r['brier']:.4f}"
         print(
-            f"{name:8s}{r['observations']:>7d}{brier:>9s}{r['yes_trades']:>7d}"
+            f"{name:10s}{r['observations']:>7d}{brier:>9s}{r['yes_trades']:>7d}"
             f"{_fmt(r['yes_net_per_share']):>12s}{r['no_trades']:>6d}{_fmt(r['no_net_per_share']):>11s}"
         )
     for name, r in report.items():
+        if not r["reliability"]:
+            continue
         print(f"\nreliability ({name}): bucket, n, mean predicted, realised")
         for bucket, n, predicted, realised in r["reliability"]:
             print(f"  {bucket}  {n:6d}  {predicted:.3f}  {realised:.3f}")
