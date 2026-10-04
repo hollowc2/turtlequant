@@ -46,9 +46,14 @@ services:
       # mid (marks 2026-09-25/26), so enter nothing resolving within a week.
       # Those markets are still marked for scripts/evaluate_models.py.
       MIN_ENTRY_HOURS: "168"
-      # Enter only where the smile model also sees the edge, until
-      # scripts/evaluate_models.py can say which model to trust.
+      # Price, mark and exit on the smile model: on resolved marks through
+      # 2026-10-03 it beats the market mid on Brier (0.0177 vs 0.0185) while
+      # legacy does not (0.0196). Entries still need legacy to agree.
+      PRICING_MODEL: "smile"
       MODEL_CONSENSUS: "true"
+      # Smile's NO-side edge trades are the only net-positive bucket in
+      # scripts/evaluate_models.py (+0.047/share over 64 trades).
+      SIDES: "yes,no"
       # Hold to resolution unless the bid, net of fee, beats the model.
       EXIT_RULE: "ev"
     healthcheck:
