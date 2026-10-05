@@ -5,6 +5,9 @@ x-bot-common: &bot-common
     context: .
     dockerfile: Dockerfile
   restart: unless-stopped
+  # Run tini as PID 1 so exited children are reaped. Python as PID 1 never
+  # reaps, so every timed-out healthcheck was left behind as a zombie.
+  init: true
   logging:
     driver: "json-file"
     options:
@@ -61,11 +64,9 @@ services:
       # Hold to resolution unless the bid, net of fee, beats the model.
       EXIT_RULE: "ev"
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "python -c \"import os,time; p=os.environ.get('LOG_FILE','/app/state/turtlequant-bot.log'); exit(0 if os.path.isfile(p) and time.time()-os.path.getmtime(p)<180 else 1)\"",
-        ]
+      # Log written within 180s. Healthchecks use the shell, not python: a
+      # python start costs ~50x the CPU and timed out on a starved host.
+      test: ["CMD-SHELL", "find \"$${LOG_FILE:-/app/state/turtlequant-bot.log}\" -mmin -3 | grep -q ."]
       interval: 60s
       timeout: 10s
       retries: 3
@@ -90,10 +91,13 @@ services:
       EXPORTER_PORT: "8004"
       STATE_DIR: "/opt/turtlequant/state"
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/metrics', timeout=3)\""]
-      interval: 30s
-      timeout: 5s
+      # /metrics answers 200. Prometheus already scrapes every 15s, so check
+      # once a minute with bash rather than a python start every 30s.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8004 && printf 'GET /metrics HTTP/1.0\\r\\n\\r\\n' >&3 && head -c 12 <&3 | grep -q ' 200'"]
+      interval: 60s
+      timeout: 10s
       retries: 3
+      start_period: 30s
 
 networks:
   monitoring_net:
