@@ -413,6 +413,15 @@ class Trader:
                 logger.info("[REPRICE] %s K=%.0f exp=%s", pos.asset.upper(), pos.strike, pos.expiry_iso[:10])
                 if pos.status == "pending_redemption" or datetime.now(UTC) >= pos.expiry:
                     self.settle(pos)
+                # Barrier markets resolve the moment the barrier trades, weeks
+                # before expiry; their CLOB book then 404s. Settle on Gamma's
+                # resolution rather than marking a dead market until expiry.
+                elif (resolved := self.scanner.fetch_resolution(pos.market_id, pos.token_id, pos.outcome)) is not None:
+                    logger.info(
+                        "[RESOLVED_EARLY] %s K=%.0f exp=%s resolved=%.4f",
+                        pos.asset.upper(), pos.strike, pos.expiry_iso[:10], resolved,
+                    )
+                    self.settle(pos, resolved)
                 else:
                     self._reprice(pos, spots.get(pos.asset))
             except StatePersistenceError:
@@ -440,13 +449,12 @@ class Trader:
             )
         self.evaluate_exit(pos, book=book, model_prob=model_prob, vol_source=pricing.vol_source, log_hold=True)
 
-    def settle(self, pos: Position) -> None:
-        """Realise an expired position once Gamma confirms its resolution."""
-        resolved_price = (
-            pos.resolution_price
-            if pos.status == "pending_redemption"
-            else self.scanner.fetch_resolution(pos.market_id, pos.token_id, pos.outcome)
-        )
+    def settle(self, pos: Position, resolved_price: float | None = None) -> None:
+        """Realise a resolved position once Gamma confirms its resolution."""
+        if pos.status == "pending_redemption":
+            resolved_price = pos.resolution_price
+        elif resolved_price is None:
+            resolved_price = self.scanner.fetch_resolution(pos.market_id, pos.token_id, pos.outcome)
         if resolved_price is None:
             overdue_hours = (datetime.now(UTC) - pos.expiry).total_seconds() / 3600
             logger.log(

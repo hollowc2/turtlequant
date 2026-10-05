@@ -217,6 +217,35 @@ def test_resolved_position_settles_at_payout(tmp_path):
     assert trader.risk.high_water == pytest.approx(1060.0)
 
 
+def test_barrier_resolved_before_expiry_settles_without_waiting(tmp_path):
+    # "Will Bitcoin dip to $85,000 in October?" resolved YES on 2026-10-05,
+    # four weeks before expiry; the NO book 404'd and the bot marked it open.
+    trader = make_trader(tmp_path, scanner=FakeScanner([], resolution=1.0))
+    hold(trader, days=27)
+
+    trader.reprice_positions()
+
+    assert not trader.positions.has_position("m-1")
+    close = [e for e in events(tmp_path) if e["event"] == "close"][0]
+    assert close["reason"] == "resolved" and close["resolution_price"] == 1.0
+    assert trader.executor._client.book_calls == 0  # no book fetch for a dead market
+
+
+def test_barrier_resolved_before_expiry_is_held_for_redemption_live(tmp_path):
+    clob = FakeClob()
+    trader = make_trader(
+        tmp_path, mode="live", scanner=FakeScanner([], resolution=0.0), clob=clob,
+        executor=ExecutionClient(mode="live", allow_live=False, clob_client=clob),
+    )
+    hold(trader, days=27)
+
+    trader.reprice_positions()
+
+    pos = trader.positions.get_position("m-1")
+    assert pos.status == "pending_redemption" and pos.resolution_price == 0.0
+    assert kinds(tmp_path) == ["pending_redemption"]
+
+
 def test_unresolved_expired_position_waits(tmp_path):
     trader = make_trader(tmp_path, scanner=FakeScanner([], resolution=None))
     hold(trader, days=-1)
