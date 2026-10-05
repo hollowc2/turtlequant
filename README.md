@@ -34,10 +34,10 @@ Gamma API → Scanner → Parser → Probability Engine → Execution → Positi
 Every 60 seconds, the scanner reads Polymarket's "Crypto Prices" events and skips "Up or Down" events. That is about 1,400 open markets in two requests. It keeps markets that meet all of these:
 
 - More than 4 hours to expiry
+- Over $5k of liquidity
+- Both a bid and an ask, 3¢ apart or less. One-sided markets are dropped, not given a made-up spread
 
 Entries have a separate floor, `--min-entry-hours`. Compose sets it to 168 (one week), because the legacy model overprices short-dated barrier markets. Markets under the floor are still priced and marked for `evaluate_models.py`.
-- Over $5k of liquidity
-- A bid-ask spread of 3¢ or less
 
 The `scanner_funnel` field in each scan's log shows how many markets each filter removed.
 

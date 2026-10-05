@@ -245,3 +245,21 @@ def test_resolution_contract_on_a_real_resolved_market():
     yes_token = json.loads(payload["clobTokenIds"])[0]
 
     assert MarketScanner(session=_ResolvedSession(payload)).fetch_resolution(payload["id"], yes_token) == 0.0
+
+
+def test_one_sided_quotes_are_rejected_not_mirrored():
+    events = _events_fixture()
+    no_bid = events[-1]["markets"][0]  # real two-sided BTC $200k market
+    no_bid["bestBid"] = None
+    no_ask = events[0]["markets"][0]
+    no_ask["bestAsk"] = None
+    no_ask["endDate"] = no_bid["endDate"]  # keep it clear of the near-expiry filter
+    scanner = MarketScanner(session=_RecordingSession(events), min_liquidity=0.0, min_hours_to_resolution=0.0)
+
+    passed = {m.market_id for m in scanner.get_active_markets()}
+
+    assert no_bid["id"] not in passed and no_ask["id"] not in passed
+    assert scanner.last_scan_counts["one_sided"] == 2
+    market = scanner._parse_raw(no_bid)
+    assert market.bid == 0.0  # never copied from the ask
+    assert market.spread == 1.0

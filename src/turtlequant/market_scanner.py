@@ -221,24 +221,19 @@ class MarketScanner:
                     no_token_id = str(tokens[1]) if len(tokens) > 1 else ""
 
             # Price / spread
-            # Gamma returns bestBid / bestAsk on the YES token (or "price")
+            # Gamma returns bestBid / bestAsk on the YES token. A missing side
+            # stays 0.0: copying the other side (or the last trade) into it
+            # invented a zero spread, a NO quote mirrored from it, and a
+            # synthetic book that filled at a price nobody was offering.
             best_bid = float(raw.get("bestBid") or raw.get("best_bid") or 0.0)
             best_ask = float(raw.get("bestAsk") or raw.get("best_ask") or 0.0)
-            price = float(raw.get("price") or raw.get("lastTradePrice") or 0.0)
+            two_sided = best_bid > 0 and best_ask > 0
 
-            # Fall back to price as both bid and ask if spread not available
-            if best_bid <= 0 and best_ask <= 0 and price > 0:
-                best_bid = price
-                best_ask = price
-            elif best_bid <= 0:
-                best_bid = best_ask
-            elif best_ask <= 0:
-                best_ask = best_bid
-
-            yes_price = (
-                (best_bid + best_ask) / 2.0 if (best_bid > 0 or best_ask > 0) else price
-            )
-            spread = max(0.0, best_ask - best_bid)
+            if two_sided:
+                yes_price = (best_bid + best_ask) / 2.0
+            else:
+                yes_price = best_bid or best_ask or float(raw.get("lastTradePrice") or 0.0)
+            spread = max(0.0, best_ask - best_bid) if two_sided else 1.0
 
             liquidity = float(
                 raw.get("liquidityAmm")
@@ -351,6 +346,8 @@ class MarketScanner:
                 return "asset"
         if market.liquidity_usd < self.min_liquidity:
             return "liquidity"
+        if market.bid <= 0 or market.ask <= 0:
+            return "one_sided"
         if market.spread > self.max_spread + 1e-9:
             return "spread"
         return ""
