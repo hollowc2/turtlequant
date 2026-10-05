@@ -190,6 +190,7 @@ def test_reprice_exits_when_edge_reverses_and_starts_cooldown(tmp_path):
     assert not trader.positions.has_position("m-1")
     close = [e for e in events(tmp_path) if e["event"] == "close"][0]
     assert close["reason"] == "edge_reversed" and close["yes_price"] == 0.70
+    assert close["book_source"] == "clob"
     assert close["pnl"] == pytest.approx((0.70 - 0.40) * 100 - 100 * 0.07 * 0.70 * 0.30)
     assert trader.positions.closed_within("m-1", 3600)
 

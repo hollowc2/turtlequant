@@ -645,6 +645,7 @@ class Trader:
                 "remaining_shares": max(0.0, shares - result.filled_shares),
                 "complete": result.complete,
                 "pnl": pnl,
+                "book_source": book.source,
                 "ts": _now_iso(),
             }
         )

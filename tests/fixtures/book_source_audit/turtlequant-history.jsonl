@@ -1,0 +1,25 @@
+{"event": "order", "market_id": "a", "asset": "btc", "side": "BUY", "success": true, "status": "shadow", "fee_usd": 0.5, "quote": {"source": "clob", "bid": 0.4, "ask": 0.42}}
+{"event": "open", "market_id": "a", "question": "Will the price of Bitcoin be above $80,000 on December 31?", "asset": "btc", "strike": 80000, "outcome": "YES", "yes_price": 0.4, "size_usd": 40.0, "filled_shares": 100.0, "ts": "2026-09-20T00:00:00+00:00", "book_source": "clob"}
+{"event": "order", "market_id": "a", "asset": "btc", "side": "SELL", "success": true, "status": "shadow", "fee_usd": 0.5, "quote": {"source": "clob", "bid": 0.4, "ask": 0.42}}
+{"event": "close", "market_id": "a", "asset": "btc", "outcome": "YES", "reason": "ev_exit", "yes_price": 0.55, "filled_shares": 100.0, "pnl": 13.0, "ts": "2026-09-21T00:00:00+00:00", "book_source": "clob"}
+{"event": "order", "market_id": "b", "asset": "btc", "side": "BUY", "success": true, "status": "shadow", "fee_usd": 0.5, "quote": {"source": "synthetic", "bid": 0.4, "ask": 0.42}}
+{"event": "open", "market_id": "b", "question": "Will the price of Bitcoin be above $90,000 on December 31?", "asset": "btc", "strike": 90000, "outcome": "NO", "yes_price": 0.3, "size_usd": 30.0, "filled_shares": 100.0, "ts": "2026-09-22T00:00:00+00:00", "book_source": "synthetic"}
+{"event": "close", "market_id": "b", "asset": "btc", "outcome": "NO", "reason": "resolved", "yes_price": 1.0, "filled_shares": 100.0, "pnl": 70.0, "ts": "2026-09-30T00:00:00+00:00"}
+{"event": "order", "market_id": "c", "asset": "btc", "side": "BUY", "success": true, "status": "shadow", "fee_usd": 0.5, "quote": {"source": "clob", "bid": 0.4, "ask": 0.42}}
+{"event": "open", "market_id": "c", "question": "Will the price of Bitcoin be above $85,000 on December 31?", "asset": "btc", "strike": 85000, "outcome": "YES", "yes_price": 0.5, "size_usd": 50.0, "filled_shares": 100.0, "ts": "2026-09-23T00:00:00+00:00", "book_source": "clob"}
+{"event": "order", "market_id": "c", "asset": "btc", "side": "SELL", "success": true, "status": "shadow", "fee_usd": 0.5, "quote": {"source": "synthetic", "bid": 0.4, "ask": 0.42}}
+{"event": "close", "market_id": "c", "asset": "btc", "outcome": "YES", "reason": "edge_reversed", "yes_price": 0.7, "filled_shares": 100.0, "pnl": 18.5, "ts": "2026-09-24T00:00:00+00:00"}
+{"event": "order", "market_id": "d", "asset": "btc", "side": "BUY", "success": true, "status": "shadow", "fee_usd": 0.5, "quote": {"source": "clob", "bid": 0.4, "ask": 0.42}}
+{"event": "open", "market_id": "d", "question": "Will the price of Bitcoin be above $82,000 on December 31?", "asset": "btc", "strike": 82000, "outcome": "YES", "yes_price": 0.6, "size_usd": 60.0, "filled_shares": 100.0, "ts": "2026-09-24T00:00:00+00:00"}
+{"event": "order", "market_id": "d", "asset": "btc", "side": "SELL", "success": true, "status": "shadow", "fee_usd": 0.5, "quote": {"source": "synthetic", "bid": 0.4, "ask": 0.42}}
+{"event": "partial_close", "market_id": "d", "asset": "btc", "outcome": "YES", "reason": "edge_decayed", "yes_price": 0.65, "filled_shares": 40.0, "pnl": 1.0, "ts": "2026-09-25T00:00:00+00:00"}
+{"event": "order", "market_id": "d", "asset": "btc", "side": "SELL", "success": true, "status": "shadow", "fee_usd": 0.5, "quote": {"source": "clob", "bid": 0.4, "ask": 0.42}}
+{"event": "close", "market_id": "d", "asset": "btc", "outcome": "YES", "reason": "edge_decayed", "yes_price": 0.64, "filled_shares": 60.0, "pnl": 1.5, "ts": "2026-09-25T01:00:00+00:00", "book_source": "clob"}
+{"event": "open", "market_id": "e", "question": "Will the price of Bitcoin be above $95,000 on December 31?", "asset": "btc", "strike": 95000, "outcome": "YES", "yes_price": 0.2, "size_usd": 20.0, "filled_shares": 100.0, "ts": "2026-09-26T00:00:00+00:00"}
+{"event": "close", "market_id": "e", "asset": "btc", "outcome": "YES", "reason": "resolved", "yes_price": 0.0, "filled_shares": 100.0, "pnl": -20.0, "ts": "2026-10-01T00:00:00+00:00"}
+{"event": "order", "market_id": "f", "asset": "btc", "side": "BUY", "success": true, "status": "shadow", "fee_usd": 0.5, "quote": {"source": "synthetic", "bid": 0.4, "ask": 0.42}}
+{"event": "open", "market_id": "f", "question": "Will the price of Bitcoin be above $100,000 on December 31?", "asset": "btc", "strike": 100000, "outcome": "YES", "yes_price": 0.25, "size_usd": 25.0, "filled_shares": 100.0, "ts": "2026-10-02T00:00:00+00:00", "book_source": "synthetic"}
+{"event": "order", "market_id": "g", "asset": "btc", "side": "BUY", "success": true, "status": "shadow", "fee_usd": 0.5, "quote": {"source": "clob", "bid": 0.4, "ask": 0.42}}
+{"event": "open", "market_id": "g", "question": "Will the price of Bitcoin be above $78,000 on December 31?", "asset": "btc", "strike": 78000, "outcome": "YES", "yes_price": 0.35, "size_usd": 35.0, "filled_shares": 100.0, "ts": "2026-10-03T00:00:00+00:00", "book_source": "clob"}
+{"event": "order", "market_id": "h", "side": "BUY", "success": false, "quote": {"source": "synthetic"}}
+{"event": "failed_order", "market_id": "h", "side": "BUY", "ts": "2026-10-03T01:00:00+00:00"}
