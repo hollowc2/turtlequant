@@ -14,6 +14,7 @@ from turtlequant.clob_execution import (
     _polymarket_env,
     estimate_buy_fill,
     estimate_sell_fill,
+    synthetic_book,
     taker_fee,
 )
 
@@ -230,6 +231,17 @@ def test_live_rejects_synthetic_book_before_order_submission():
     assert result.success is False
     assert "real CLOB book" in result.error
     fake_client.create_and_post_market_order.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["paper", "shadow"])
+def test_simulated_modes_refuse_a_synthetic_book_as_live_does(mode):
+    book = synthetic_book("yes", bid=0.40, ask=0.45)
+    client = ExecutionClient(mode=mode, clob_client=MagicMock())
+
+    for result in (client.buy_yes("yes", 10.0, book), client.sell_yes("yes", 10.0, book)):
+        assert result.success is False and result.filled_shares == 0.0
+        assert "real CLOB book" in result.error
+        assert result.sent is False and result.broker_failure is False
 
 
 # Verbatim shape of get_clob_market_info for live BTC/ETH price markets (2026-09-24).

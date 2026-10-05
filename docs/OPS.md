@@ -131,7 +131,7 @@ Watch the **Phase 1 Shadow Soak** row in Grafana:
 |--------|-------------------------|
 | `turtlequant_shadow_quotes_total` | Rises steadily while scans find candidates |
 | `turtlequant_ask_erased_edge_ratio` | Low. A high value means crossing the ask wipes out the edge |
-| `turtlequant_synthetic_book_ratio` | Low. A high value means fills are modeled on synthetic books |
+| `turtlequant_synthetic_book_ratio` | Low. A high value means many candidates had no real CLOB book. No mode fills on a synthetic book, so those entries are skipped (`synthetic_book_skipped` in `scan_summary`) and those exits hold (`synthetic_book_exits_held`) |
 | `turtlequant_parser_hit_rate` | High. Most discovered markets parse |
 | `turtlequant_realized_vol_fallback_ratio` | Low. A high value means Deribit IV coverage is weak |
 | `turtlequant_order_book_source_total` | Mostly real CLOB books |

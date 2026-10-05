@@ -71,6 +71,10 @@ def _polymarket_env() -> tuple[str, str, str, str, int, str]:
     return private_key, api_key, api_secret, api_passphrase, signature_type, funder
 _BOOK_RETRY_BACKOFF_SECS = 0.5
 _BOOK_WARNING_COOLDOWN_SECS = 5 * 60
+# Every mode refuses to fill on a fallback book: its 1,000,000 shares at
+# Gamma's top of book is depth nobody is offering. Paper and shadow reject it
+# exactly as live does before posting, so their fills are ones live could get.
+_NO_REAL_BOOK = "orders require a real CLOB book"
 
 
 class OrderSide(str, Enum):
@@ -375,6 +379,8 @@ class ExecutionClient:
     ) -> ExecutionResult:
         estimate = estimate_buy_fill(book, amount_usd)
         if self.mode != "live":
+            if book.source != "clob":
+                return _failed_result(token_id, estimate, book, _NO_REAL_BOOK)
             return _paper_result(token_id, estimate, "shadow" if self.mode == "shadow" else "paper", book, fee)
         return self._post_market_order(
             token_id, OrderSide.BUY, amount_usd=amount_usd, shares=0.0,
@@ -387,6 +393,8 @@ class ExecutionClient:
     ) -> ExecutionResult:
         estimate = estimate_sell_fill(book, shares)
         if self.mode != "live":
+            if book.source != "clob":
+                return _failed_result(token_id, estimate, book, _NO_REAL_BOOK)
             return _paper_result(token_id, estimate, "shadow" if self.mode == "shadow" else "paper", book, fee)
         return self._post_market_order(
             token_id, OrderSide.SELL, amount_usd=0.0, shares=shares,
@@ -446,7 +454,7 @@ class ExecutionClient:
         if self._client is None:
             return _failed_result(token_id, estimate, book, "py_clob_client_v2 is not installed or configured")
         if book.source != "clob":
-            return _failed_result(token_id, estimate, book, "live orders require a real CLOB book")
+            return _failed_result(token_id, estimate, book, _NO_REAL_BOOK)
         if estimate.filled_shares <= 0 or estimate.avg_price <= 0:
             return _failed_result(token_id, estimate, book, "no executable depth")
         if limit_price is None or not 0.0 < limit_price < 1.0:

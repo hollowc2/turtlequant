@@ -228,6 +228,7 @@ class Trader:
         self.notify_exit = notify_exit or (lambda *_a, **_k: None)
         self.running = running
         self.reprice_errors = 0  # data-plane errors since the last scan summary
+        self.synthetic_exits_held = 0  # exits refused on a fallback book since the last scan summary
         self._last_marks_at = 0.0
         # Per-asset gross USD and net dollar delta of open positions, rebuilt
         # each scan and updated after entries within it.
@@ -588,8 +589,11 @@ class Trader:
             )
         if not result.success:
             if not result.broker_failure:
-                # No bids to sell into: a liquidity outcome, not a broker fault.
+                # No bids to sell into, or no real CLOB book (every mode refuses
+                # a fallback book): a liquidity outcome, not a broker fault.
                 # Keep holding and retry on the next reprice.
+                if book.source != "clob":
+                    self.synthetic_exits_held += 1
                 logger.info(
                     "[EXIT_UNFILLED] %s %s: %s", pos.market_id[:16], reason, result.error or "no executable depth"
                 )
@@ -677,6 +681,7 @@ class Trader:
             "mid_edge_candidates": 0,
             "executable_edge_candidates": 0,
             "ask_erased_edge": 0,
+            "synthetic_book_skipped": 0,
             "book_sources": {},
             "ts": _now_iso(),
         }
@@ -716,6 +721,8 @@ class Trader:
         self.risk.record_asset_risk(self.asset_risk)
         stats["reprice_errors"] = self.reprice_errors
         self.reprice_errors = 0
+        stats["synthetic_book_exits_held"] = self.synthetic_exits_held
+        self.synthetic_exits_held = 0
         self.risk.record_scan(errors=int(stats["market_errors"]), attempted=int(stats["parse_attempted"]))
         self.record(stats)
         return stats
@@ -914,6 +921,14 @@ class Trader:
             _inc(stats, "ask_erased_edge")
             return None
         _inc(stats, "executable_edge_candidates")
+        if book.source != "clob":
+            # The executor refuses a fallback book in every mode, as live does
+            # before posting. Skip here, after the quote is journaled, so the
+            # refusal is a counted skip rather than an order intent and a
+            # failed_order event every scan.
+            _inc(stats, "synthetic_book_skipped")
+            logger.info("[ENTRY_SKIPPED] %s %s book", market.market_id[:16], book.source)
+            return None
         if cfg.dry_run:
             logger.info(
                 "[DRY_RUN] Would buy %s %s $%.2f at %.4f (model_p=%.4f edge=%.4f)",

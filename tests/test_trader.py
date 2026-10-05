@@ -79,6 +79,16 @@ class FakeClob:
         return MARKET_INFO
 
 
+class NoBookClob(FakeClob):
+    """The CLOB has no book for the token, so the executor falls back to Gamma's quote."""
+
+    def get_order_book(self, token_id):
+        self.book_calls += 1
+        exc = RuntimeError("No orderbook exists for the requested token id")
+        exc.status_code = 404
+        raise exc
+
+
 def market(bid=0.39, ask=0.41, market_id="m-1", days=90):
     return ActiveMarket(
         market_id=market_id,
@@ -203,6 +213,58 @@ def test_exit_with_no_bids_holds_without_tripping_the_breaker(tmp_path, caplog):
     assert trader.risk.consecutive_failures == 0
     assert trader.check_entry_gate(datetime.now(UTC))
     assert kinds(tmp_path) == []  # no order / failed_order spam every 30s
+
+
+def fallback_trader(tmp_path, mode, **kwargs):
+    """A trader whose CLOB has no books; live gets a real (allowed) executor and ledger."""
+    clob = NoBookClob()
+    if mode != "live":
+        return make_trader(tmp_path, mode=mode, clob=clob, **kwargs)
+    return make_trader(
+        tmp_path, mode="live", clob=clob, intents=OrderIntentLedger(tmp_path / "intents.sqlite3"),
+        executor=ExecutionClient(mode="live", allow_live=True, clob_client=clob), **kwargs,
+    )
+
+
+@pytest.mark.parametrize("mode", ["paper", "shadow", "live"])
+def test_no_entry_on_a_fallback_book(tmp_path, mode):
+    # Edge clears at Gamma's quote, but there is no CLOB book: the fallback
+    # book's 1M shares at the ask are not liquidity anyone is offering.
+    trader = fallback_trader(tmp_path, mode)
+
+    stats = trader.scan()
+
+    assert not trader.positions.has_position("m-1")
+    assert stats["synthetic_book_skipped"] == 1 and stats["book_sources"] == {"synthetic": 1}
+    assert kinds(tmp_path) == []  # no order, failed_order or open
+    if mode != "live":
+        assert trader.executor._client.book_calls == 1
+    else:
+        assert trader.intents.outstanding() == [] and trader.risk.consecutive_failures == 0
+    if mode != "paper":
+        quote = [e for e in events(tmp_path, DIAGNOSTICS_JSONL) if e["event"] == "shadow_quote"][0]
+        assert quote["book_source"] == "synthetic" and quote["reason"] == "executable_edge"
+
+
+@pytest.mark.parametrize("mode", ["paper", "shadow", "live"])
+def test_no_exit_fill_on_a_fallback_book_holds_as_live_does(tmp_path, mode, caplog):
+    caplog.set_level(logging.INFO)
+    # Gamma bids 0.70 against a ~0.52 model: the exit rule wants out, but the
+    # only book is the fallback one. Live refuses it before posting and holds.
+    trader = fallback_trader(tmp_path, mode, scanner=FakeScanner([], quote=(0.70, 0.72)))
+    hold(trader)
+
+    for _ in range(3):
+        trader.reprice_positions()
+    stats = trader.scan()
+
+    pos = trader.positions.get_position("m-1")
+    assert pos is not None and pos.token_size == 100.0
+    assert "[EXIT_UNFILLED]" in caplog.text and "real CLOB book" in caplog.text
+    assert kinds(tmp_path) == []  # no order, close or failed_order
+    assert trader.risk.consecutive_failures == 0
+    assert stats["synthetic_book_exits_held"] == 3
+    assert trader.scan()["synthetic_book_exits_held"] == 0  # reset per summary
 
 
 def test_resolved_position_settles_at_payout(tmp_path):

@@ -133,6 +133,8 @@ If a held market drops out of the scan, the bot keeps using the last quote it sa
 
 Paper and shadow modes use only public endpoints and never load a wallet key.
 
+**Fallback books.** When the CLOB has no book for a token (the fetch fails or returns 404), the executor builds a synthetic book from Gamma's bid/ask, with 1,000,000 shares at each. It is used only to mark positions. No mode fills on it: live rejects it before posting, and paper and shadow reject it the same way. An entry candidate on a fallback book is still journaled (`signal_evaluation`, and `shadow_quote` with its `book_source`), then skipped and counted as `synthetic_book_skipped` in the scan summary. An exit on one holds with `[EXIT_UNFILLED]`, retries on the next reprice, and is counted as `synthetic_book_exits_held`.
+
 Live mode needs these environment variables:
 - `POLYMARKET_PRIVATE_KEY`
 - `POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, `POLYMARKET_API_PASSPHRASE`
