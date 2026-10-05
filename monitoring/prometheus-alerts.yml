@@ -13,6 +13,17 @@ groups:
           summary: "TurtleQuant exporter cannot read state files"
           description: "Positions or history JSON under /opt/turtlequant/state is missing or unreadable."
 
+      # The rule above needs a scrape to succeed: a dead or hung exporter
+      # drops the series and never trips it.
+      - alert: TurtleQuantExporterUnreachable
+        expr: up{job="turtlequant"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "TurtleQuant exporter is not answering scrapes"
+          description: "Prometheus cannot scrape turtlequant-grafana-exporter:8004 — check the container and docker logs."
+
       - alert: TurtleQuantBotStale
         expr: turtlequant_bot_log_age_sec{strategy="turtlequant"} > 180
         for: 3m

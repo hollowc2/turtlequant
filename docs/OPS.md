@@ -86,6 +86,7 @@ docker compose -f /opt/monitoring/docker-compose.yml exec prometheus \
 | Bot stale | Bot log older than 180s for 3m |
 | No scans | Bot log older than 120s for 5m |
 | Exporter down | `exporter_scrape_success == 0` for 5m |
+| Exporter unreachable | `up{job="turtlequant"} == 0` for 5m: the exporter is dead or hung |
 | Exporter restarted | The exporter process restarted in the last 15m |
 | Failed orders | More than 3 failed orders in 15m |
 | Entries halted | `entries_halted == 1` for 15m. The `reason` label is one of `broker_failures`, `data_errors`, `stale_data`, `drawdown`, `daily_loss` or `halt_file`. Drawdown gating uses marked equity (realized NAV plus open positions at the executable bid) |
@@ -108,7 +109,9 @@ docker compose -f /opt/monitoring/docker-compose.yml exec prometheus \
 | Container | Healthy when |
 |-----------|--------------|
 | `turtlequant-bot` | The log file (`LOG_FILE`, default `turtlequant-bot.log`) was modified in the last 180s |
-| `turtlequant-grafana-exporter` | `:8004/metrics` responds |
+| `turtlequant-grafana-exporter` | `:8004/metrics` answers 200 |
+
+Both containers run with `init: true` so a healthcheck killed at its timeout is reaped, and both checks use the shell rather than starting python. `tests/test_compose.py` enforces this. On 2026-10-05 helios CPU steal jumped to ~90%. The python healthcheck then timed out every 30s, used nearly all of the exporter container's CPU, and left 1,122 zombies behind python running as PID 1.
 
 ---
 
