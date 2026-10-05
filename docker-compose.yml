@@ -97,7 +97,8 @@ services:
       interval: 60s
       timeout: 10s
       retries: 3
-      start_period: 30s
+      # Imports alone took 2 min on helios when its CPU was starved.
+      start_period: 180s
 
 networks:
   monitoring_net:
