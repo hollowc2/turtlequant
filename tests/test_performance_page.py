@@ -212,14 +212,13 @@ def test_generator_end_to_end(tmp_path):
     assert "https://github.com/hollowc2/turtlequant" in page
 
 
-def test_generator_writes_a_page_per_archived_run(tmp_path):
+def test_generator_shows_only_the_current_run(tmp_path):
     module = _load_generator()
     state_dir = tmp_path / "state"
     old_run = state_dir / "archive" / "20260510T120000Z"
     for event in _history():
         append_history(old_run, event)
     (old_run / "turtlequant-positions.json").write_text(json.dumps({"nav": 1035.0, "total_pnl": 35.0, "positions": []}))
-    (state_dir / "archive" / "notes").mkdir()  # not a timestamp: ignored
     append_history(state_dir, _open("m-5", "2026-05-11T00:00:00+00:00"))
     append_history(state_dir, _close("m-5", "2026-05-11T06:00:00+00:00", -4.0))
     (state_dir / "turtlequant-positions.json").write_text(json.dumps({"nav": 996.0, "total_pnl": -4.0, "positions": []}))
@@ -227,20 +226,10 @@ def test_generator_writes_a_page_per_archived_run(tmp_path):
 
     assert module.main(["--state-dir", str(state_dir), "--output", str(site / "index.html")]) == 0
 
-    main_page = (site / "index.html").read_text()
-    current = (site / "runs" / "current" / "index.html").read_text()
-    archived = (site / "runs" / "20260510T120000Z" / "index.html").read_text()
-    assert not (site / "runs" / "notes").exists()
-    # A reset must not blank the main page: it chains all runs, 35 - 4 on the first run's $1,000.
-    assert "5 closed trades" in main_page and "+$31.00" in main_page
-    assert 'href="runs/20260510T120000Z/"' in main_page and 'href="runs/current/"' in main_page
-    # The current run has its own page.
-    assert "1 closed trades" in current and "-$4.00" in current and 'href="../../"' in current
-    # The archived run keeps its own numbers and links back to the main page.
-    assert "Archived" in archived and "+$35.00" in archived and "4 closed trades" in archived
-    assert 'href="../../"' in archived and "Open When Archived" in archived
-    # Pages differ only in data; the CSP-pinned script is shared.
-    assert _inline_scripts(main_page) == _inline_scripts(archived) == _inline_scripts(current)
+    page = (site / "index.html").read_text()
+    assert "1 closed trades" in page and "-$4.00" in page and "Run started 2026-05-11" in page
+    assert 'class="runs"' not in page and "all runs" not in page
+    assert not (site / "runs").exists()
 
 
 def test_no_runs_strip_without_archives():

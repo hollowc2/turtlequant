@@ -283,6 +283,8 @@ Check two things:
 - Return distribution and trade metrics
 - Open positions and the trade log
 
+It covers the current run only. Runs archived by a state reset are not published.
+
 It runs hourly from `billy`'s crontab, out of `/opt/turtlequant-app`.
 
 ```bash

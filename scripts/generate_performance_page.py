@@ -4,11 +4,8 @@
 Reads the bot's state files and writes a static page. Run hourly from host cron
 (see scripts/performance_page.cron).
 
-A state reset moves the old files into <state-dir>/archive/<YYYYmmddTHHMMSSZ>/.
-Once an archive exists, the main page chains every run's closed trades onto the
-first run's starting NAV (the history Grafana shows), the current run moves to
-runs/current/, and each archived run gets a frozen page at runs/<ts>/. With no
-archive, the main page is simply the current run.
+The page shows only the current run. A state reset moves the old files into
+<state-dir>/archive/<YYYYmmddTHHMMSSZ>/, and those archived runs are not published.
 
 Usage:
     uv run python scripts/generate_performance_page.py
@@ -21,15 +18,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from turtlequant.history import load_history
 from turtlequant.performance_page import (
     MODE_LABELS,
-    ClosedTrade,
-    OpenPosition,
     RunSummary,
     build_closed_trades,
     open_positions_from_state,
@@ -41,9 +35,6 @@ POSITIONS_FILE = "turtlequant-positions.json"
 DEFAULT_STATE_DIR = Path("/opt/turtlequant/state")
 DEFAULT_OUTPUT = Path("/var/www/billybitcoin.cloud/html/turtlequant/index.html")
 DEFAULT_STARTING_NAV = 1000.0
-ARCHIVE_DIR = "archive"
-ARCHIVE_STAMP = "%Y%m%dT%H%M%SZ"
-RUNS_DIR = "runs"
 
 
 def load_positions(state_dir: Path) -> dict:
@@ -73,105 +64,30 @@ def write_atomic(path: Path, content: str) -> None:
     tmp_path.replace(path)
 
 
-@dataclass(frozen=True)
-class Run:
-    summary: RunSummary
-    trades: list[ClosedTrade]
-    open_positions: list[OpenPosition]
-    starting_nav: float
-
-
-def load_run(
-    state_dir: Path, *, run_id: str, path: str, label: str, ended_at: datetime | None, nav_override: float | None
-) -> Run:
+def generate(*, state_dir: Path, output: Path, mode: str, nav_override: float | None) -> int:
     state = load_positions(state_dir)
     events = load_history(state_dir)
     trades = build_closed_trades(events)
     stamps = [ts for ts in (parse_ts(e.get("ts")) for e in events) if ts is not None]
-    return Run(
-        summary=RunSummary(
-            run_id=run_id,
-            path=path,
-            label=label,
-            started_at=min(stamps, default=None),
-            ended_at=ended_at,
-            trade_count=len(trades),
-            total_pnl=sum(t.pnl for t in trades),
-        ),
+    current = RunSummary(
+        run_id="current",
+        path="",
+        label="Current run",
+        started_at=min(stamps, default=None),
+        ended_at=None,
+        trade_count=len(trades),
+        total_pnl=sum(t.pnl for t in trades),
+    )
+    write_atomic(output, render_page(
         trades=trades,
         open_positions=open_positions_from_state(state),
         starting_nav=starting_nav(state, nav_override),
-    )
-
-
-def archived_runs(state_dir: Path) -> list[Run]:
-    """Archived runs, oldest first. Skips directories not named by timestamp or holding no history."""
-    runs = []
-    archive = state_dir / ARCHIVE_DIR
-    for run_dir in sorted(archive.iterdir()) if archive.is_dir() else ():
-        try:
-            ended_at = datetime.strptime(run_dir.name, ARCHIVE_STAMP).replace(tzinfo=UTC)
-        except ValueError:
-            continue
-        if not run_dir.is_dir() or not any(run_dir.glob("turtlequant-history.json*")):
-            continue
-        runs.append(load_run(
-            run_dir,
-            run_id=run_dir.name,
-            path=f"{RUNS_DIR}/{run_dir.name}/",
-            label=f"Run ended {ended_at:%Y-%m-%d}",
-            ended_at=ended_at,
-            nav_override=None,
-        ))
-    return runs
-
-
-def chain_runs(runs: list[Run], *, path: str) -> Run:
-    """Every run's closed trades on one curve, starting from the first run's NAV."""
-    trades = sorted((t for run in runs for t in run.trades), key=lambda t: t.closed_at)
-    return Run(
-        summary=RunSummary(
-            run_id="all",
-            path=path,
-            label="All runs, chained",
-            started_at=min((r.summary.started_at for r in runs if r.summary.started_at), default=None),
-            ended_at=None,
-            trade_count=len(trades),
-            total_pnl=sum(t.pnl for t in trades),
-        ),
-        trades=trades,
-        open_positions=runs[-1].open_positions,
-        starting_nav=runs[0].starting_nav,
-    )
-
-
-def generate(*, state_dir: Path, output: Path, mode: str, nav_override: float | None) -> int:
-    archived = archived_runs(state_dir)
-    current = load_run(
-        state_dir,
-        run_id="current",
-        path=f"{RUNS_DIR}/current/" if archived else "",
-        label="Current run",
-        ended_at=None,
-        nav_override=nav_override,
-    )
-    # Strip order: all runs chained (the main page), current run, then archived runs newest first.
-    runs = [chain_runs([*archived, current], path=""), current, *reversed(archived)] if archived else [current]
-    pages = [(run, output.parent / run.summary.path / output.name, "../../" if run.summary.path else "") for run in runs]
-    summaries = [run.summary for run, _, _ in pages]
-    generated_at = datetime.now(UTC)
-    for run, path, root_href in pages:
-        write_atomic(path, render_page(
-            trades=run.trades,
-            open_positions=run.open_positions,
-            starting_nav=run.starting_nav,
-            generated_at=generated_at,
-            mode=mode,
-            runs=summaries,
-            active_run=run.summary.run_id,
-            root_href=root_href,
-        ))
-    return current.summary.trade_count
+        generated_at=datetime.now(UTC),
+        mode=mode,
+        runs=[current],
+        active_run=current.run_id,
+    ))
+    return len(trades)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -200,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"generate_performance_page failed: {exc}", file=sys.stderr)
         return 1
-    print(f"{datetime.now(UTC).isoformat()} wrote {args.output} ({count} closed trades in the current run)")
+    print(f"{datetime.now(UTC).isoformat()} wrote {args.output} ({count} closed trades)")
     return 0
 
 
