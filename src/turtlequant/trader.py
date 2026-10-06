@@ -31,7 +31,13 @@ from turtlequant.clob_execution import (
 )
 from turtlequant.data.binance import ASSET_TO_SYMBOL, fetch_latest_closes
 from turtlequant.history import append_history
-from turtlequant.market_parser import MarketParams, OptionType, parse_market, strike_is_plausible
+from turtlequant.market_parser import (
+    SCORE_ONLY_TYPES,
+    MarketParams,
+    OptionType,
+    parse_market,
+    strikes_are_plausible,
+)
 from turtlequant.market_scanner import ActiveMarket, MarketScanner
 from turtlequant.order_intents import OrderIntentLedger
 from turtlequant.order_reconciliation import ReconciliationError, reconcile_intent
@@ -67,6 +73,19 @@ class Pricing:
     smile_prob: float | None = None
     forward: float | None = None
     dsigma_dk: float | None = None
+    # RANGE: the P(S_T > K1) and P(S_T > K2) legs this was built from.
+    legs: tuple[Pricing, Pricing] | None = None
+
+
+def range_legs(params: MarketParams) -> tuple[MarketParams, MarketParams]:
+    """The two "above" markets whose difference is a range: P(S_T > K1) - P(S_T > K2)."""
+    assert params.upper_strike is not None
+    above = replace(params, option_type=OptionType.EUROPEAN, upper_strike=None)
+    return above, replace(above, strike=params.upper_strike)
+
+
+def _clamp_prob(p: float) -> float:
+    return max(1e-6, min(1.0 - 1e-6, p))
 
 
 @dataclass(frozen=True)
@@ -142,6 +161,10 @@ class TraderConfig:
     # resolution; with a degraded vol source (not live Deribit) hold.
     exit_rule: str = "legacy"
     exit_margin: float = 0.01
+    # "less than K" (european_put) and "between K1 and K2" (range) markets
+    # are priced and written to market_marks for scoring; entries in them
+    # need this flag.
+    trade_put_range: bool = False
 
     @property
     def persist(self) -> bool:
@@ -324,6 +347,8 @@ class Trader:
 
     def price(self, params: MarketParams, spot: float) -> Pricing:
         """Price a market under the configured model; the other is kept for diagnostics."""
+        if params.option_type == OptionType.RANGE:
+            return self._price_range(params, spot)
         vs = self.vol_surfaces[params.asset]
         sigma = vs.get_iv(spot, params.strike, params.expiry)
         source = vs.last_source
@@ -339,8 +364,29 @@ class Trader:
             return Pricing(smile_prob, s_sigma, source, legacy, smile_prob, forward, slope)
         return Pricing(legacy, sigma, source, legacy, smile_prob, forward, slope)
 
+    def _price_range(self, params: MarketParams, spot: float) -> Pricing:
+        """P(K1 <= S_T < K2) = P(S_T > K1) - P(S_T > K2), each leg at its own strike's IV and skew.
+
+        A tie at a bracket edge resolves to the higher bracket; under a
+        continuous S_T it has probability zero, so ">" and ">=" price alike.
+        """
+        lo, hi = (self.price(leg, spot) for leg in range_legs(params))
+        legacy = _clamp_prob(lo.legacy_prob - hi.legacy_prob)
+        smile = (
+            None if lo.smile_prob is None or hi.smile_prob is None
+            else _clamp_prob(lo.smile_prob - hi.smile_prob)
+        )
+        # The weaker leg's vol source gates entries for the whole range.
+        source = lo.vol_source if lo.vol_source != "deribit" else hi.vol_source
+        if self.config.pricing_model == "smile" and smile is not None:
+            return Pricing(smile, lo.sigma, source, legacy, smile, lo.forward, None, legs=(lo, hi))
+        return Pricing(legacy, lo.sigma, source, legacy, smile, lo.forward, None, legs=(lo, hi))
+
     def dollar_delta_per_share(self, params: MarketParams, spot: float, pricing: Pricing) -> float:
         """dp/dS * S for one YES share under the active model (±1% spot bump, sticky strike)."""
+        if pricing.legs is not None:
+            (lo_params, hi_params), (lo, hi) = range_legs(params), pricing.legs
+            return self.dollar_delta_per_share(lo_params, spot, lo) - self.dollar_delta_per_share(hi_params, spot, hi)
         eps = 0.01
 
         def prob(scale: float) -> float:
@@ -748,7 +794,7 @@ class Trader:
         if spot is None or spot <= 0:
             _inc(stats, "spot_missing")
             return
-        if not strike_is_plausible(params.strike, spot):
+        if not strikes_are_plausible(params, spot):
             # A strike far from spot means the question was misparsed (wrong
             # units or not a price market) — never a real edge.
             _inc(stats, "implausible_strike")
@@ -811,6 +857,11 @@ class Trader:
         mid_edge = model_prob - mid_price
         if mid_edge < cfg.entry_threshold:
             return None
+        if params.option_type in SCORE_ONLY_TYPES and not cfg.trade_put_range:
+            # Scored in market_marks only. Checked before the candidate
+            # counters and journals so the soak metrics are unchanged.
+            _inc(stats, "score_only_blocked")
+            return None
         if cfg.model_consensus:
             if pricing.smile_prob is None:
                 _inc(stats, "consensus_blocked")
@@ -862,6 +913,7 @@ class Trader:
                 "market_id": market.market_id,
                 "asset": params.asset,
                 "strike": params.strike,
+                "upper_strike": params.upper_strike,
                 "expiry": params.expiry.isoformat(),
                 "option_type": params.option_type.value,
                 "outcome": side.outcome,
@@ -961,7 +1013,8 @@ class Trader:
                 market.market_id, side.token_id, "BUY", plan.size_usd,
                 {
                     "question": market.question, "asset": params.asset,
-                    "strike": params.strike, "expiry_iso": params.expiry.isoformat(),
+                    "strike": params.strike, "upper_strike": params.upper_strike,
+                    "expiry_iso": params.expiry.isoformat(),
                     "option_type": params.option_type.value, "model_prob": model_prob,
                     "condition_id": market.condition_id, "outcome": side.outcome,
                     "yes_token_id": market.yes_token_id, "no_token_id": market.no_token_id,
@@ -1001,6 +1054,7 @@ class Trader:
             question=market.question,
             asset=params.asset,
             strike=params.strike,
+            upper_strike=params.upper_strike,
             expiry=params.expiry,
             option_type=params.option_type.value,
             yes_token_id=market.yes_token_id,
@@ -1033,6 +1087,7 @@ class Trader:
                 "question": market.question[:120],
                 "asset": params.asset,
                 "strike": params.strike,
+                "upper_strike": params.upper_strike,
                 "expiry": params.expiry.isoformat(),
                 "option_type": params.option_type.value,
                 "outcome": side.outcome,
@@ -1066,7 +1121,7 @@ def _mark_row(market: ActiveMarket, params: MarketParams, pricing: Pricing) -> d
     def r(value: float | None) -> float | None:
         return None if value is None else round(value, 5)
 
-    return {
+    row: dict[str, object] = {
         "id": market.market_id,
         "a": params.asset,
         "t": params.option_type.value,
@@ -1079,11 +1134,15 @@ def _mark_row(market: ActiveMarket, params: MarketParams, pricing: Pricing) -> d
         "v": r(pricing.sigma),
         "src": pricing.vol_source,
     }
+    if params.upper_strike is not None:
+        row["k2"] = params.upper_strike
+    return row
 
 
 def _position_params(pos: Position) -> MarketParams:
     return MarketParams(
-        asset=pos.asset, strike=pos.strike, expiry=pos.expiry, option_type=OptionType(pos.option_type)
+        asset=pos.asset, strike=pos.strike, expiry=pos.expiry, option_type=OptionType(pos.option_type),
+        upper_strike=pos.upper_strike,
     )
 
 

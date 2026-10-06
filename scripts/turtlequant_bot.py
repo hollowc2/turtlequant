@@ -319,6 +319,13 @@ def main() -> None:
         help="Outcome tokens to buy: 'yes' (default) or 'yes,no' to also buy NO when the model is below the market",
     )
     parser.add_argument(
+        "--trade-put-range",
+        action=argparse.BooleanOptionalAction,
+        default=os.getenv("TRADE_PUT_RANGE", "").lower() in ("1", "true", "yes"),
+        help="Allow entries in 'less than $K' and 'between $K1 and $K2' markets. "
+        "Off: they are priced and scored in market_marks only",
+    )
+    parser.add_argument(
         "--exit-rule",
         choices=("legacy", "ev"),
         default=os.getenv("EXIT_RULE", "legacy"),
@@ -478,6 +485,7 @@ def main() -> None:
             sides=sides,
             exit_rule=args.exit_rule,
             exit_margin=args.exit_margin,
+            trade_put_range=args.trade_put_range,
         ),
         state_dir=state_dir,
         scanner=scanner,
@@ -506,6 +514,7 @@ def main() -> None:
     logger.info("Kelly frac  : %.2f", args.kelly_fraction)
     logger.info("Pricing     : %s%s", args.pricing_model, " (entries need legacy+smile consensus)" if args.model_consensus else "")
     logger.info("Sides       : %s", ",".join(sides))
+    logger.info("Put/range   : %s", "entries allowed" if args.trade_put_range else "scored only, no entries")
     logger.info("Min entry   : %.0fh to resolution", args.min_entry_hours)
     logger.info("Max entry   : %s", f"{args.max_entry_hours:.0f}h to resolution" if args.max_entry_hours else "no limit")
     logger.info("Exit rule   : %s", args.exit_rule)

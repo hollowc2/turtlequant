@@ -38,7 +38,10 @@ _EXPIRY = datetime.now(UTC) + timedelta(days=60)
         "Will the Bitcoin hashrate be above 1,000 EH/s by December?",
         "Will Bitcoin reach $100k or dip to $70k first?",
         "Will Bitcoin dip to $70k before it hits $100k?",
-        "Will Bitcoin be between $80,000 and $85,000 on September 30?",
+        "Will Bitcoin dominance be between 57.00% and 58.00% on October 2?",
+        "Will Bitcoin dominance be less than 57.00% on October 2?",
+        "Will Bitcoin reach $100k between October 1 and October 7?",
+        "Will the price of Bitcoin be between $80,000 and $78,000 on October 6?",  # inverted bracket
         "Will Solana flip Ethereum by December 31?",
     ],
 )
@@ -107,12 +110,18 @@ _REAL_QUESTIONS = [
     ("Will Bitcoin dip to $40,000 by December 31, 2026?", ("barrier_down", "btc", 40_000)),
     ("Will Bitcoin dip to $80,000 September 21-27?", ("barrier_down", "btc", 80_000)),
     ("Will XRP hit $2 by September 30, 2026?", ("barrier", "xrp", 2)),
+    # The daily price ladder (Gamma, 2026-10-05): "less than" bottom bracket,
+    # "between" brackets, "greater than" top bracket.
+    ("Will the price of Bitcoin be less than $74,000 on October 6?", ("european_put", "btc", 74_000)),
+    ("Will the price of Ethereum be less than $2,200 on October 6?", ("european_put", "eth", 2_200)),
+    ("Will the price of Solana be less than $70 on October 6?", ("european_put", "sol", 70)),
+    ("Will the price of Bitcoin be between $74,000 and $76,000 on October 6?", ("range", "btc", 74_000)),
+    ("Will the price of Bitcoin be between $76,000 and $78,000 on September 25?", ("range", "btc", 76_000)),
+    ("Will the price of Ethereum be greater than $3,100 on October 6?", ("european", "eth", 3_100)),
     # Not a single-threshold price market on a supported asset.
     ("Bitcoin Up or Down on September 25?", None),
     ("Bitcoin Up or Down - September 24, 11PM ET", None),
     ("Ethereum all time high by December 31, 2026?", None),
-    ("Will the price of Bitcoin be between $76,000 and $78,000 on September 25?", None),
-    ("Will the price of Bitcoin be less than $72,000 on September 25?", None),  # no put template yet
     ("Will Solana hit $60 or $140 first?", None),
     ("Will Bitcoin Dominance hit 70% before 2027?", None),
     ("Will the Bitcoin Volatility Index dip to 30 by September 30?", None),
@@ -134,3 +143,19 @@ def test_parser_on_real_polymarket_questions(question, expected):
     else:
         assert params is not None
         assert (params.option_type.value, params.asset, params.strike) == expected
+
+
+@pytest.mark.parametrize(
+    ("question", "lower", "upper"),
+    [
+        ("Will the price of Bitcoin be between $74,000 and $76,000 on October 6?", 74_000, 76_000),
+        ("Will the price of Ethereum be between $2,200 and $2,300 on October 6?", 2_200, 2_300),
+        ("Will the price of XRP be between $1.10 and $1.20 on October 6?", 1.10, 1.20),
+        ("Will the price of Solana be between $70 and $80 on October 6?", 70, 80),
+    ],
+)
+def test_range_keeps_both_bracket_bounds(question, lower, upper):
+    params = parse_market(question, _EXPIRY)
+
+    assert params is not None and params.option_type.value == "range"
+    assert (params.strike, params.upper_strike) == (lower, upper)

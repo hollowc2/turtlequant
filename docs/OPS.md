@@ -244,7 +244,7 @@ docker compose up -d
 | Script | Purpose |
 |--------|---------|
 | `monitor_turtlequant.py` | Terminal dashboard: open positions with current edge, recent events, closed-position summary |
-| `evaluate_models.py` | Scores the legacy model, the smile model and the market mid against resolved markets, using `market_marks` snapshots. Reports Brier score, reliability, and net P&L per share for trades that clear the threshold |
+| `evaluate_models.py` | Scores the legacy model, the smile model and the market mid against resolved markets, using `market_marks` snapshots. Reports Brier score, reliability, and net P&L per share for trades that clear the threshold. `--option-types european_put,range` scores only the "less than" and "between" markets; `checkpoint_report.py` keeps its decision tables on `european,barrier,barrier_down` |
 | `calibrate_turtlequant.py` | Checks `probability_engine` calibration on simulated contracts using historical OHLCV and realized vol. **It does not test the model that trades** |
 | `exit_counterfactual.py` | Compares each past exit with what holding to resolution would have paid |
 | `order_intents.py` | Lists and resolves live order intents (see [Order-intent journal](#order-intent-journal)) |

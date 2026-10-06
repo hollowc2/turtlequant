@@ -49,6 +49,10 @@ The parser turns each market's question into a contract: `(asset, strike, expiry
 | European | "Will BTC be above $75k on March 30?" |
 | Barrier up | "Will BTC reach $100k before March?" |
 | Barrier down | "Will ETH fall to $2,000 before expiry?" |
+| European put | "Will the price of Bitcoin be less than $74,000 on October 6?" |
+| Range | "Will the price of Bitcoin be between $74,000 and $76,000 on October 6?" |
+
+The last two are the bottom and middle brackets of Polymarket's daily price ladder, where "greater than" is the top bracket. A close exactly on a bracket edge resolves to the higher bracket, so "less than K" is `S_T < K` and "between K1 and K2" is `K1 ≤ S_T < K2`. Each pricing model prices "less than" as `1 − P(S_T > K)`, and "between" as `P(S_T > K1) − P(S_T > K2)` with each leg at its own strike's IV (and, in the smile model, its own skew term). Both types are written to `market_marks` and scored by `evaluate_models.py`. The bot does not enter them unless `--trade-put-range` (`TRADE_PUT_RANGE`, off by default) is set.
 
 ### 3. Build the vol surface
 The bot takes mark IV from Deribit and interpolates it across moneyness (log-linear) and expiry (√T-linear). If Deribit has no matching instruments, it falls back to 30-day realized vol from Binance.

@@ -59,7 +59,7 @@ class Position:
     asset: str
     strike: float
     expiry_iso: str  # ISO 8601 UTC
-    option_type: str  # "european" | "barrier"
+    option_type: str  # an OptionType value: "european", "barrier", "range", ...
     yes_token_id: str
     entry_price: float  # what we paid per YES token
     size_usd: float  # notional size in USD
@@ -79,6 +79,7 @@ class Position:
     condition_id: str = ""  # CLOB condition id, used for fee lookups
     outcome: str = "YES"  # "YES" | "NO": the token held
     no_token_id: str = ""
+    upper_strike: float | None = None  # range markets: the bracket's upper bound
 
     @property
     def token_id(self) -> str:
@@ -550,6 +551,7 @@ def make_position(
     condition_id: str = "",
     outcome: str = "YES",
     no_token_id: str = "",
+    upper_strike: float | None = None,
 ) -> Position:
     """Factory helper to build a Position from trade decision data."""
     opened_at = datetime.now(UTC).isoformat()
@@ -572,4 +574,5 @@ def make_position(
         condition_id=condition_id,
         outcome=outcome,
         no_token_id=no_token_id,
+        upper_strike=upper_strike,
     )

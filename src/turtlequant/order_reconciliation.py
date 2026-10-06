@@ -75,6 +75,8 @@ def reconcile_intent(intent: OrderIntent, executor: ExecutionClient, positions: 
             raise ReconciliationError(f"intent {intent.id} BUY disagrees with local position")
         if any(key not in meta for key in required):
             raise ReconciliationError(f"intent {intent.id} lacks safe BUY position metadata")
+        if meta["option_type"] == "range" and meta.get("upper_strike") is None:
+            raise ReconciliationError(f"intent {intent.id} is a range BUY without an upper strike")
         outcome = str(meta.get("outcome", "YES"))
         if outcome not in ("YES", "NO") or (outcome == "NO" and not meta.get("yes_token_id")):
             raise ReconciliationError(f"intent {intent.id} has invalid outcome metadata")
@@ -90,6 +92,7 @@ def reconcile_intent(intent: OrderIntent, executor: ExecutionClient, positions: 
                 condition_id=str(meta.get("condition_id", "")),
                 outcome=outcome,
                 no_token_id=intent.token_id if outcome == "NO" else str(meta.get("no_token_id", "")),
+                upper_strike=None if meta.get("upper_strike") is None else float(meta["upper_strike"]),
             )
         except (TypeError, ValueError) as exc:
             raise ReconciliationError(f"intent {intent.id} has invalid BUY position metadata") from exc

@@ -16,6 +16,8 @@ only when both models clear the threshold on the same side (YES on the lower
 probability, NO on the higher), and ``blocked`` is the smile trades in
 markets where consensus never traded. ``--min-entry-hours`` and
 ``--max-entry-hours`` restrict trades (not Brier) to the deployed tenor window.
+``--option-types`` scores only those market types (default: all), e.g.
+``european_put,range`` for the "less than" and "between" ladders.
 
 The calibration script (calibrate_turtlequant.py) scores a realized-vol
 model on simulated contracts; this scores the models that trade, on the
@@ -221,17 +223,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--threshold", type=float, default=0.05)
     parser.add_argument("--min-entry-hours", type=float, default=0.0, help="score trades only this far from expiry")
     parser.add_argument("--max-entry-hours", type=float, default=0.0, help="and no further (0 = no limit)")
+    parser.add_argument(
+        "--option-types", default="", help="comma-separated market types to score, e.g. european,barrier (default: all)"
+    )
     args = parser.parse_args(argv)
 
-    observations = load_observations(args.state_dir)
+    types = {t.strip() for t in args.option_types.split(",") if t.strip()}
+    observations = [o for o in load_observations(args.state_dir) if not types or o.option_type in types]
+    scope = f" [{','.join(sorted(types))}]" if types else ""
     if not observations:
-        print(f"no market_marks snapshots in {args.state_dir}", file=sys.stderr)
+        print(f"no market_marks snapshots in {args.state_dir}{scope}", file=sys.stderr)
         return 1
     now = datetime.now(UTC)
     expired = sorted({o.market_id for o in observations if o.expiry < now})
     scanner = MarketScanner()
     resolutions = fetch_resolutions(expired, scanner.fetch_resolution)
-    print(f"{len(observations)} observations, {len(expired)} expired markets, {len(resolutions)} resolved")
+    print(f"{len(observations)} observations, {len(expired)} expired markets, {len(resolutions)} resolved{scope}")
 
     report = evaluate(
         observations, resolutions, threshold=args.threshold,

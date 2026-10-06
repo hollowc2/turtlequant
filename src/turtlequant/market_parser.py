@@ -2,6 +2,8 @@
 
 Classifies Polymarket question text into:
   - European digital: "Will BTC be above $X on [date]?" → P(S_T > K)
+  - European put: "Will the price of BTC be less than $X on [date]?" → P(S_T < K)
+  - Range: "Will the price of BTC be between $X and $Y on [date]?" → P(X <= S_T < Y)
   - Barrier (touch): "Will BTC reach/hit $X before [date]?" → P(max(S_t) > K)
   - Unclassified: logged to corpus file for review; trade skipped
 
@@ -33,6 +35,12 @@ class OptionType(StrEnum):
         "barrier_down"  # P(min(S_t) < K) for any t in [0, T] — downside touch
     )
     EUROPEAN_PUT = "european_put"  # P(S_T < K) at expiry
+    RANGE = "range"  # P(K <= S_T < upper_strike) at expiry
+
+
+# Types the bot may only score (market_marks), never enter, unless
+# --trade-put-range is set: added during the Phase 1 soak.
+SCORE_ONLY_TYPES = frozenset({OptionType.EUROPEAN_PUT, OptionType.RANGE})
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +57,7 @@ class MarketParams:
     expiry: datetime  # UTC
     option_type: OptionType
     raw_question: str = ""
+    upper_strike: float | None = None  # RANGE only: the bracket's upper bound
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +139,24 @@ _BARRIER_DOWN_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# Polymarket's daily price ladder (one event per asset and date):
+#   "Will the price of Bitcoin be less than $74,000 on October 6?"
+#   "Will the price of Bitcoin be between $74,000 and $76,000 on October 6?"
+#   "Will the price of Bitcoin be greater than $92,000 on October 6?" (_EUROPEAN_RE)
+# The rules resolve a close exactly on a bracket edge to the higher bracket,
+# so "less than K" is S_T < K and "between K1 and K2" is K1 <= S_T < K2.
+# Anchored: only this exact wording is priced; any other "between" question
+# is still rejected by _REJECT_RE.
+_PUT_RE = re.compile(
+    rf"^\s*Will\s+(?:the\s+price\s+of\s+)?{_ASSET_PAT}\s+be\s+less\s+than\s+{_STRIKE_PAT}\s+on\s+{_DATE_PAT}",
+    re.IGNORECASE,
+)
+_RANGE_RE = re.compile(
+    rf"^\s*Will\s+(?:the\s+price\s+of\s+)?{_ASSET_PAT}\s+be\s+between\s+{_STRIKE_PAT}\s+and\s+{_STRIKE_PAT}"
+    rf"\s+on\s+{_DATE_PAT}",
+    re.IGNORECASE,
+)
+
 # Polymarket's short-form template: "Ethereum above 2,600 on September 23, 8PM ET?"
 # Anchored so a stray asset mention elsewhere in a question cannot match.
 _EUROPEAN_SIMPLE_RE = re.compile(
@@ -183,9 +210,18 @@ def parse_market(
             If provided, overrides any date parsed from the question text.
     """
     question = question.strip()
+    # Before the reject list, which still rejects every other "between".
+    params = _try_range(question, resolution_time)
+    if params is not None:
+        return params
+
     if _REJECT_RE.search(question):
         _log_unclassified(question)
         return None
+
+    params = _try_put(question, resolution_time)
+    if params is not None:
+        return params
 
     # Try European pattern first
     params = _try_european(question, resolution_time)
@@ -227,6 +263,29 @@ def _try_european(
     return _build_params(
         question, asset_raw, strike_raw, date_raw, OptionType.EUROPEAN, resolution_time
     )
+
+
+def _try_put(question: str, resolution_time: datetime | None) -> MarketParams | None:
+    m = _PUT_RE.search(question)
+    if m is None:
+        return None
+    asset_raw, strike_raw, date_raw = m.group(1), m.group(2), m.group(3)
+    return _build_params(
+        question, asset_raw, strike_raw, date_raw, OptionType.EUROPEAN_PUT, resolution_time
+    )
+
+
+def _try_range(question: str, resolution_time: datetime | None) -> MarketParams | None:
+    m = _RANGE_RE.search(question)
+    if m is None:
+        return None
+    asset_raw, lower_raw, upper_raw, date_raw = m.group(1), m.group(2), m.group(3), m.group(4)
+    upper = _parse_strike(upper_raw)
+    params = _build_params(question, asset_raw, lower_raw, date_raw, OptionType.RANGE, resolution_time)
+    if params is None or upper is None or upper <= params.strike:
+        return None
+    params.upper_strike = upper
+    return params
 
 
 def _try_barrier(
@@ -324,6 +383,12 @@ def _parse_strike(raw: str) -> float | None:
         return float(number) * multiplier
     except ValueError:
         return None
+
+
+def strikes_are_plausible(params: MarketParams, spot: float) -> bool:
+    """strike_is_plausible for every strike the market has (both bounds of a range)."""
+    strikes = (params.strike,) if params.upper_strike is None else (params.strike, params.upper_strike)
+    return all(strike_is_plausible(k, spot) for k in strikes)
 
 
 def strike_is_plausible(strike: float, spot: float) -> bool:

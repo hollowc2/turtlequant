@@ -70,3 +70,15 @@ def test_put_skew_lowers_the_down_touch_the_legacy_model_overprices():
 
 def test_already_touched_barrier_is_certain():
     assert smile_probability(_params(OptionType.BARRIER, 90.0), 100.0, 100.0, 0.6, -0.01) == 1.0
+
+
+def test_single_sigma_pricers_refuse_a_range():
+    # A range needs each strike's own IV (Trader.price); one sigma would
+    # misprice it, and smile_probability would treat it as a down-barrier.
+    from turtlequant.probability_engine import compute_probability, smile_probability
+
+    params = MarketParams("btc", 82_000.0, datetime.now(UTC) + timedelta(days=5), OptionType.RANGE, upper_strike=86_000.0)
+    with pytest.raises(ValueError):
+        compute_probability(params, 84_000.0, 0.6)
+    with pytest.raises(ValueError):
+        smile_probability(params, 84_000.0, 84_500.0, 0.6, 0.0)

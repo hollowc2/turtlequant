@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -678,3 +679,143 @@ def test_ev_exit_rule_holds_when_the_vol_source_is_degraded(tmp_path):
     trader.reprice_positions()
 
     assert trader.positions.has_position("m-1")
+
+
+# ---------------------------------------------------------------------------
+# "less than" (european_put) and "between" (range) markets
+# ---------------------------------------------------------------------------
+
+RANGE_Q = "Will the price of Bitcoin be between $82,000 and $86,000 on December 31?"
+PUT_Q = "Will the price of Bitcoin be less than $80,000 on December 31?"
+
+
+class StrikeVol(FakeVol):
+    """IV and smile slope that change with the strike, so each range leg must use its own."""
+
+    def get_iv(self, _spot, strike, _expiry):
+        return 0.40 + strike / 400_000  # 82k: 0.605, 86k: 0.615
+
+    def smile(self, _spot, strike, _expiry):
+        return self.get_iv(_spot, strike, _expiry), -0.000004 * 80_000 / strike, 84_500.0
+
+
+def priced_market(question, bid, ask, days=5):  # daily ladders are short-dated
+    return replace(market(bid=bid, ask=ask, days=days), question=question)
+
+
+@pytest.mark.parametrize("pricing_model", ["legacy", "smile"])
+def test_range_is_the_difference_of_two_above_legs_each_at_its_own_strike(tmp_path, pricing_model):
+    from turtlequant.market_parser import MarketParams, OptionType, parse_market
+    from turtlequant.probability_engine import digital_probability, terminal_above_probability
+
+    trader = make_trader(tmp_path, vol=StrikeVol(), pricing_model=pricing_model)
+    expiry = datetime.now(UTC) + timedelta(days=30)
+    params = parse_market(RANGE_Q, expiry)
+    spot = 84_000.0
+
+    pricing = trader.price(params, spot)
+
+    T = (expiry - datetime.now(UTC)).total_seconds() / (365 * 86400)
+    above = {k: digital_probability(spot, k, T, 0.40 + k / 400_000) for k in (82_000, 86_000)}
+    skewed = {
+        k: terminal_above_probability(84_500.0, k, T, 0.40 + k / 400_000, -0.000004 * 80_000 / k)
+        for k in (82_000, 86_000)
+    }
+    assert pricing.legacy_prob == pytest.approx(above[82_000] - above[86_000], abs=1e-6)
+    assert pricing.smile_prob == pytest.approx(skewed[82_000] - skewed[86_000], abs=1e-6)
+    assert pricing.prob == (pricing.smile_prob if pricing_model == "smile" else pricing.legacy_prob)
+    # Pricing both legs at the lower strike's IV gives a different number.
+    one_vol = digital_probability(spot, 82_000, T, 0.605) - digital_probability(spot, 86_000, T, 0.605)
+    assert abs(pricing.legacy_prob - one_vol) > 1e-4
+    lo = trader.price(MarketParams("btc", 82_000.0, expiry, OptionType.EUROPEAN), spot)
+    hi = trader.price(MarketParams("btc", 86_000.0, expiry, OptionType.EUROPEAN), spot)
+    assert trader.dollar_delta_per_share(params, spot, pricing) == pytest.approx(
+        trader.dollar_delta_per_share(MarketParams("btc", 82_000.0, expiry, OptionType.EUROPEAN), spot, lo)
+        - trader.dollar_delta_per_share(MarketParams("btc", 86_000.0, expiry, OptionType.EUROPEAN), spot, hi)
+    )
+
+
+@pytest.mark.parametrize("pricing_model", ["legacy", "smile"])
+def test_less_than_is_one_minus_above_under_each_model(tmp_path, pricing_model):
+    from turtlequant.market_parser import MarketParams, OptionType, parse_market
+
+    trader = make_trader(tmp_path, vol=StrikeVol(), pricing_model=pricing_model)
+    expiry = datetime.now(UTC) + timedelta(days=30)
+
+    put = trader.price(parse_market(PUT_Q, expiry), 84_000.0)
+    above = trader.price(MarketParams("btc", 80_000.0, expiry, OptionType.EUROPEAN), 84_000.0)
+
+    assert put.legacy_prob == pytest.approx(1 - above.legacy_prob)
+    assert put.smile_prob == pytest.approx(1 - above.smile_prob)
+
+
+@pytest.mark.parametrize("question", [RANGE_Q, PUT_Q])
+def test_put_and_range_are_scored_but_not_entered_by_default(tmp_path, question):
+    # Model ~0.26 (range) / ~0.25 (put) at 5 days against a 0.05 mid: a large YES edge.
+    trader = make_trader(
+        tmp_path, vol=StrikeVol(), scanner=FakeScanner([priced_market(question, 0.04, 0.06)]),
+        clob=FakeClob(bids=((0.04, 500),), asks=((0.06, 500),)),
+    )
+
+    stats = trader.scan()
+
+    assert not trader.positions.has_position("m-1")
+    assert stats["score_only_blocked"] == 1 and stats["parsed_markets"] == 1
+    assert stats["mid_edge_candidates"] == 0  # soak metrics see no candidate
+    assert kinds(tmp_path, DIAGNOSTICS_JSONL) == ["scan_summary"]
+    assert kinds(tmp_path) == []
+    (row,) = json.loads((tmp_path / MARKS_JSONL).read_text().splitlines()[0])["rows"]
+    if question == RANGE_Q:
+        assert (row["t"], row["k"], row["k2"]) == ("range", 82_000.0, 86_000.0)
+    else:
+        assert row["t"] == "european_put" and "k2" not in row
+    assert 0.1 < row["pl"] < 0.5 and 0.1 < row["ps"] < 0.5
+
+
+def test_trade_put_range_flag_allows_range_entries_and_reprices_the_bracket(tmp_path):
+    trader = make_trader(
+        tmp_path, vol=StrikeVol(), scanner=FakeScanner([priced_market(RANGE_Q, 0.04, 0.06)]),
+        clob=FakeClob(bids=((0.04, 50_000),), asks=((0.06, 50_000),)), trade_put_range=True,
+    )
+
+    trader.scan()
+
+    pos = trader.positions.get_position("m-1")
+    assert pos is not None and pos.option_type == "range" and pos.upper_strike == 86_000.0
+    opened = [e for e in events(tmp_path) if e["event"] == "open"][0]
+    assert opened["upper_strike"] == 86_000.0
+    reloaded = PositionManager(starting_nav=1000.0, positions_file=tmp_path / "positions.json")
+    assert reloaded.get_position("m-1").upper_strike == 86_000.0
+
+    trader.reprice_positions()
+    trader.scan()  # held: exit check on the range price; asset delta from both legs
+    assert trader.reprice_errors == 0
+    assert trader.asset_risk["btc"]["delta_usd"] != 0.0
+
+
+def test_reconciled_range_buy_without_its_upper_strike_is_refused(tmp_path):
+    from unittest.mock import MagicMock
+
+    from turtlequant.order_intents import OrderIntent
+    from turtlequant.order_reconciliation import ReconciliationError, reconcile_intent
+
+    executor = MagicMock()
+    executor.get_order.return_value = {"status": "matched", "makingAmount": "6000000", "takingAmount": "100000000"}
+    executor.get_trades.return_value = [{
+        "taker_order_id": "o-1", "status": "TRADE_STATUS_CONFIRMED", "trader_side": "TAKER",
+        "size": "100000000", "price": "0.06", "fee_rate_bps": "700",
+    }]
+    executor.get_market_fee.return_value = None
+    meta = {
+        "question": RANGE_Q, "asset": "btc", "strike": 82_000.0, "expiry_iso": "2026-12-31T16:00:00+00:00",
+        "option_type": "range", "model_prob": 0.26, "condition_id": "cond-1", "outcome": "YES",
+    }
+    positions = PositionManager(starting_nav=1000.0, positions_file=tmp_path / "positions.json")
+    intent = OrderIntent(1, "m-1", "yes-1", "BUY", 6.0, "submitted", "o-1", meta)
+
+    with pytest.raises(ReconciliationError, match="upper strike"):
+        reconcile_intent(intent, executor, positions)
+    assert not positions.has_position("m-1")
+
+    reconcile_intent(replace(intent, metadata={**meta, "upper_strike": 86_000.0}), executor, positions)
+    assert positions.get_position("m-1").upper_strike == 86_000.0

@@ -174,6 +174,8 @@ def compute_probability(params: MarketParams, spot: float, sigma: float) -> floa
     Returns:
         Model probability ∈ (0, 1).
     """
+    if params.option_type == OptionType.RANGE:
+        raise ValueError("a range is priced per strike: Trader.price prices P(S_T > K1) - P(S_T > K2)")
     now = datetime.now(UTC)
     T = max((params.expiry - now).total_seconds() / (365 * 86400), 1e-6)
 
@@ -235,6 +237,8 @@ def smile_probability(
     (``P_touch ~ 2 P_terminal`` near zero drift, so the correction carries
     over). This is an approximation; with no skew it equals the flat price.
     """
+    if params.option_type == OptionType.RANGE:
+        raise ValueError("a range is priced per strike: Trader.price prices P(S_T > K1) - P(S_T > K2)")
     now = datetime.now(UTC)
     T = max((params.expiry - now).total_seconds() / (365 * 86400), 1e-6)
     K = params.strike

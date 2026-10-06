@@ -108,3 +108,23 @@ def test_entry_window_limits_trades_but_not_brier(tmp_path):
 
     assert report["smile"]["observations"] == 3
     assert report["smile"]["yes_trades"] == report["consensus"]["yes_trades"] == 1
+
+
+def test_option_types_filter_scores_only_those_markets(tmp_path, monkeypatch, capsys):
+    t0 = datetime.now(UTC) - timedelta(days=3)
+    expiry = t0 + timedelta(days=1)
+    rows = [_row("m-above", expiry, 0.39, 0.41, 0.6, 0.6), {**_row("m-range", expiry, 0.04, 0.06, 0.3, 0.3), "t": "range", "k2": 82000}]
+    append_history(tmp_path, _snapshot(t0, rows))
+    asked: list[str] = []
+
+    class Scanner:
+        def fetch_resolution(self, market_id):
+            asked.append(market_id)
+            return 1.0
+
+    monkeypatch.setattr(evaluate_models, "MarketScanner", Scanner)
+
+    assert evaluate_models.main(["--state-dir", str(tmp_path), "--option-types", "european_put,range"]) == 0
+    assert asked == ["m-range"]
+    assert "1 observations, 1 expired markets, 1 resolved [european_put,range]" in capsys.readouterr().out
+    assert evaluate_models.main(["--state-dir", str(tmp_path), "--option-types", "barrier"]) == 1
