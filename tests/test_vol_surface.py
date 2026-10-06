@@ -126,3 +126,28 @@ def test_stale_surface_is_not_used_when_max_age_is_set():
     assert surface.get_iv(100.0, 100.0, expiry) == 0.45
     assert surface.last_source == "stale"
     assert surface.smile(100.0, 100.0, expiry) is None
+
+
+def test_smile_buckets_are_reused_until_the_surface_or_spot_changes():
+    surface, expiry = _smile_surface()
+    first = surface.smile(100.0, 100.0, expiry)
+
+    built = surface._forward_buckets
+    assert surface.smile(100.0, 105.0, expiry) is not None
+    assert surface._forward_buckets is built  # no rebuild for another strike
+
+    # A refresh replaces the point list: the next lookup must see the new IVs.
+    surface._iv_points = [IVPoint(p.strike, p.expiry, p.mark_iv + 0.10, p.option_type, p.moneyness, p.forward)
+                          for p in surface._iv_points]
+    assert surface.smile(100.0, 100.0, expiry)[0] == pytest.approx(first[0] + 0.10, rel=1e-6)
+
+    # The legacy lookup's wings depend on spot, so a new spot rebuilds it too.
+    surface._iv_points = [
+        IVPoint(90, expiry, 0.70, "P", moneyness=0.9),
+        IVPoint(110, expiry, 0.50, "C", moneyness=1.1),
+        IVPoint(100, expiry, 0.60, "C", moneyness=1.0),
+        IVPoint(100, expiry, 0.65, "P", moneyness=1.0),
+    ]
+    assert surface._interpolate(100.0, 100.0, expiry) == pytest.approx(0.60)  # the 100 call is OTM
+    assert surface._interpolate(101.0, 101.0, expiry) == pytest.approx(0.65)  # now the 100 put is
+    assert surface._spot_buckets[1] == 101.0

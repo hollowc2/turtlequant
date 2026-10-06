@@ -50,6 +50,10 @@ class IVPoint:
     forward: float = 0.0  # Deribit underlying (futures) price for this expiry
 
 
+# expiry timestamp -> [(moneyness, mark_iv)] for one wing of the smile
+_Buckets = dict[float, list[tuple[float, float]]]
+
+
 @dataclass
 class VolSurface:
     """Manages IV data for a single asset.
@@ -76,6 +80,13 @@ class VolSurface:
     _last_deribit_attempt: float = field(default=0.0, repr=False)
     _last_warning_at: dict[str, float] = field(default_factory=dict, repr=False)
     _forwards: dict[float, float] = field(default_factory=dict, repr=False)  # expiry ts -> futures price
+    # Smile buckets built from _iv_points, reused until a refresh replaces
+    # that list (or, for the spot-relative lookup, spot changes). Rebuilding
+    # them from every point on every lookup was most of a scan's CPU.
+    _forward_buckets: tuple[list[IVPoint], _Buckets, dict[float, float]] | None = field(
+        default=None, init=False, repr=False
+    )
+    _spot_buckets: tuple[list[IVPoint], float, _Buckets] | None = field(default=None, init=False, repr=False)
     last_source: str = field(default="unknown", init=False)
 
     def get_iv(self, spot: float, strike: float, expiry: datetime) -> float:
@@ -282,23 +293,32 @@ class VolSurface:
         self, spot: float, strike: float, expiry: datetime
     ) -> float | None:
         """Legacy lookup: OTM wing and moneyness relative to spot, frozen at fetch time."""
-        buckets: dict[float, list[tuple[float, float]]] = {}
-        for p in self._iv_points:
-            if (p.strike >= spot and p.option_type == "C") or (p.strike < spot and p.option_type == "P"):
-                buckets.setdefault(p.expiry.timestamp(), []).append((p.moneyness, p.mark_iv))
+        cached = self._spot_buckets
+        if cached is not None and cached[0] is self._iv_points and cached[1] == spot:
+            buckets = cached[2]
+        else:
+            buckets = {}
+            for p in self._iv_points:
+                if (p.strike >= spot and p.option_type == "C") or (p.strike < spot and p.option_type == "P"):
+                    buckets.setdefault(p.expiry.timestamp(), []).append((p.moneyness, p.mark_iv))
+            self._spot_buckets = (self._iv_points, spot, buckets)
         target = strike / spot if spot > 0 else 1.0
         return _interp_surface(buckets, lambda _bucket: target, expiry)
 
     def _interpolate_forward(self, strike: float, expiry: datetime) -> float | None:
         """OTM wing and moneyness relative to each expiry's own forward (K/F)."""
-        buckets: dict[float, list[tuple[float, float]]] = {}
-        forwards: dict[float, float] = {}
-        for p in self._iv_points:
-            if p.forward <= 0 or (p.strike >= p.forward) != (p.option_type == "C"):
-                continue
-            key = p.expiry.timestamp()
-            buckets.setdefault(key, []).append((p.strike / p.forward, p.mark_iv))
-            forwards[key] = p.forward
+        cached = self._forward_buckets
+        if cached is not None and cached[0] is self._iv_points:
+            _, buckets, forwards = cached
+        else:
+            buckets, forwards = {}, {}
+            for p in self._iv_points:
+                if p.forward <= 0 or (p.strike >= p.forward) != (p.option_type == "C"):
+                    continue
+                key = p.expiry.timestamp()
+                buckets.setdefault(key, []).append((p.strike / p.forward, p.mark_iv))
+                forwards[key] = p.forward
+            self._forward_buckets = (self._iv_points, buckets, forwards)
         return _interp_surface(buckets, lambda bucket: strike / forwards[bucket], expiry)
 
     # ------------------------------------------------------------------
