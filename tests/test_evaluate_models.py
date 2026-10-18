@@ -108,6 +108,24 @@ def test_entry_window_limits_trades_but_not_brier(tmp_path):
 
     assert report["smile"]["observations"] == 3
     assert report["smile"]["yes_trades"] == report["consensus"]["yes_trades"] == 1
+    assert report["smile"]["markets"] == 3 and report["smile"]["window_markets"] == 1
+
+
+def test_main_reports_how_many_resolved_markets_the_window_holds(tmp_path, monkeypatch, capsys):
+    t0 = datetime.now(UTC) - timedelta(days=3)
+    append_history(tmp_path, _snapshot(t0, [_row("weekly", t0 + timedelta(days=2), 0.39, 0.41, 0.6, 0.6)]))
+
+    class Scanner:
+        def fetch_resolution(self, market_id):
+            return 1.0
+
+    monkeypatch.setattr(evaluate_models, "MarketScanner", Scanner)
+
+    args = ["--state-dir", str(tmp_path), "--min-entry-hours", "168", "--max-entry-hours", "2160"]
+    assert evaluate_models.main(args) == 0
+    assert "0 of 1 resolved markets observed in the 168-2160h trade window" in capsys.readouterr().out
+    assert evaluate_models.main(["--state-dir", str(tmp_path)]) == 0
+    assert "trade window" not in capsys.readouterr().out
 
 
 def test_option_types_filter_scores_only_those_markets(tmp_path, monkeypatch, capsys):

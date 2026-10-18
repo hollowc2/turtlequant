@@ -15,7 +15,8 @@ Two extra rows score the deployed MODEL_CONSENSUS gate: ``consensus`` trades
 only when both models clear the threshold on the same side (YES on the lower
 probability, NO on the higher), and ``blocked`` is the smile trades in
 markets where consensus never traded. ``--min-entry-hours`` and
-``--max-entry-hours`` restrict trades (not Brier) to the deployed tenor window.
+``--max-entry-hours`` restrict trades (not Brier) to the deployed tenor window,
+and the header says how many resolved markets were observed inside it.
 ``--option-types`` scores only those market types (default: all), e.g.
 ``european_put,range`` for the "less than" and "between" ladders.
 
@@ -175,6 +176,7 @@ def evaluate(
 
     tradable = [o for o in resolved if in_window(o)]
     markets = len({o.market_id for o in resolved})
+    window_markets = len({o.market_id for o in tradable})
     report: dict[str, dict[str, object]] = {}
     trades_by: dict[str, dict[str, tuple[str, float]]] = {}
     for predictor in PREDICTORS:
@@ -188,6 +190,7 @@ def evaluate(
         report[predictor] = {
             "observations": len(pairs),
             "markets": markets,
+            "window_markets": window_markets,
             "brier": _brier(pairs),
             "reliability": _reliability(pairs),
             **_trade_stats(trades_by[predictor]),
@@ -196,7 +199,8 @@ def evaluate(
     blocked = {m: t for m, t in trades_by["smile"].items() if m not in consensus}
     for name, trades in (("consensus", consensus), ("blocked", blocked)):
         report[name] = {
-            "observations": 0, "markets": markets, "brier": None, "reliability": [], **_trade_stats(trades)
+            "observations": 0, "markets": markets, "window_markets": window_markets,
+            "brier": None, "reliability": [], **_trade_stats(trades),
         }
     return report
 
@@ -244,6 +248,12 @@ def main(argv: list[str] | None = None) -> int:
         observations, resolutions, threshold=args.threshold,
         min_entry_hours=args.min_entry_hours, max_entry_hours=args.max_entry_hours,
     )
+    if args.min_entry_hours or args.max_entry_hours:
+        # Zero trades below can mean no data in the window rather than no edge.
+        hours = args.min_entry_hours, args.max_entry_hours
+        window = f"{hours[0]:g}-{hours[1]:g}h" if hours[1] else f">={hours[0]:g}h"
+        r = report["legacy"]
+        print(f"{r['window_markets']} of {r['markets']} resolved markets observed in the {window} trade window")
     print(f"\n{'model':10s}{'obs':>7s}{'brier':>9s}{'YES n':>7s}{'YES net/sh':>12s}{'NO n':>6s}{'NO net/sh':>11s}")
     for name, r in report.items():
         brier = "—" if r["brier"] is None else f"{r['brier']:.4f}"
