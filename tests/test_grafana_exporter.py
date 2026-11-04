@@ -101,7 +101,9 @@ def test_collector_exports_live_readiness_metrics(tmp_path):
               "last_bid": 0.45,
               "edge_at_entry": 0.1,
               "model_prob_at_entry": 0.5,
-              "opened_at": "2026-05-01T00:00:00+00:00"
+              "opened_at": "2026-05-01T00:00:00+00:00",
+              "strike": 100000,
+              "expiry_iso": "2026-06-01T00:00:00+00:00"
             }
           ]
         }
@@ -121,6 +123,16 @@ def test_collector_exports_live_readiness_metrics(tmp_path):
 
     # (0.45 - 0.40) * 100 shares, less the 0.07 * p(1-p) taker fee to sell at 0.45.
     assert abs(families["turtlequant_open_unrealized_pnl_usd"].samples[0].value - (5.0 - 100 * 0.07 * 0.45 * 0.55)) < 1e-9
+    position = {
+        name: families[f"turtlequant_position_{name}"].samples[0]
+        for name in ("entry_price", "mark_price", "unrealized_pnl_usd", "strike_usd", "hours_to_expiry")
+    }
+    assert position["entry_price"].value == 0.40
+    assert position["mark_price"].value == 0.45
+    assert position["mark_price"].labels["market_id"] == "m-1"
+    assert position["unrealized_pnl_usd"].value == families["turtlequant_open_unrealized_pnl_usd"].samples[0].value
+    assert position["strike_usd"].value == 100000
+    assert position["hours_to_expiry"].value < 0  # expired in 2026-06
     assert families["turtlequant_avg_entry_slippage"].samples[0].value == 0.02
     assert families["turtlequant_avg_fill_ratio"].samples[0].value == 0.8
     assert families["turtlequant_failed_orders_total"].samples[0].labels["side"] == "SELL"

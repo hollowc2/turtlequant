@@ -28,11 +28,16 @@ Entry gate (from *-risk.json):
   turtlequant_consecutive_broker_failures
   turtlequant_asset_delta_usd           — net dollar delta per asset (labeled by asset)
 
-Per active position (labeled strategy, market_id, asset, option_type):
+Per active position (labeled strategy, market_id, asset, option_type, outcome):
   turtlequant_position_size_usd
   turtlequant_position_edge_at_entry
   turtlequant_position_age_hours
   turtlequant_position_model_prob_at_entry
+  turtlequant_position_entry_price
+  turtlequant_position_mark_price         — the bid (or resolution price) unrealized P&L is marked at
+  turtlequant_position_unrealized_pnl_usd — mark-to-bid P&L, net of exit fee
+  turtlequant_position_strike_usd
+  turtlequant_position_hours_to_expiry
 
 Most recent 50 closed trades (labeled strategy, idx; 0 = most recent):
   turtlequant_closed_position_pnl_usd
@@ -830,6 +835,31 @@ class TurtleQuantCollector:
             "Model probability at entry for open position",
             labels=["strategy", "market_id", "asset", "option_type", "outcome"],
         )
+        pos_entry_price_g = GaugeMetricFamily(
+            "turtlequant_position_entry_price",
+            "Entry price per held token for open position",
+            labels=["strategy", "market_id", "asset", "option_type", "outcome"],
+        )
+        pos_mark_price_g = GaugeMetricFamily(
+            "turtlequant_position_mark_price",
+            "Price the open position is marked at (last bid, or resolution price)",
+            labels=["strategy", "market_id", "asset", "option_type", "outcome"],
+        )
+        pos_unrealized_g = GaugeMetricFamily(
+            "turtlequant_position_unrealized_pnl_usd",
+            "Open position P&L marked to last executable bid, net of exit fee",
+            labels=["strategy", "market_id", "asset", "option_type", "outcome"],
+        )
+        pos_strike_g = GaugeMetricFamily(
+            "turtlequant_position_strike_usd",
+            "Underlying strike of the open position's market",
+            labels=["strategy", "market_id", "asset", "option_type", "outcome"],
+        )
+        pos_expiry_g = GaugeMetricFamily(
+            "turtlequant_position_hours_to_expiry",
+            "Hours until the open position's market expires",
+            labels=["strategy", "market_id", "asset", "option_type", "outcome"],
+        )
 
         # --- Recent closed trades ---
         # Only a bounded idx label (0 = most recent): per-trade labels such as
@@ -908,6 +938,7 @@ class TurtleQuantCollector:
             unrealized_by_asset: dict[str, float] = {}
             unrealized_total = 0.0
             marked_pnl_total = 0.0
+            marks: list[tuple[float, float]] = []  # (mark, unrealized) per position
             for pos in positions:
                 asset = str(pos.get("asset", "unknown"))
                 by_asset[asset] = by_asset.get(asset, 0.0) + _safe_float(pos.get("size_usd"))
@@ -928,6 +959,7 @@ class TurtleQuantCollector:
                 unrealized = (mark - entry) * tokens - exit_fee
                 unrealized_total += unrealized
                 unrealized_by_asset[asset] = unrealized_by_asset.get(asset, 0.0) + unrealized
+                marks.append((mark, unrealized))
             for asset, value in by_asset.items():
                 exposure_by_asset_g.add_metric([strategy, asset], value)
             open_unrealized_pnl_g.add_metric([strategy], unrealized_total)
@@ -940,7 +972,7 @@ class TurtleQuantCollector:
             largest_position_pct_nav_g.add_metric([strategy], largest / nav if nav and nav > 0 else 0.0)
 
             now = time.time()
-            for pos in positions:
+            for pos, (mark, unrealized) in zip(positions, marks):
                 mid = str(pos.get("market_id", ""))
                 asset = str(pos.get("asset", ""))
                 opt_type = str(pos.get("option_type", ""))
@@ -962,6 +994,15 @@ class TurtleQuantCollector:
                 if opened_at is not None:
                     age_hours = (now - opened_at) / 3600.0
                     pos_age_g.add_metric(pos_labels, age_hours)
+
+                pos_entry_price_g.add_metric(pos_labels, _safe_float(pos.get("entry_price")))
+                pos_mark_price_g.add_metric(pos_labels, mark)
+                pos_unrealized_g.add_metric(pos_labels, unrealized)
+                if pos.get("strike") is not None:
+                    pos_strike_g.add_metric(pos_labels, _safe_float(pos.get("strike")))
+                expiry = _parse_ts(pos.get("expiry_iso"))
+                if expiry is not None:
+                    pos_expiry_g.add_metric(pos_labels, (expiry - now) / 3600.0)
         pos_age = _file_age_sec(pos_path)
         if pos_age is not None:
             state_file_age_g.add_metric([strategy, "positions"], pos_age)
@@ -1174,6 +1215,11 @@ class TurtleQuantCollector:
         yield pos_edge_g
         yield pos_age_g
         yield pos_model_prob_g
+        yield pos_entry_price_g
+        yield pos_mark_price_g
+        yield pos_unrealized_g
+        yield pos_strike_g
+        yield pos_expiry_g
         yield closed_pnl_g
         yield closed_hold_g
         yield state_file_age_g

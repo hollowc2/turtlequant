@@ -46,7 +46,7 @@ from pathlib import Path
 
 from turtlequant.clob_execution import ExecutionClient
 from turtlequant.data.binance import ASSET_TO_SYMBOL, fetch_klines
-from turtlequant.discord_trades import DiscordTrades
+from turtlequant.discord_trades import DiscordTrades, chart_window, render_trade_chart
 from turtlequant.market_parser import set_corpus_file
 from turtlequant.market_scanner import MarketScanner
 from turtlequant.notifications import NotificationQueue
@@ -122,35 +122,38 @@ def trade_chart(
     discord: DiscordTrades,
     pos,
     entry_ms: int,
-    exit_ms: int | None = None,
+    exit_ms: int,
     *,
-    model_prob: float | None = None,
-    sigma: float | None = None,
-    exit_price: float | None = None,
-    pnl: float | None = None,
+    exit_price: float,
+    pnl: float,
+    reason: str,
 ) -> bytes | None:
-    interval = os.getenv("DISCORD_CHART_INTERVAL", "1h")
-    end_ms = exit_ms or int(time.time() * 1000)
-    start_ms = end_ms - (90 if interval == "1d" else 30) * 86_400_000
+    interval, start_ms, end_ms = chart_window(entry_ms, exit_ms)
     try:
         frame = fetch_klines(ASSET_TO_SYMBOL[pos.asset], interval, start_ms, end_ms)
-        return discord.chart(
+        return render_trade_chart(
             frame,
-            f"{pos.asset.upper()} {interval} spot vs strike",
-            entry_ms,
-            exit_ms,
+            asset=pos.asset,
+            question=pos.question,
+            side=pos.outcome,
+            option_type=pos.option_type,
             strike=pos.strike,
-            model_prob=model_prob or pos.model_prob_at_entry,
+            upper_strike=pos.upper_strike,
+            entry_ms=entry_ms,
+            exit_ms=exit_ms,
             entry_price=pos.entry_price,
             exit_price=exit_price,
+            model_prob=pos.model_prob_at_entry,
             edge=pos.edge_at_entry,
-            sigma=sigma,
             pnl=pnl,
+            size_usd=pos.size_usd,
+            reason=reason,
             expiry=pos.expiry_iso,
-            yes_above_strike=pos.option_type not in {"barrier_down", "european_put"},
-            bought_side=pos.outcome,
+            interval=interval,
+            mode=discord.mode,
         )
     except Exception:
+        logger.warning("Exit chart failed for %s", pos.market_id, exc_info=True)
         return None
 
 
@@ -193,7 +196,9 @@ def notify_exit(
             f"> P&L: **${pnl:+.2f}** ({pnl_pct:+.1%}) | Fees included\n"
             f"> Held: {held:.1f}h | Reason: `{reason}`"
         ),
-        trade_chart(discord, pos, entry_ms, exit_ms, exit_price=exit_price, pnl=pnl),
+        trade_chart(
+            discord, pos, entry_ms, exit_ms, exit_price=exit_price, pnl=pnl, reason=reason
+        ),
     )
 
 
