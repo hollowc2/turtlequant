@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from turtlequant.discord_trades import DiscordTrades, _complement, chart_window, render_trade_chart
+from turtlequant.discord_trades import DiscordTrades, _complement, _font, chart_window, render_trade_chart
 
 
 def load_turtlequant_bot():
@@ -71,6 +71,12 @@ def test_render_trade_chart_covers_market_shapes():
         assert png.startswith(b"\x89PNG")
     assert render_trade_chart(frame.iloc[:1], asset="btc", question="q", side="YES",
                               option_type="european", strike=1.0, entry_ms=0, exit_ms=1) is None
+
+
+def test_chart_uses_bundled_inter_font():
+    # A missing font file falls back to PIL's default face without failing.
+    for weight in ("Regular", "Medium", "SemiBold", "Display"):
+        assert "Inter" in Path(_font(12, weight).path).name
 
 
 def test_complement_of_yes_regions():

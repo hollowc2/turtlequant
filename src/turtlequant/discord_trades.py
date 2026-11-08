@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import io
 import json
 import math
@@ -12,30 +13,31 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from PIL import Image, ImageColor, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFont
 
 # ---------------------------------------------------------------------------
 # Exit chart
 # ---------------------------------------------------------------------------
 
-# Drawn at 2x and downsampled so lines and text come out antialiased.
-_SCALE = 2
-_W, _H = 1200, 640
-_PLOT = (24, 112, 820, 552)  # left, top, right, bottom (logical px)
-_SIDE_X = 912
+# A share card: Discord shows it about 450px wide, so it carries a few large
+# things (P&L, question, five stats, one price line) rather than a dashboard.
+# Drawn supersampled and saved at 2x so it stays sharp when opened full size.
+_W, _H = 1000, 620
+_SS = 3  # drawing pixels per logical pixel
+_OUT = 2  # saved pixels per logical pixel
+_PLOT = (40, 236, 872, 566)  # left, top, right, bottom (logical px)
+_FONTS = Path(__file__).with_name("fonts")
 
-_BG = "#12151b"
-_PANEL = "#181c24"
-_GRID = "#252a34"
-_INK = "#f2f4f8"
-_INK_2 = "#b4bccb"
-_MUTED = "#7d8696"
-_SPOT = "#3987e5"
-_STRIKE = "#c98500"
-_GOOD = "#0ca30c"
-_GOOD_TEXT = "#3ccf6e"
-_BAD = "#d03b3b"
-_BAD_TEXT = "#ff7a7a"
+_BG = "#0e1116"
+_GRID = "#1c212a"
+_INK = "#eef1f6"
+_INK_2 = "#a9b1be"
+_MUTED = "#6b7482"
+_PRE = "#4a5262"
+_SPOT = "#5b9dff"
+_STRIKE = "#e5a93b"
+_GOOD = "#2fd07a"
+_BAD = "#ff5d5d"
 
 _HOUR_MS = 3_600_000
 _DAY_MS = 24 * _HOUR_MS
@@ -55,10 +57,14 @@ def chart_window(entry_ms: int, exit_ms: int) -> tuple[str, int, int]:
     return os.getenv("DISCORD_CHART_INTERVAL") or interval, start, end
 
 
-def _font(size: float, bold: bool = False) -> ImageFont.FreeTypeFont:
-    font = ImageFont.load_default(size=size * _SCALE)
-    font.bold = bold  # read by _Canvas.text
-    return font
+@functools.cache
+def _font(size: float, weight: str = "Regular") -> ImageFont.FreeTypeFont:
+    """Inter at a logical size; weight is Regular, Medium, SemiBold or Display."""
+    name = "InterDisplay-Bold.ttf" if weight == "Display" else f"Inter-{weight}.ttf"
+    try:
+        return ImageFont.truetype(str(_FONTS / name), round(size * _SS))
+    except OSError:
+        return ImageFont.load_default(size=size * _SS)
 
 
 def _nice_step(span: float, target: int) -> float:
@@ -78,6 +84,11 @@ def _usd(value: float) -> str:
     return f"${value:,.4f}"
 
 
+def _price(value: float) -> str:
+    """Spot level without the dollar sign, for axes and markers."""
+    return _usd(value).removeprefix("$")
+
+
 def _signed_usd(value: float) -> str:
     return f"{'+' if value >= 0 else '-'}${abs(value):,.2f}"
 
@@ -91,57 +102,78 @@ def _duration(ms: int) -> str:
     return f"{int(hours // 24)}d {int(hours % 24)}h"
 
 
+def _rgba(color: str, alpha: int) -> tuple[int, int, int, int]:
+    return ImageColor.getrgb(color)[:3] + (alpha,)
+
+
+Box = tuple[float, float, float, float]
+
+
+def _overlaps(a: Box, b: Box) -> bool:
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
 class _Canvas:
-    """Logical-pixel drawing on a 2x supersampled RGBA image."""
+    """Logical-pixel drawing on a supersampled RGBA image."""
 
     def __init__(self) -> None:
-        self.image = Image.new("RGBA", (_W * _SCALE, _H * _SCALE), _BG)
+        self.image = Image.new("RGBA", (_W * _SS, _H * _SS), _BG)
         self.draw = ImageDraw.Draw(self.image)
 
     @staticmethod
     def _xy(*points: float) -> list[float]:
-        return [p * _SCALE for p in points]
+        return [p * _SS for p in points]
 
-    def rect(self, box, fill=None, outline=None, width=1, radius=0) -> None:
-        self.draw.rounded_rectangle(self._xy(*box), radius * _SCALE, fill=fill, outline=outline, width=width * _SCALE)
-
-    def tint(self, box, color: str, alpha: int) -> None:
+    def _layer(self, paint) -> None:
+        """Alpha-composite translucent shapes drawn by ``paint(draw)``."""
         overlay = Image.new("RGBA", self.image.size, (0, 0, 0, 0))
-        ImageDraw.Draw(overlay).rectangle(self._xy(*box), fill=ImageColor.getrgb(color) + (alpha,))
+        paint(ImageDraw.Draw(overlay))
         self.image.alpha_composite(overlay)
 
-    def line(self, points, fill, width=1.0) -> None:
-        self.draw.line([p * _SCALE for xy in points for p in xy], fill=fill, width=round(width * _SCALE), joint="curve")
+    def rect(self, box, fill=None, outline=None, width=1.0, radius=0) -> None:
+        self._layer(lambda d: d.rounded_rectangle(
+            self._xy(*box), radius * _SS, fill=fill, outline=outline, width=round(width * _SS)))
 
-    def dashed(self, x0, x1, y, fill, width=1.5, dash=8, gap=6) -> None:
+    def fade(self, points: list[tuple[float, float]], floor: float, color: str, alpha: int) -> None:
+        """Fill under a line down to ``floor``, fading out towards it."""
+        top = min(y for _, y in points)
+        mask = Image.new("L", self.image.size, 0)
+        ImageDraw.Draw(mask).polygon(
+            [p * _SS for xy in [(points[0][0], floor), *points, (points[-1][0], floor)] for p in xy], fill=255)
+        ramp = Image.linear_gradient("L").resize((1, 256))
+        y0, y1 = round(top * _SS), round(floor * _SS)
+        ramp = ramp.point(lambda v: alpha * (255 - v) // 255).resize((self.image.width, max(y1 - y0, 1)))
+        shade = Image.new("L", self.image.size, 0)
+        shade.paste(ramp, (0, y0))
+        layer = Image.new("RGBA", self.image.size, ImageColor.getrgb(color))
+        layer.putalpha(ImageChops.multiply(mask, shade))
+        self.image.alpha_composite(layer)
+
+    def line(self, points, fill, width=1.0) -> None:
+        if len(points) > 1:
+            self.draw.line([p * _SS for xy in points for p in xy], fill=fill, width=round(width * _SS),
+                           joint="curve")
+
+    def dashed(self, x0, x1, y, fill, width=1.5, dash=6, gap=5) -> None:
         x = x0
         while x < x1:
             self.line([(x, y), (min(x + dash, x1), y)], fill, width)
             x += dash + gap
 
-    def dot(self, x, y, radius, fill, ring=_BG, ring_width=2) -> None:
-        r = radius + ring_width
-        self.draw.ellipse(self._xy(x - r, y - r, x + r, y + r), fill=ring)
-        self.draw.ellipse(self._xy(x - radius, y - radius, x + radius, y + radius), fill=fill)
+    def circle(self, x, y, radius, fill=None, outline=None, width=0.0) -> None:
+        self._layer(lambda d: d.ellipse(self._xy(x - radius, y - radius, x + radius, y + radius),
+                                        fill=fill, outline=outline, width=round(width * _SS)))
 
     def text(self, x, y, text, font, fill, anchor="la") -> None:
-        stroke = 1 if getattr(font, "bold", False) else 0
-        self.draw.text((x * _SCALE, y * _SCALE), text, font=font, fill=fill, anchor=anchor,
-                       stroke_width=stroke, stroke_fill=fill)
+        self.draw.text((x * _SS, y * _SS), text, font=font, fill=fill, anchor=anchor)
 
-    def text_width(self, text, font) -> float:
-        return self.draw.textlength(text, font=font) / _SCALE
-
-    def pill(self, x, y, text, font, fill, ink, anchor="l") -> None:
-        """Label in a rounded box; ``y`` is the vertical centre."""
-        width = self.text_width(text, font) + 14
-        x0 = x - width if anchor == "r" else x
-        self.rect((x0, y - 11, x0 + width, y + 11), fill=fill, radius=5)
-        self.text(x0 + 7, y, text, font, ink, "lm")
+    def width(self, text, font) -> float:
+        return self.draw.textlength(text, font=font) / _SS
 
     def png(self) -> bytes:
         output = io.BytesIO()
-        self.image.convert("RGB").resize((_W, _H), Image.Resampling.LANCZOS).save(output, "PNG", optimize=True)
+        image = self.image.convert("RGB").resize((_W * _OUT, _H * _OUT), Image.Resampling.LANCZOS)
+        image.save(output, "PNG", optimize=True)
         return output.getvalue()
 
 
@@ -168,18 +200,29 @@ def render_trade_chart(
     interval: str = "1h",
     mode: str = "",
 ) -> bytes | None:
-    """Spot path around a closed trade, with the strike, the side we held and a trade read."""
+    """Share card for a closed trade: P&L, the question, and spot against the strike."""
     if frame is None or len(frame) < 2:
         return None
-    times = [int(ts.timestamp() * 1000) for ts in frame["open_time"]]
-    closes = [float(v) for v in frame["close"]]
-    highs = [float(v) for v in frame["high"]] if "high" in frame else closes
-    lows = [float(v) for v in frame["low"]] if "low" in frame else closes
+    rows = [
+        (int(ts.timestamp() * 1000), float(c), float(h), float(lo))
+        for ts, c, h, lo in zip(
+            frame["open_time"],
+            frame["close"],
+            frame["high"] if "high" in frame else frame["close"],
+            frame["low"] if "low" in frame else frame["close"],
+        )
+    ]
+    # The line stops at the exit; candles after it are not part of the trade.
+    held = [row for row in rows if row[0] <= exit_ms]
+    rows = held if len(held) >= 2 else rows
+    times, closes, highs, lows = (list(column) for column in zip(*rows))
     side = side.upper()
+    won = (pnl or 0) >= 0
+    outcome = _GOOD if won else _BAD
 
     canvas = _Canvas()
     left, top, right, bottom = _PLOT
-    t0, t1 = times[0], max(times[-1], exit_ms)
+    t0, t1 = times[0], times[-1]
     span_t = max(t1 - t0, 1)
 
     # Price range: the spot path, plus the strike when it doesn't flatten the path.
@@ -189,11 +232,11 @@ def render_trade_chart(
     for level in levels:
         if low - path_span * 1.5 <= level <= high + path_span * 1.5:
             low, high = min(low, level), max(high, level)
-    pad = (high - low) * 0.08 or max(high * 0.01, 1.0)
+    pad = (high - low) * 0.1 or max(high * 0.01, 1.0)
     low, high = low - pad, high + pad
 
     def x_at(ms: int) -> float:
-        return left + (ms - t0) * (right - left) / span_t
+        return left + (ms - t0) * (right - 24 - left) / span_t  # room for the exit marker
 
     def y_at(price: float) -> float:
         return bottom - (price - low) * (bottom - top) / (high - low)
@@ -201,6 +244,62 @@ def render_trade_chart(
     def clamp_y(y: float) -> float:
         return min(max(y, top), bottom)
 
+    # ---- Header ---------------------------------------------------------
+    tag_font = _font(13, "SemiBold")
+    tags = [asset.upper(), f"BOUGHT {side}", option_type.replace("_", " ").upper()]
+    x = 40
+    for i, tag in enumerate(tags):
+        if i:
+            canvas.text(x + 8, 40, "·", tag_font, _MUTED, "lm")
+            x += 22
+        canvas.text(x, 40, tag, tag_font, _INK_2 if i == 0 else _MUTED, "lm")
+        x += canvas.width(tag, tag_font)
+    if mode:
+        label = mode.upper()
+        width = canvas.width(label, _font(11, "SemiBold")) + 14
+        canvas.rect((x + 14, 30, x + 14 + width, 50), outline=_rgba(_INK_2, 90), width=1, radius=10)
+        canvas.text(x + 14 + width / 2, 40, label, _font(11, "SemiBold"), _INK_2, "mm")
+
+    title_font = _font(27, "SemiBold")
+    lines, words = [""], question.split()
+    for word in words:
+        trial = f"{lines[-1]} {word}".strip()
+        if canvas.width(trial, title_font) <= 600 or not lines[-1]:
+            lines[-1] = trial
+        elif len(lines) < 2:
+            lines.append(word)
+        else:
+            lines[-1] = trial
+    if canvas.width(lines[-1], title_font) > 600:
+        while canvas.width(lines[-1] + "…", title_font) > 600:
+            lines[-1] = lines[-1][:-1]
+        lines[-1] = lines[-1].rstrip() + "…"
+    for i, line in enumerate(lines):
+        canvas.text(40, 66 + i * 36, line, title_font, _INK)
+
+    if pnl is not None:
+        canvas.text(_W - 40, 26, _signed_usd(pnl), _font(58, "Display"), outcome, "ra")
+        sub = [f"{pnl / size_usd:+.1%}"] if size_usd else []
+        if reason:
+            sub.append(reason.replace("_", " ").capitalize())
+        canvas.text(_W - 40, 100, "  ·  ".join(sub), _font(17, "Medium"), _INK_2, "ra")
+
+    # ---- Stats strip ----------------------------------------------------
+    stats = [
+        ("TOKEN", f"{entry_price:.3f} → {exit_price:.3f}" if entry_price is not None and exit_price is not None else None),
+        ("HELD", _duration(exit_ms - entry_ms)),
+        (f"MODEL P({side})", f"{model_prob:.1%}" if model_prob is not None else None),
+        ("EDGE", f"{edge:+.1%}" if edge is not None else None),
+        ("SIZE", f"${size_usd:,.2f}" if size_usd else None),
+    ]
+    canvas.line([(40, 152), (_W - 40, 152)], _GRID, 1)
+    x = 40
+    for label, value in ((k, v) for k, v in stats if v is not None):
+        canvas.text(x, 172, label, _font(11, "SemiBold"), _MUTED, "lm")
+        canvas.text(x, 196, value, _font(20, "SemiBold"), _INK, "lm")
+        x += max(canvas.width(value, _font(20, "SemiBold")), 60) + 44
+
+    # ---- Plot -----------------------------------------------------------
     # Where the held token pays: YES regions, or their complement for NO.
     if option_type == "range" and upper_strike:
         yes = [(strike, upper_strike)]
@@ -209,153 +308,125 @@ def render_trade_chart(
     else:
         yes = [(strike, math.inf)]
     wins = _complement(yes) if side == "NO" else yes
-
-    canvas.rect((left, top, right, bottom), fill=_PANEL)
+    taken: list[Box] = []
     for lo, hi in wins:
-        y_hi, y_lo = clamp_y(y_at(hi)) if math.isfinite(hi) else top, clamp_y(y_at(lo)) if math.isfinite(lo) else bottom
-        if y_lo - y_hi > 1:
-            canvas.tint((left, y_hi, right, y_lo), _GOOD, 26)
-    label_font, small = _font(13, bold=True), _font(13)
-    if wins:
-        lo, hi = wins[0]
         y_hi = clamp_y(y_at(hi)) if math.isfinite(hi) else top
         y_lo = clamp_y(y_at(lo)) if math.isfinite(lo) else bottom
-        if y_lo - y_hi > 24:
-            label_y = y_hi + 16 if not math.isfinite(hi) or y_hi <= top else y_lo - 16
-            canvas.text(left + 12, label_y, f"{side} PAYS HERE", label_font, _GOOD_TEXT, "lm")
+        if y_lo - y_hi > 1:
+            canvas.rect((left, y_hi, right, y_lo), fill=_rgba(_GOOD, 15))
+            if y_lo - y_hi > 26:
+                y = y_hi + 14 if y_hi <= top or not math.isfinite(hi) else y_lo - 14
+                canvas.text(left + 10, y, f"{side} PAYS", _font(11, "SemiBold"), _rgba(_GOOD, 200), "lm")
+                taken.append((left, y - 10, left + 80, y + 10))
 
-    # Hold window.
-    hold_x0, hold_x1 = x_at(entry_ms), x_at(exit_ms)
-    canvas.tint((hold_x0, top, max(hold_x1, hold_x0 + 1), bottom), "#ffffff", 9)
+    # Strike lines; an off-scale strike gets a note on the edge it lies beyond.
+    strike_ys = []
+    for level in levels:
+        y = y_at(level)
+        if top <= y <= bottom:
+            canvas.dashed(left, right, y, _rgba(_STRIKE, 230), 1.5)
+            text = _price(level)
+            font = _font(13, "SemiBold")
+            width = canvas.width(text, font) + 14
+            canvas.rect((right + 6, y - 11, right + 6 + width, y + 11), fill=_STRIKE, radius=5)
+            canvas.text(right + 13, y, text, font, _BG, "lm")
+            strike_ys.append(y)
+        else:
+            above = y < top
+            distance = abs(level / closes[-1] - 1)
+            text = f"STRIKE {_price(level)}  {'↑' if above else '↓'} {distance:.1%} {'above' if above else 'below'}"
+            font = _font(12, "SemiBold")
+            width = canvas.width(text, font) + 16
+            y = top + 16 if above else bottom - 16
+            canvas.rect((right - 8 - width, y - 11, right - 8, y + 11), fill=_rgba(_STRIKE, 40),
+                        outline=_rgba(_STRIKE, 160), width=1, radius=5)
+            canvas.text(right - 8 - width / 2, y, text, font, _STRIKE, "mm")
+            taken.append((right - 8 - width, y - 11, right - 8, y + 11))
 
-    # Grid and price axis.
-    axis_font = _font(12)
-    step = _nice_step(high - low, 5)
+    # Price grid on the right, skipping ticks the strike tag would cover.
+    axis_font = _font(12, "Medium")
+    step = _nice_step(high - low, 4)
     tick = math.ceil(low / step) * step
     while tick <= high:
         y = y_at(tick)
         canvas.line([(left, y), (right, y)], _GRID, 1)
-        canvas.text(right + 8, y, _usd(tick) if step < 1 else f"{tick:,.0f}", axis_font, _MUTED, "lm")
+        if all(abs(y - s) > 18 for s in strike_ys):
+            canvas.text(right + 10, y, _price(tick) if step < 1000 else f"{tick:,.0f}", axis_font, _MUTED, "lm")
         tick += step
 
     # Time axis on UTC-aligned steps.
     for step_ms in (_HOUR_MS * h for h in (1, 2, 3, 6, 12, 24, 48, 72, 168, 336, 720)):
-        if span_t / step_ms <= 7:
+        if span_t / step_ms <= 5:
             break
     tick_ms = (t0 // step_ms + 1) * step_ms
-    fmt = "%b %d %H:%M" if step_ms < _DAY_MS else "%b %d"
     while tick_ms < t1:
-        x = x_at(tick_ms)
-        canvas.line([(x, top), (x, bottom)], _GRID, 1)
-        label = datetime.fromtimestamp(tick_ms / 1000, UTC).strftime(fmt)
-        canvas.text(x, bottom + 10, label, axis_font, _MUTED, "ma")
+        when = datetime.fromtimestamp(tick_ms / 1000, UTC)
+        label = f"{when:%b} {when.day}" if step_ms >= _DAY_MS or when.hour == 0 else f"{when:%H:%M}"
+        canvas.text(x_at(tick_ms), bottom + 20, label, axis_font, _MUTED, "mm")
         tick_ms += step_ms
 
-    # Strike(s): on the chart when in range, otherwise a pill on the edge they lie beyond.
-    last_close = closes[-1]
-    for level in levels:
-        y = y_at(level)
-        distance = level / last_close - 1
-        if top <= y <= bottom:
-            canvas.dashed(left, right, y, _STRIKE, 1.5)
-            canvas.pill(right - 6, y, f"STRIKE {_usd(level)}", small, _STRIKE, _BG, anchor="r")
-        else:
-            edge_y = top + 14 if y < top else bottom - 14
-            where = "above" if y < top else "below"
-            canvas.pill(right - 6, edge_y, f"STRIKE {_usd(level)} · {abs(distance):.1%} {where}", small,
-                        _STRIKE, _BG, anchor="r")
+    # Spot: grey before entry, coloured over the hold.
+    def nearest(ms: int) -> int:
+        return min(range(len(times)), key=lambda i: abs(times[i] - ms))
 
-    # Spot path.
     points = [(x_at(t), y_at(c)) for t, c in zip(times, closes)]
-    canvas.line(points, _SPOT, 2)
+    entry_i, exit_i = nearest(entry_ms), len(points) - 1
+    entry_xy, exit_xy = points[entry_i], points[exit_i]
+    canvas.line([(entry_xy[0], top), (entry_xy[0], bottom)], _rgba(_INK_2, 35), 1)
+    hold = points[entry_i:]
+    if len(hold) > 1:
+        canvas.fade(hold, bottom, _SPOT, 70)
+    canvas.line(points[: entry_i + 1], _PRE, 2)
+    for y in strike_ys:
+        # Name the line at its left end, on the side clear of the path, then of other labels.
+        near = [py for px, py in points if px < left + 90]
+        sides = [12, -12] if near and min(near) < y else [-12, 12]
+        boxes = [(left, y + dy - 10, left + 70, y + dy + 10) for dy in sides]
+        free = [b for b in boxes if not any(_overlaps(b, t) for t in taken) and top <= b[1] and b[3] <= bottom]
+        box = free[0] if free else (left + 90, *boxes[0][1:3], left + 160)
+        canvas.text(box[0] + 10, (box[1] + box[3]) / 2, "STRIKE", _font(11, "SemiBold"), _STRIKE, "lm")
+        taken.append(box)
+    canvas.line(hold, _SPOT, 2.5)
 
     # First barrier touch after entry.
-    touched_at = None
+    touched_i = None
     if option_type in _BARRIERS:
-        for t, hi, lo in zip(times, highs, lows):
+        for i, (t, hi, lo) in enumerate(zip(times, highs, lows)):
             if t >= entry_ms and (hi >= strike if option_type == "barrier" else lo <= strike):
-                touched_at = t
+                touched_i = i
                 break
-    if touched_at is not None:
-        x = x_at(touched_at)
-        canvas.line([(x, top), (x, bottom)], _STRIKE, 1)
-        if x + 130 < right:
-            canvas.text(x + 6, top + 8, "BARRIER TOUCHED", small, _STRIKE)
-        else:
-            canvas.text(x - 6, top + 8, "BARRIER TOUCHED", small, _STRIKE, "ra")
 
-    # Entry and exit markers on the nearest bar.
-    def nearest(ms: int) -> tuple[float, float, float]:
-        index = min(range(len(times)), key=lambda i: abs(times[i] - ms))
-        return x_at(times[index]), y_at(closes[index]), closes[index]
+    # Markers, each labelled where it covers the least of the line and other labels.
+    def label(anchor: tuple[float, float], name: str, value: str, color: str) -> None:
+        name_font, value_font = _font(10, "SemiBold"), _font(14, "SemiBold")
+        width = canvas.width(name, name_font) + canvas.width(value, value_font) + 26
+        x, y = anchor
+        candidates = [
+            (x - width / 2, y - 40), (x - width / 2, y + 16), (x + 14, y - 13), (x - 14 - width, y - 13),
+            (x + 10, y - 38), (x - 10 - width, y - 38), (x + 10, y + 14), (x - 10 - width, y + 14),
+        ]
 
-    entry_x, entry_y, entry_spot = nearest(entry_ms)
-    exit_x, exit_y, exit_spot = nearest(exit_ms)
-    exit_color = _GOOD if (pnl or 0) >= 0 else _BAD
-    close_together = abs(exit_x - entry_x) < 150
-    for x, y, spot, label, fill, above in (
-        (entry_x, entry_y, entry_spot, "ENTRY", _INK, True),
-        (exit_x, exit_y, exit_spot, "EXIT", exit_color, not close_together),
-    ):
-        canvas.dot(x, y, 6, fill)
-        text = f"{label} {_usd(spot)}"
-        width = canvas.text_width(text, label_font) + 14
-        label_x = min(max(x - width / 2, left + 4), right - width - 4)
-        label_y = y - 24 if above else y + 24
-        if label_y < top + 12 or label_y > bottom - 12:
-            label_y = y + 24 if above else y - 24
-        canvas.pill(label_x, label_y, text, label_font, "#0b0d11", _INK)
+        def cost(box: Box) -> float:
+            inside = left <= box[0] and box[2] <= right and top <= box[1] and box[3] <= bottom
+            hits = sum(1 for px, py in points if box[0] - 4 <= px <= box[2] + 4 and box[1] - 4 <= py <= box[3] + 4)
+            return (0 if inside else 1000) + 100 * sum(_overlaps(box, t) for t in taken) + hits
 
-    canvas.rect((left, top, right, bottom), outline=_GRID, width=1)
+        box = min(((bx, by, bx + width, by + 26) for bx, by in candidates), key=cost)
+        taken.append(box)
+        canvas.rect(box, fill=_rgba("#090b0f", 225), outline=_rgba(color, 120), width=1, radius=6)
+        canvas.text(box[0] + 9, box[1] + 13, name, name_font, color, "lm")
+        canvas.text(box[2] - 9, box[1] + 13, value, value_font, _INK, "rm")
 
-    # Header.
-    tags = [asset.upper(), f"BOUGHT {side}", option_type.replace("_", " ").upper()]
-    if mode:
-        tags.append(mode.upper())
-    canvas.text(left, 22, "  ·  ".join(tags), _font(13, bold=True), _MUTED)
-    title_font = _font(22, bold=True)
-    title = question
-    while canvas.text_width(title, title_font) > 800 and len(title) > 10:
-        title = title.removesuffix("…")[:-1].rstrip() + "…"
-    canvas.text(left, 46, title, title_font, _INK)
-    if pnl is not None:
-        color = _GOOD_TEXT if pnl >= 0 else _BAD_TEXT
-        canvas.text(_W - 24, 18, _signed_usd(pnl), _font(32, bold=True), color, "ra")
-        sub = []
-        if size_usd:
-            sub.append(f"{pnl / size_usd:+.1%}")
-        if reason:
-            sub.append(reason.replace("_", " "))
-        canvas.text(_W - 24, 62, "  ·  ".join(sub), _font(14), _INK_2, "ra")
+    if touched_i is not None and min(abs(points[touched_i][0] - x) for x in (entry_xy[0], exit_xy[0])) > 30:
+        canvas.circle(*points[touched_i], 4.5, fill=_STRIKE, outline=_BG, width=2)
+        label(points[touched_i], "TOUCHED", _price(closes[touched_i]), _STRIKE)
+    canvas.circle(*entry_xy, 6, fill=_BG, outline=_INK, width=2.5)
+    canvas.circle(*exit_xy, 14, fill=_rgba(outcome, 45))
+    canvas.circle(*exit_xy, 6.5, fill=outcome, outline=_BG, width=2)
+    taken += [(x - 9, y - 9, x + 9, y + 9) for x, y in (entry_xy, exit_xy)]
+    label(exit_xy, "EXIT", _price(closes[exit_i]), outcome)
+    label(entry_xy, "ENTRY", _price(closes[entry_i]), _INK_2)
 
-    # Trade read.
-    rows = [
-        ("Token", f"{entry_price:.3f} to {exit_price:.3f}" if entry_price is not None and exit_price is not None else None),
-        ("Model P at entry", f"{model_prob:.1%}" if model_prob is not None else None),
-        ("Edge at entry", f"{edge:+.1%}" if edge is not None else None),
-        ("Implied vol", f"{sigma:.1%}" if sigma else None),
-        ("Size", f"${size_usd:,.2f}" if size_usd else None),
-        ("Held", _duration(exit_ms - entry_ms)),
-        ("Spot over hold", f"{exit_spot / entry_spot - 1:+.2%}" if entry_spot else None),
-        ("Strike from spot", f"{min(levels, key=lambda s: abs(s - exit_spot)) / exit_spot - 1:+.2%}" if exit_spot else None),
-        ("Barrier touched", ("yes" if touched_at is not None else "no") if option_type in _BARRIERS else None),
-        ("Expires", datetime.fromisoformat(expiry).astimezone(UTC).strftime("%b %d %Y %H:%M UTC") if expiry else None),
-    ]
-    rows = [(label, value) for label, value in rows if value is not None]
-    canvas.rect((_SIDE_X, top, _W - 24, bottom), fill=_PANEL, radius=8)
-    canvas.text(_SIDE_X + 18, top + 18, "TRADE READ", _font(12, bold=True), _MUTED)
-    row_y = top + 50
-    row_h = min(40.0, (bottom - row_y - 8) / max(len(rows), 1))
-    label_f, value_f = _font(13), _font(15, bold=True)
-    for label, value in rows:
-        canvas.text(_SIDE_X + 18, row_y, label, label_f, _MUTED, "lm")
-        canvas.text(_W - 42, row_y, value, value_f, _INK, "rm")
-        row_y += row_h
-
-    # Footer.
-    canvas.text(left, _H - 26, f"Spot: Binance {asset.upper()}USDT {interval} closes · times UTC · shaded band = hold",
-                _font(12), _MUTED, "lm")
-    canvas.text(_W - 24, _H - 26, "TurtleQuant", _font(12, bold=True), _MUTED, "rm")
     return canvas.png()
 
 
