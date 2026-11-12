@@ -75,3 +75,9 @@ def test_live_sizes_from_its_own_starting_nav():
 def test_live_exporter_leaves_shadow_port_free():
     assert "8004:8004" not in _live()
     assert re.search(r'^      STRATEGY: "turtlequant-live"$', _live(), re.M)
+
+
+def test_live_takes_no_legacy_wallet_aliases():
+    # The shared helios .env holds another bot's PRIVATE_KEY.
+    for alias in ("PRIVATE_KEY:", "CLOB_API_KEY:", "FUNDER_ADDRESS:", "SIGNATURE_TYPE:"):
+        assert not re.search(rf"^      {alias}", _live(), re.M), alias

@@ -204,12 +204,14 @@ def main() -> int:
     parser.add_argument("--skip-wrap", action="store_true", help="Only approve pUSD for v2 spenders")
     args = parser.parse_args()
 
-    private_key = os.getenv("POLYMARKET_PRIVATE_KEY") or os.getenv("PRIVATE_KEY", "")
+    # No PRIVATE_KEY alias: the shared .env holds other bots' keys under it,
+    # and this script sends transactions.
+    private_key = os.getenv("POLYMARKET_PRIVATE_KEY", "")
     signature_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", os.getenv("SIGNATURE_TYPE", "0")))
     rpc = os.getenv("POLYGON_RPC_URL", "https://polygon-bor-rpc.publicnode.com")
 
     if not private_key:
-        print("ERROR: POLYMARKET_PRIVATE_KEY or PRIVATE_KEY required")
+        print("ERROR: POLYMARKET_PRIVATE_KEY required")
         return 1
     if signature_type != 0:
         print(

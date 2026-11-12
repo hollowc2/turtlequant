@@ -50,11 +50,11 @@ Compose reads only the variables named in `docker-compose.yml`. **Don't use `env
 | Variable | Needed for |
 |----------|------------|
 | `DERIBIT_CLIENT_ID`, `DERIBIT_CLIENT_SECRET` | Optional. Public IV works without them. They are sent in a POST body, never in a URL |
-| `POLYMARKET_PRIVATE_KEY` (or `PRIVATE_KEY`) | `--live` only. Passed by `docker-compose.live.yml` |
+| `POLYMARKET_PRIVATE_KEY` | `--live` only. Passed by `docker-compose.live.yml` |
 | `POLYMARKET_API_*` | `--live` only. Derived from the private key at startup if not set |
 | `POLYMARKET_SIGNATURE_TYPE`, `POLYMARKET_FUNDER` | Proxy wallets (`SIGNATURE_TYPE=1`) |
 
-The legacy `crypto_up_or_down` names also work: `PRIVATE_KEY`, `CLOB_API_*`, `FUNDER_ADDRESS` and `SIGNATURE_TYPE`.
+The live service and `migrate_pusd_v2.py` read only the `POLYMARKET_*` names. The shared `.env` on helios also holds the old `crypto_up_or_down` bot's `PRIVATE_KEY`, `CLOB_API_*` and `FUNDER_ADDRESS`, and accepting those aliases would let live sign with that wallet. Read-only helpers such as `reconcile_nav.py` still fall back to them, so set `POLYMARKET_PRIVATE_KEY` before running them against the live wallet.
 
 **Shadow and paper modes never read the wallet key.** Order books, market info and fee rates all come from public CLOB endpoints, so the base `docker-compose.yml` passes no Polymarket secrets.
 

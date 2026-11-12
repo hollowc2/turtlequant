@@ -38,15 +38,14 @@ services:
       MAX_ORDER_USD: "10.0"
       # Research capture is shadow-only; shadow already collects it.
       RESEARCH_CAPTURE: "false"
-      # Wallet and CLOB API secrets are passed to the live bot only.
+      # Wallet and CLOB API secrets are passed to the live bot only, and only
+      # under their POLYMARKET_* names. The shared .env also holds other bots'
+      # PRIVATE_KEY / CLOB_API_*; passing those aliases would let live sign
+      # with another bot's wallet whenever POLYMARKET_PRIVATE_KEY is unset.
       POLYMARKET_PRIVATE_KEY: "${POLYMARKET_PRIVATE_KEY:-}"
-      PRIVATE_KEY: "${PRIVATE_KEY:-}"
       POLYMARKET_API_KEY: "${POLYMARKET_API_KEY:-}"
       POLYMARKET_API_SECRET: "${POLYMARKET_API_SECRET:-}"
       POLYMARKET_API_PASSPHRASE: "${POLYMARKET_API_PASSPHRASE:-}"
-      CLOB_API_KEY: "${CLOB_API_KEY:-}"
-      CLOB_API_SECRET: "${CLOB_API_SECRET:-}"
-      CLOB_API_PASSPHRASE: "${CLOB_API_PASSPHRASE:-}"
       POLYMARKET_SIGNATURE_TYPE: "0"
       POLYMARKET_FUNDER: ""
 
