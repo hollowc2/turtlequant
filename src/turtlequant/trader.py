@@ -29,6 +29,7 @@ from turtlequant.clob_execution import (
     OrderBook,
     estimate_buy_fill,
 )
+from turtlequant.barrier_research import forward_touch_probability
 from turtlequant.data.binance import ASSET_TO_SYMBOL, fetch_latest_closes
 from turtlequant.history import append_history
 from turtlequant.market_parser import (
@@ -75,6 +76,9 @@ class Pricing:
     dsigma_dk: float | None = None
     # RANGE: the P(S_T > K1) and P(S_T > K2) legs this was built from.
     legs: tuple[Pricing, Pricing] | None = None
+    legacy_sigma: float | None = None
+    smile_sigma: float | None = None
+    valued_at: datetime | None = None
 
 
 def range_legs(params: MarketParams) -> tuple[MarketParams, MarketParams]:
@@ -237,6 +241,7 @@ class Trader:
         notify_entry: Callable[..., Any] | None = None,
         notify_exit: Callable[..., Any] | None = None,
         running: Callable[[], bool] = lambda: True,
+        research_submit: Callable[[dict[str, object]], Any] | None = None,
     ) -> None:
         self.config = config
         self.state_dir = state_dir
@@ -250,6 +255,7 @@ class Trader:
         self.notify_entry = notify_entry or (lambda *_a, **_k: None)
         self.notify_exit = notify_exit or (lambda *_a, **_k: None)
         self.running = running
+        self.research_submit = research_submit
         self.reprice_errors = 0  # data-plane errors since the last scan summary
         self.synthetic_exits_held = 0  # exits refused on a fallback book since the last scan summary
         self._last_marks_at = 0.0
@@ -352,17 +358,19 @@ class Trader:
         vs = self.vol_surfaces[params.asset]
         sigma = vs.get_iv(spot, params.strike, params.expiry)
         source = vs.last_source
-        legacy = compute_probability(params, spot, sigma)
+        valued_at = datetime.now(UTC)
+        legacy = compute_probability(params, spot, sigma, as_of=valued_at)
         smile = vs.smile(spot, params.strike, params.expiry) if source == "deribit" else None
         if smile is None:
             if self.config.pricing_model == "smile" and source == "deribit":
                 source = "smile_unavailable"
-            return Pricing(legacy, sigma, source, legacy)
+            return Pricing(legacy, sigma, source, legacy, legacy_sigma=sigma, valued_at=valued_at)
         s_sigma, slope, forward = smile
-        smile_prob = smile_probability(params, spot, forward, s_sigma, slope)
+        smile_prob = smile_probability(params, spot, forward, s_sigma, slope, as_of=valued_at)
+        evidence = dict(legacy_sigma=sigma, smile_sigma=s_sigma, valued_at=valued_at)
         if self.config.pricing_model == "smile":
-            return Pricing(smile_prob, s_sigma, source, legacy, smile_prob, forward, slope)
-        return Pricing(legacy, sigma, source, legacy, smile_prob, forward, slope)
+            return Pricing(smile_prob, s_sigma, source, legacy, smile_prob, forward, slope, **evidence)
+        return Pricing(legacy, sigma, source, legacy, smile_prob, forward, slope, **evidence)
 
     def _price_range(self, params: MarketParams, spot: float) -> Pricing:
         """P(K1 <= S_T < K2) = P(S_T > K1) - P(S_T > K2), each leg at its own strike's IV and skew.
@@ -755,15 +763,26 @@ class Trader:
 
         if self._marks:
             self._last_marks_at = time.time()
-            self.record(
-                {
+            snapshot = {
                     "event": "market_marks",
+                    "schema_version": 2,
                     "ts": _now_iso(),
                     "pricing_model": self.config.pricing_model,
                     "spots": {a: spots.get(a) for a in self.config.assets},
                     "rows": self._marks,
+                    "entry_window_hours": [self.config.min_entry_hours, self.config.max_entry_hours],
+                    "entry_threshold": self.config.entry_threshold,
+                    "sides": self.config.sides,
+                    "model_consensus": self.config.model_consensus,
+                    "market_data_at": market_data_at.isoformat() if market_data_at else None,
                 }
-            )
+            self.record(snapshot)
+            if self.research_submit is not None:
+                try:
+                    self.research_submit(snapshot)
+                except Exception as exc:
+                    logger.warning("Research capture submit failed: %s", exc)
+                    _inc(stats, "research_submit_errors")
         self._marks = None
         self.risk.record_asset_risk(self.asset_risk)
         stats["reprice_errors"] = self.reprice_errors
@@ -805,7 +824,7 @@ class Trader:
         _inc(stats, "vol_sources", pricing.vol_source)
         model_prob = pricing.prob
         if self._marks is not None:
-            self._marks.append(_mark_row(market, params, pricing))
+            self._marks.append(_mark_row(market, params, pricing, spot))
 
         pos = self.positions.get_position(market.market_id)
         if pos is not None:
@@ -1115,7 +1134,7 @@ class Trader:
         return result
 
 
-def _mark_row(market: ActiveMarket, params: MarketParams, pricing: Pricing) -> dict[str, object]:
+def _mark_row(market: ActiveMarket, params: MarketParams, pricing: Pricing, spot: float) -> dict[str, object]:
     """Compact per-market snapshot row (short keys: one snapshot holds ~300 rows)."""
 
     def r(value: float | None) -> float | None:
@@ -1133,7 +1152,40 @@ def _mark_row(market: ActiveMarket, params: MarketParams, pricing: Pricing) -> d
         "ps": r(pricing.smile_prob),
         "v": r(pricing.sigma),
         "src": pricing.vol_source,
+        "spot": spot,
+        "spot_source": "bot_spot_feed_not_resolution_evidence",
+        "valued_at": pricing.valued_at.isoformat() if pricing.valued_at else None,
+        "sigma_legacy": pricing.legacy_sigma,
+        "sigma_smile": pricing.smile_sigma,
+        "forward": pricing.forward,
+        "dsigma_dk": pricing.dsigma_dk,
+        "p_legacy_full": pricing.legacy_prob,
+        "p_smile_full": pricing.smile_prob,
+        "candidate_id": "forward_flat_touch_v1",
+        "candidate_p_yes": None,
+        "condition_id": market.condition_id,
+        "yes_token_id": market.yes_token_id,
+        "no_token_id": market.no_token_id,
+        "contract": {k: market.raw.get(k) for k in (
+            "question", "description", "createdAt", "startDate", "endDate", "resolutionSource", "slug",
+        )},
     }
+    row["contract"]["question"] = market.question
+    if (params.option_type in (OptionType.BARRIER, OptionType.BARRIER_DOWN)
+            and pricing.forward is not None and pricing.smile_sigma is not None and pricing.valued_at is not None):
+        try:
+            row["candidate_p_yes"] = forward_touch_probability(
+                params, spot, pricing.forward, pricing.smile_sigma, as_of=pricing.valued_at,
+            )
+        except (ValueError, OverflowError) as exc:
+            row["candidate_error"] = type(exc).__name__  # diagnostics never change entry eligibility
+    if pricing.legs is not None:
+        row["pricing_legs"] = [
+            {"sigma_legacy": leg.legacy_sigma, "sigma_smile": leg.smile_sigma,
+             "forward": leg.forward, "dsigma_dk": leg.dsigma_dk,
+             "valued_at": leg.valued_at.isoformat() if leg.valued_at else None}
+            for leg in pricing.legs
+        ]
     if params.upper_strike is not None:
         row["k2"] = params.upper_strike
     return row

@@ -63,6 +63,8 @@ services:
       SIDES: "yes,no"
       # Hold to resolution unless the bid, net of fee, beats the model.
       EXIT_RULE: "ev"
+      # Read-only paired model evidence. Separate public-data worker; no orders.
+      RESEARCH_CAPTURE: "true"
     healthcheck:
       # Log written within 180s. Healthchecks use the shell, not python: a
       # python start costs ~50x the CPU and timed out on a starved host.

@@ -163,7 +163,7 @@ def barrier_down_probability(
     return max(1e-6, min(1.0 - 1e-6, p))
 
 
-def compute_probability(params: MarketParams, spot: float, sigma: float) -> float:
+def compute_probability(params: MarketParams, spot: float, sigma: float, *, as_of: datetime | None = None) -> float:
     """Dispatch to digital or barrier pricing based on option_type.
 
     Args:
@@ -176,7 +176,7 @@ def compute_probability(params: MarketParams, spot: float, sigma: float) -> floa
     """
     if params.option_type == OptionType.RANGE:
         raise ValueError("a range is priced per strike: Trader.price prices P(S_T > K1) - P(S_T > K2)")
-    now = datetime.now(UTC)
+    now = as_of or datetime.now(UTC)
     T = max((params.expiry - now).total_seconds() / (365 * 86400), 1e-6)
 
     if params.option_type == OptionType.EUROPEAN:
@@ -227,7 +227,8 @@ def terminal_above_probability(
 
 
 def smile_probability(
-    params: MarketParams, spot: float, forward: float, sigma: float, dsigma_dk: float
+    params: MarketParams, spot: float, forward: float, sigma: float, dsigma_dk: float,
+    *, as_of: datetime | None = None,
 ) -> float:
     """Model probability using the Deribit forward and the smile's slope at K.
 
@@ -239,7 +240,7 @@ def smile_probability(
     """
     if params.option_type == OptionType.RANGE:
         raise ValueError("a range is priced per strike: Trader.price prices P(S_T > K1) - P(S_T > K2)")
-    now = datetime.now(UTC)
+    now = as_of or datetime.now(UTC)
     T = max((params.expiry - now).total_seconds() / (365 * 86400), 1e-6)
     K = params.strike
     kind = params.option_type

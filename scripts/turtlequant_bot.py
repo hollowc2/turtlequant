@@ -352,6 +352,11 @@ def main() -> None:
         help="Ignore Deribit IV older than this and block entries (0 = no limit)",
     )
     parser.add_argument(
+        "--research-capture", action="store_true",
+        default=os.getenv("RESEARCH_CAPTURE", "false").lower() == "true",
+        help="Asynchronously capture read-only research books and Binance barrier evidence (shadow only)",
+    )
+    parser.add_argument(
         "--marks-interval-secs",
         type=float,
         default=float(os.getenv("MARKS_INTERVAL_SECS", "900")),
@@ -466,6 +471,10 @@ def main() -> None:
             sys.exit(1)
     discord = DiscordTrades(state_dir, execution_mode)
     notifier = NotificationQueue()
+    research = None
+    if args.research_capture and not args.dry_run and execution_mode == "shadow":
+        from turtlequant.research_capture import ResearchCapture
+        research = ResearchCapture(state_dir)
 
     trader = Trader(
         TraderConfig(
@@ -504,6 +513,7 @@ def main() -> None:
             notify_exit, discord, pos, price, pnl, reason
         ),
         running=lambda: running,
+        research_submit=research.submit if research else None,
     )
 
     logger.info("=== TurtleQuant Bot ===")
