@@ -35,7 +35,7 @@ cd /opt/turtlequant-app && git pull --ff-only && docker compose up -d --build
 - `/opt/polymarket/app/turtlequant` is the old monorepo copy. The bot ran from it until 2026-09-24 and it is no longer deployed.
 - `/opt/polymarket/app/crypto_up_or_down/state/turtlequant` holds old samples, not live state.
 
-The running bot's state is always in `/opt/turtlequant/state`, unless the live override is in use.
+The shadow bot's state is always in `/opt/turtlequant/state`. The live bot, when deployed, keeps its own in `/opt/turtlequant/state/live-state`.
 
 **Trading mode is set only on the command line:** `--shadow` (the Compose default), `--paper` or `--live --i-accept-live-risk`. There is no `PAPER_TRADE` environment variable.
 
@@ -315,7 +315,7 @@ If you skip this, the browser silently blocks the script and the charts disappea
 
 > **Live trading is disabled in code.** `scripts/turtlequant_bot.py` exits with "Live trading is disabled pending supervised broker acceptance". The steps below apply once that gate is removed. Until then:
 > - None of these steps can be run.
-> - The live Compose override stops after 3 failed starts instead of crash-looping.
+> - The live bot (`docker-compose.live.yml`) stops after 3 failed starts instead of crash-looping.
 >
 > Resolved positions aren't redeemed on-chain automatically. Live positions stay `pending_redemption` until you redeem them by hand.
 
@@ -379,10 +379,33 @@ Then confirm three things:
 
 ### 5. Run the live container
 
-Use the live override so it doesn't inherit shadow bookkeeping from `/opt/turtlequant/state`:
+`docker-compose.live.yml` is its own Compose project, `turtlequant-live`. It runs beside shadow, which keeps going as the comparison for live fills. **Use it alone, never as an override on `docker-compose.yml`.**
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.live.yml up -d --build turtlequant-bot turtlequant-grafana-exporter
+docker compose -f docker-compose.live.yml up -d --build
+```
+
+| Container | Reads | Metrics |
+|-----------|-------|---------|
+| `turtlequant-bot-live` | `/opt/turtlequant/state/live-state` | — |
+| `turtlequant-grafana-exporter-live` | `live-state`, read-only | `strategy="turtlequant-live"`, host port 8005 |
+
+Both extend their shadow services, so they share the image, init, logging and healthchecks. Live changes only its state, wallet secrets, `STARTING_NAV` (100) and metrics label. `STARTING_NAV` applies only while `live-state` has no positions file.
+
+Then add a scrape job to `/opt/monitoring/prometheus.yml` and reload Prometheus:
+
+```yaml
+  - job_name: "turtlequant-live"
+    static_configs:
+      - targets: ["turtlequant-grafana-exporter-live:8004"]
+```
+
+Add it only when live is deployed: the operational alerts cover both jobs, so a job with no exporter fires TurtleQuantExporterUnreachable. Shadow-soak quality alerts watch shadow only. In Grafana, the **Strategy** selector switches the dashboard between Shadow and Live.
+
+To stop live without touching shadow:
+
+```bash
+docker compose -f docker-compose.live.yml down
 ```
 
 ### 6. Reconcile NAV

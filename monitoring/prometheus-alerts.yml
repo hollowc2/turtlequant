@@ -1,81 +1,83 @@
 # TurtleQuant alerting rules — load from /opt/monitoring/prometheus.yml (rule_files).
 # Requires Alertmanager (or Grafana unified alerting) for notifications.
+# Operational rules cover shadow ("turtlequant") and live ("turtlequant-live");
+# the shadow-soak quality rules watch shadow only.
 
 groups:
   - name: turtlequant
     rules:
       - alert: TurtleQuantExporterDown
-        expr: turtlequant_exporter_scrape_success{strategy="turtlequant"} == 0
+        expr: turtlequant_exporter_scrape_success{strategy=~"turtlequant|turtlequant-live"} == 0
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "TurtleQuant exporter cannot read state files"
+          summary: "[{{ $labels.strategy }}] TurtleQuant exporter cannot read state files"
           description: "Positions or history JSON under /opt/turtlequant/state is missing or unreadable."
 
       # The rule above needs a scrape to succeed: a dead or hung exporter
       # drops the series and never trips it.
       - alert: TurtleQuantExporterUnreachable
-        expr: up{job="turtlequant"} == 0
+        expr: up{job=~"turtlequant|turtlequant-live"} == 0
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "TurtleQuant exporter is not answering scrapes"
+          summary: "[{{ $labels.job }}] TurtleQuant exporter is not answering scrapes"
           description: "Prometheus cannot scrape turtlequant-grafana-exporter:8004 — check the container and docker logs."
 
       - alert: TurtleQuantBotStale
-        expr: turtlequant_bot_log_age_sec{strategy="turtlequant"} > 180
+        expr: turtlequant_bot_log_age_sec{strategy=~"turtlequant|turtlequant-live"} > 180
         for: 3m
         labels:
           severity: critical
         annotations:
-          summary: "TurtleQuant bot log has not been updated"
+          summary: "[{{ $labels.strategy }}] TurtleQuant bot log has not been updated"
           description: "No log writes for >3m — scan loop may be hung or container crashed."
 
       - alert: TurtleQuantNoScans
-        expr: turtlequant_bot_log_age_sec{strategy="turtlequant"} > 120
+        expr: turtlequant_bot_log_age_sec{strategy=~"turtlequant|turtlequant-live"} > 120
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "TurtleQuant scan loop appears idle"
+          summary: "[{{ $labels.strategy }}] TurtleQuant scan loop appears idle"
           description: "Expected log activity every ~60s during normal operation."
 
       - alert: TurtleQuantFailedOrdersSpike
-        expr: increase(turtlequant_failed_orders_total{strategy="turtlequant"}[15m]) > 3
+        expr: increase(turtlequant_failed_orders_total{strategy=~"turtlequant|turtlequant-live"}[15m]) > 3
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "TurtleQuant failed order spike"
+          summary: "[{{ $labels.strategy }}] TurtleQuant failed order spike"
           description: "More than 3 failed_order events in 15 minutes."
 
       - alert: TurtleQuantEntriesHalted
-        expr: max by (strategy, reason) (turtlequant_entries_halted{strategy="turtlequant"}) == 1
+        expr: max by (strategy, reason) (turtlequant_entries_halted{strategy=~"turtlequant|turtlequant-live"}) == 1
         for: 15m
         labels:
           severity: warning
         annotations:
-          summary: "TurtleQuant entries halted ({{ $labels.reason }})"
+          summary: "[{{ $labels.strategy }}] TurtleQuant entries halted ({{ $labels.reason }})"
           description: "The marked-equity entry gate has blocked new positions for >15m. Exits still run. Inspect turtlequant_risk_drawdown_pct and the bot log ([ENTRY_HALTED])."
 
       - alert: TurtleQuantNavDrawdown
-        expr: turtlequant_current_drawdown_pct{strategy="turtlequant"} > 0.15
+        expr: turtlequant_current_drawdown_pct{strategy=~"turtlequant|turtlequant-live"} > 0.15
         for: 15m
         labels:
           severity: warning
         annotations:
-          summary: "TurtleQuant realized NAV drawdown >15%"
+          summary: "[{{ $labels.strategy }}] TurtleQuant realized NAV drawdown >15%"
           description: "The closed-trade equity curve exceeded 15% drawdown from its realized peak. This is separate from the mark-to-bid entry gate."
 
       - alert: TurtleQuantExporterRestarted
-        expr: changes(process_start_time_seconds{job="turtlequant"}[15m]) > 0
+        expr: changes(process_start_time_seconds{job=~"turtlequant|turtlequant-live"}[15m]) > 0
         for: 1m
         labels:
           severity: warning
         annotations:
-          summary: "TurtleQuant Prometheus exporter restarted"
+          summary: "[{{ $labels.job }}] TurtleQuant Prometheus exporter restarted"
           description: "turtlequant-grafana-exporter process restarted — check docker logs and bot health."
 
       - alert: TurtleQuantNoShadowQuotes

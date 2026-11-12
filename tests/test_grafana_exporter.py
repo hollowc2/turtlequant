@@ -404,3 +404,13 @@ def test_position_gauges_carry_the_outcome(tmp_path):
     families = {family.name: family for family in TurtleQuantCollector(str(tmp_path)).collect()}
 
     assert _sample_value(families["turtlequant_position_size_usd"], market_id="m", outcome="NO") == 30.0
+
+
+def test_strategy_label_comes_from_the_environment(monkeypatch):
+    # The live exporter runs this same script with STRATEGY=turtlequant-live.
+    monkeypatch.setenv("STRATEGY", "turtlequant-live")
+    spec = importlib.util.spec_from_file_location("grafana_exporter_live", _EXPORTER_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.STRATEGY == "turtlequant-live"
+    assert grafana_exporter.STRATEGY == "turtlequant"

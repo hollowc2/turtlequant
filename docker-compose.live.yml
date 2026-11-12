@@ -1,5 +1,20 @@
+# Live trading, run as its own Compose project beside the shadow bot:
+#
+#   docker compose -f docker-compose.live.yml up -d --build
+#
+# Use this file alone, never as an override on docker-compose.yml. Its own
+# project name and container names leave the shadow containers untouched, so
+# shadow keeps running as the comparison for live fills. Each service extends
+# its shadow counterpart (init, logging, healthcheck) and changes only what
+# live needs: its own state, the wallet secrets and its own metrics label.
+name: turtlequant-live
+
 services:
-  turtlequant-bot:
+  turtlequant-bot-live:
+    extends:
+      file: docker-compose.yml
+      service: turtlequant-bot
+    container_name: turtlequant-bot-live
     # The bot exits non-zero on purpose when live trading must not start (live
     # is currently hard-disabled in code; an unreconciled order intent also
     # blocks startup). Retry a few times for transient faults, then stay down
@@ -13,11 +28,14 @@ services:
       - "--asset"
       - "btc,eth"
     volumes:
+      # Same container path as shadow's state mount, so this replaces it.
       - /opt/turtlequant/state/live-state:/app/state
-      - /opt/turtlequant/data:/app/data
     environment:
-      STATE_DIR: "/app/state"
-      LOG_FILE: "/app/state/turtlequant-bot.log"
+      # Size from the wallet's funding, not shadow's $1,000 paper NAV. Used
+      # only when live-state has no positions file yet.
+      STARTING_NAV: "100.0"
+      # Research capture is shadow-only; shadow already collects it.
+      RESEARCH_CAPTURE: "false"
       # Wallet and CLOB API secrets are passed to the live bot only.
       POLYMARKET_PRIVATE_KEY: "${POLYMARKET_PRIVATE_KEY:-}"
       PRIVATE_KEY: "${PRIVATE_KEY:-}"
@@ -30,8 +48,20 @@ services:
       POLYMARKET_SIGNATURE_TYPE: "0"
       POLYMARKET_FUNDER: ""
 
-  turtlequant-grafana-exporter:
+  turtlequant-grafana-exporter-live:
+    extends:
+      file: docker-compose.yml
+      service: turtlequant-grafana-exporter
+    container_name: turtlequant-grafana-exporter-live
+    # Shadow's exporter holds host port 8004; Prometheus scrapes this one by
+    # container name on monitoring_net (job "turtlequant-live").
+    ports: !override
+      - "127.0.0.1:8005:8004"
     volumes:
       - /opt/turtlequant/state/live-state:/opt/turtlequant/state:ro
     environment:
-      STATE_DIR: "/opt/turtlequant/state"
+      STRATEGY: "turtlequant-live"
+
+networks:
+  monitoring_net:
+    external: true

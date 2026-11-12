@@ -43,20 +43,25 @@
         "name": "strategy",
         "label": "Strategy",
         "type": "custom",
-        "query": "TurtleQuant : turtlequant",
+        "query": "Shadow : turtlequant,Live : turtlequant-live",
         "multi": false,
         "includeAll": false,
-        "hide": 2,
+        "hide": 0,
         "current": {
-          "text": "TurtleQuant",
+          "text": "Shadow",
           "value": "turtlequant",
           "selected": true
         },
         "options": [
           {
-            "text": "TurtleQuant",
+            "text": "Shadow",
             "value": "turtlequant",
             "selected": true
+          },
+          {
+            "text": "Live",
+            "value": "turtlequant-live",
+            "selected": false
           }
         ]
       },
@@ -275,7 +280,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "min(up{job=\"turtlequant\"}) * min(turtlequant_exporter_scrape_success{strategy=\"$strategy\"})",
+          "expr": "min(up{job=\"$strategy\"}) * min(turtlequant_exporter_scrape_success{strategy=\"$strategy\"})",
           "refId": "A",
           "range": false,
           "instant": true
@@ -5295,7 +5300,7 @@
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "rate(process_cpu_seconds_total{job=\"turtlequant\"}[5m])",
+              "expr": "rate(process_cpu_seconds_total{job=\"$strategy\"}[5m])",
               "refId": "A",
               "range": true,
               "instant": false,
@@ -5306,7 +5311,7 @@
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "changes(process_start_time_seconds{job=\"turtlequant\"}[15m])",
+              "expr": "changes(process_start_time_seconds{job=\"$strategy\"}[15m])",
               "refId": "B",
               "range": true,
               "instant": false,

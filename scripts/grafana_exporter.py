@@ -43,7 +43,7 @@ Most recent 50 closed trades (labeled strategy, idx; 0 = most recent):
   turtlequant_closed_position_pnl_usd
   turtlequant_closed_position_holding_hours
 
-Labels: strategy ("turtlequant")
+Labels: strategy ("turtlequant" for shadow; $STRATEGY, e.g. "turtlequant-live")
 
 Usage:
     python grafana_exporter.py [--state-dir DIR] [--port PORT]
@@ -78,7 +78,8 @@ log = logging.getLogger(__name__)
 STATE_DIR = os.environ.get("STATE_DIR", "/opt/turtlequant/state")
 PORT = int(os.environ.get("EXPORTER_PORT", "8004"))
 
-STRATEGY = "turtlequant"
+# Shadow and live each run an exporter; the label keeps their series apart.
+STRATEGY = os.environ.get("STRATEGY", "turtlequant")
 POSITIONS_FILE = "turtlequant-positions.json"
 RISK_FILE = "turtlequant-risk.json"
 BOT_LOG_FILE = "turtlequant-bot.log"

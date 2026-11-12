@@ -166,7 +166,7 @@ Runtime state lives outside the repo:
 |------|----------|
 | `/opt/turtlequant-app` | Checkout of this repo, including the Compose files |
 | `/opt/turtlequant/state` | Shadow-mode positions, history and the bot log |
-| `/opt/turtlequant/state/live-state` | Live-mode state, used with `docker-compose.live.yml` |
+| `/opt/turtlequant/state/live-state` | Live-mode state, used by the separate `docker-compose.live.yml` project |
 
 Key files:
 - **`turtlequant-history.jsonl`** is the trade ledger: `open`, `close`, `order` and `failed_order` events with fills and fees.
