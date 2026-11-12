@@ -15,10 +15,9 @@ services:
       file: docker-compose.yml
       service: turtlequant-bot
     container_name: turtlequant-bot-live
-    # The bot exits non-zero on purpose when live trading must not start (live
-    # is currently hard-disabled in code; an unreconciled order intent also
-    # blocks startup). Retry a few times for transient faults, then stay down
-    # for an operator instead of crash-looping.
+    # The bot exits non-zero on purpose when live trading must not start (no
+    # MAX_ORDER_USD, or an unreconciled order intent). Retry a few times for
+    # transient faults, then stay down for an operator instead of crash-looping.
     restart: "on-failure:3"
     command:
       - "python"
@@ -34,6 +33,9 @@ services:
       # Size from the wallet's funding, not shadow's $1,000 paper NAV. Used
       # only when live-state has no positions file yet.
       STARTING_NAV: "100.0"
+      # Hard cap on any single buy, whatever Kelly and NAV say; also the
+      # per-market cap at 10% of a $100 wallet.
+      MAX_ORDER_USD: "10.0"
       # Research capture is shadow-only; shadow already collects it.
       RESEARCH_CAPTURE: "false"
       # Wallet and CLOB API secrets are passed to the live bot only.

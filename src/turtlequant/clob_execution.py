@@ -349,6 +349,23 @@ class ExecutionClient:
                 return schedule
         return None
 
+    def collateral_balance(self) -> float | None:
+        """Spendable pUSD on the CLOB in live mode; None when not live or unknown.
+
+        The bot's NAV is bookkeeping: claims awaiting redemption count in it
+        but cannot pay for an order. Callers must treat None as "do not buy".
+        """
+        if self.mode != "live" or self._client is None:
+            return None
+        try:
+            from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
+            raw = self._client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+            balance = float(Decimal(str(_dict_get(raw, "balance"))) / _AMOUNT_SCALE)
+        except Exception as exc:
+            logger.warning("CLOB collateral balance lookup failed: %s", exc)
+            return None
+        return balance if math.isfinite(balance) and balance >= 0 else None
+
     def get_order(self, order_id: str) -> Any:
         if self._client is None:
             raise RuntimeError("CLOB client is unavailable")

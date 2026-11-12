@@ -382,6 +382,7 @@ def main() -> None:
         ("--max-asset-delta-pct", "MAX_ASSET_DELTA_PCT", 0.0,
          "Net dollar-delta cap per asset (shares * dp/dS * S) as a fraction of NAV (0 = off)"),
         ("--kelly-shrink", "KELLY_SHRINK", 1.0, "Kelly sizes on w*model + (1-w)*mid (1 = raw model)"),
+        ("--max-order-usd", "MAX_ORDER_USD", 0.0, "Hard USD cap on any single buy (0 = off; required for --live)"),
     ):
         parser.add_argument(
             flag, type=float, default=float(os.getenv(env, str(default))), metavar="FLOAT", help=help_text
@@ -402,8 +403,10 @@ def main() -> None:
     if args.live and not args.i_accept_live_risk:
         logger.error("Live trading requires --i-accept-live-risk")
         sys.exit(1)
-    if args.live:
-        logger.error("Live trading is disabled pending supervised broker acceptance")
+    if args.live and args.max_order_usd <= 0:
+        # Kelly sizes from bookkeeping NAV; this bounds every order even if
+        # that NAV is wrong (e.g. a shadow NAV inherited by a small wallet).
+        logger.error("Live trading requires --max-order-usd > 0 (MAX_ORDER_USD)")
         sys.exit(1)
     execution_mode = "live" if args.live else "shadow" if args.shadow else "paper"
 
@@ -500,6 +503,7 @@ def main() -> None:
             exit_rule=args.exit_rule,
             exit_margin=args.exit_margin,
             trade_put_range=args.trade_put_range,
+            max_order_usd=args.max_order_usd,
         ),
         state_dir=state_dir,
         scanner=scanner,
@@ -534,6 +538,8 @@ def main() -> None:
     logger.info("Max entry   : %s", f"{args.max_entry_hours:.0f}h to resolution" if args.max_entry_hours else "no limit")
     logger.info("Exit rule   : %s", args.exit_rule)
     logger.info("Starting NAV: $%.2f", args.starting_nav)
+    if args.max_order_usd:
+        logger.info("Max order   : $%.2f", args.max_order_usd)
     logger.info("State dir   : %s", state_dir)
     logger.info("")
 

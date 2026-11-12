@@ -313,24 +313,23 @@ If you skip this, the browser silently blocks the script and the charts disappea
 
 ## Live Trading (CLOB v2)
 
-> **Live trading is disabled in code.** `scripts/turtlequant_bot.py` exits with "Live trading is disabled pending supervised broker acceptance". The steps below apply once that gate is removed. Until then:
-> - None of these steps can be run.
+> **Before the first live order:**
+> - `--live` needs `--i-accept-live-risk` and `--max-order-usd` (`MAX_ORDER_USD`, 10 in `docker-compose.live.yml`), or the bot exits.
+> - Each buy is capped at 98% of the wallet's CLOB pUSD balance. If the balance can't be read, the entry is skipped.
+> - Resolved positions aren't redeemed on-chain automatically. Live positions stay `pending_redemption` until you redeem them by hand, and that money isn't spendable until then.
 > - The live bot (`docker-compose.live.yml`) stops after 3 failed starts instead of crash-looping.
->
-> Resolved positions aren't redeemed on-chain automatically. Live positions stay `pending_redemption` until you redeem them by hand.
 
 TurtleQuant uses `py-clob-client-v2` with pUSD collateral. USDC.e in the wallet plus V1 exchange approvals is **not** enough.
 
 ### 1. Fund the wallet
 
-You need a Polygon wallet holding USDC.e, plus MATIC for gas. Then set:
+Use a **dedicated signing EOA** that holds nothing else, with `POLYMARKET_SIGNATURE_TYPE=0` and no `POLYMARKET_FUNDER`. It needs:
+- USDC.e for trading
+- A few dollars of POL for gas (wrapping, approvals and manual redemptions; CLOB orders themselves are gasless)
 
-| Wallet type | `POLYMARKET_SIGNATURE_TYPE` | `POLYMARKET_FUNDER` |
-|-------------|-----------------------------|---------------------|
-| Signing EOA | `0` | unset or empty |
-| Proxy or Magic wallet | `1` | Address that holds the funds |
+Proxy and Magic wallets (`SIGNATURE_TYPE=1`) aren't supported yet. `migrate_pusd_v2.py` refuses them, because it would sign as the EOA and leave the proxy unwrapped and unapproved.
 
-### 2. Migrate collateral (USDC.e → pUSD)
+### 2. Migrate collateral (USDC.e → pUSD) and set approvals
 
 ```bash
 cd /opt/turtlequant-app
@@ -341,7 +340,13 @@ uv run scripts/migrate_pusd_v2.py                    # wrap all USDC.e and set v
 # uv run scripts/migrate_pusd_v2.py --wrap-usd 50    # partial wrap
 ```
 
-Afterwards, the CLOB balance should match the wrapped pUSD shown in the script's output.
+The script sets two approvals for each of the CTF Exchange, the Neg Risk CTF Exchange and the Neg Risk Adapter:
+- **pUSD `approve`**, so buys can pay.
+- **ConditionalTokens `setApprovalForAll`**, so sells can deliver outcome tokens. Without it every SELL is rejected.
+
+Afterwards, the CLOB balance should match the wrapped pUSD shown in the script's output, and a re-run should show every approval as ✓.
+
+The default RPC is `polygon-bor-rpc.publicnode.com` (`polygon-rpc.com` now answers 401). Set `POLYGON_RPC_URL` to use another.
 
 ### 3. Set up API credentials
 
@@ -353,29 +358,21 @@ uv run scripts/derive_clob_api_creds.py >> .env
 
 ### 4. Smoke test
 
-Back up shadow state, create a fresh live state, then run a small one-shot:
+Run the live service in the foreground with a $2 order cap. It uses exactly the deployed strategy settings, so the first order is one the real bot would place:
 
 ```bash
-cp /opt/turtlequant/state/turtlequant-positions.json \
-   /opt/turtlequant/state/turtlequant-positions.json.bak-$(date -u +%Y%m%dT%H%M%SZ)
-
 mkdir -p /opt/turtlequant/state/live-state
-printf '{"nav":50.0,"total_pnl":0.0,"positions":[]}\n' \
-  > /opt/turtlequant/state/live-state/turtlequant-positions.json
-printf '[]\n' > /opt/turtlequant/state/live-state/turtlequant-history.json
-
-uv run python scripts/turtlequant_bot.py \
-  --live --i-accept-live-risk \
-  --state-dir /opt/turtlequant/state/live-state \
-  --asset btc \
-  --starting-nav 50 \
-  --entry-threshold 0.10
+docker compose -f docker-compose.live.yml build
+docker compose -f docker-compose.live.yml run --rm -e MAX_ORDER_USD=2 turtlequant-bot-live
 ```
 
-Then confirm three things:
-- The order appears in `turtlequant-bot.log`.
-- The position has fill fields.
-- The test position exits.
+The live state starts at `STARTING_NAV` (100) when it has no positions file. Entries are rare (a few a week in shadow), so leave it running until one fills, then press Ctrl-C. Then confirm:
+- `[WALLET_CAP]` or `[ENTRY` lines show the wallet balance was read.
+- The `order` event in `turtlequant-history.jsonl` has `status: matched`, an `order_id` and fill amounts.
+- `uv run python scripts/order_intents.py --state-dir /opt/turtlequant/state/live-state list` shows nothing outstanding.
+- `uv run scripts/reconcile_nav.py --positions /opt/turtlequant/state/live-state/turtlequant-positions.json` agrees with the wallet.
+
+With `EXIT_RULE=ev`, the position usually holds to resolution, so the smoke test doesn't exercise a sell. Watch the first live exit.
 
 ### 5. Run the live container
 
@@ -413,7 +410,7 @@ docker compose -f docker-compose.live.yml down
 The `nav` in `turtlequant-positions.json` is bookkeeping, not your wallet balance. This compares it with the CLOB pUSD balance plus open positions marked at the bid:
 
 ```bash
-uv run scripts/reconcile_nav.py
+uv run scripts/reconcile_nav.py --positions /opt/turtlequant/state/live-state/turtlequant-positions.json
 ```
 
 Investigate if the difference is more than 5% of NAV.

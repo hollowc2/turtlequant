@@ -79,6 +79,10 @@ class FakeClob:
     def get_clob_market_info(self, _condition_id):
         return MARKET_INFO
 
+    def get_balance_allowance(self, _params):
+        # A funded wallet, so live entries reach the broker unless a test says otherwise.
+        return {"balance": "10000000000", "allowances": {}}
+
 
 class NoBookClob(FakeClob):
     """The CLOB has no book for the token, so the executor falls back to Gamma's quote."""
@@ -819,3 +823,77 @@ def test_reconciled_range_buy_without_its_upper_strike_is_refused(tmp_path):
 
     reconcile_intent(replace(intent, metadata={**meta, "upper_strike": 86_000.0}), executor, positions)
     assert positions.get_position("m-1").upper_strike == 86_000.0
+
+
+class FillingLiveClob(FakeClob):
+    """Fills every live buy at the ask; reports ``balance`` pUSD (None = lookup fails)."""
+
+    def __init__(self, balance):
+        super().__init__()
+        self.balance = balance
+        self.amounts: list[float] = []
+
+    def get_balance_allowance(self, _params):
+        if self.balance is None:
+            raise ConnectionError("balance endpoint down")
+        return {"balance": str(int(self.balance * 1_000_000)), "allowances": {}}
+
+    def create_and_post_market_order(self, *, order_args, **_kwargs):
+        self.amounts.append(order_args.amount)
+        shares = order_args.amount / self.asks[0][0]
+        return {
+            "success": True, "status": "matched", "orderID": f"o-{len(self.amounts)}",
+            "makingAmount": str(int(order_args.amount * 1_000_000)), "takingAmount": str(int(shares * 1_000_000)),
+        }
+
+
+def live_trader(tmp_path, clob, **config):
+    return make_trader(
+        tmp_path, mode="live", clob=clob, intents=OrderIntentLedger(tmp_path / "intents.sqlite3"),
+        executor=ExecutionClient(mode="live", allow_live=True, clob_client=clob), **config,
+    )
+
+
+def test_live_buy_is_capped_by_the_wallet_not_bookkeeping_nav(tmp_path):
+    # NAV says $1,000; the wallet holds $5 (the rest awaits redemption).
+    clob = FillingLiveClob(balance=5.0)
+    trader = live_trader(tmp_path, clob)
+
+    stats = trader.scan()
+
+    assert clob.amounts == [pytest.approx(5.0 * 0.98)]
+    assert stats["wallet_capped"] == 1
+    assert trader.positions.has_position("m-1")
+
+
+def test_live_buy_skipped_when_wallet_balance_is_unknown(tmp_path):
+    clob = FillingLiveClob(balance=None)
+    trader = live_trader(tmp_path, clob)
+
+    stats = trader.scan()
+
+    assert clob.amounts == []
+    assert stats["wallet_balance_unknown"] == 1
+    assert trader.risk.consecutive_failures == 0  # nothing reached the broker
+
+
+def test_live_buy_skipped_when_wallet_is_below_the_minimum(tmp_path):
+    clob = FillingLiveClob(balance=0.50)
+    trader = live_trader(tmp_path, clob)
+
+    trader.scan()
+
+    assert clob.amounts == [] and not trader.positions.has_position("m-1")
+
+
+@pytest.mark.parametrize("mode", ["shadow", "live"])
+def test_max_order_usd_caps_every_buy(tmp_path, mode):
+    clob = FillingLiveClob(balance=1_000.0)
+    trader = live_trader(tmp_path, clob, max_order_usd=3.0) if mode == "live" else make_trader(
+        tmp_path, mode=mode, clob=clob, max_order_usd=3.0
+    )
+
+    trader.scan()
+
+    (pos,) = trader.positions.all_positions()
+    assert pos.size_usd == pytest.approx(3.0, abs=1e-4)

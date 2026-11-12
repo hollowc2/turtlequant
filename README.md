@@ -133,7 +133,7 @@ If a held market drops out of the scan, the bot keeps using the last quote it sa
 | `--dry-run` | Logs what it would buy or exit. Writes no files. |
 | `--paper` | Simulates fills against real bid/ask depth. |
 | `--shadow` | Paper mode plus a `shadow_quote` record for every candidate. **This is the deployed mode.** |
-| `--live --i-accept-live-risk` | **Disabled in code** until live order handling is tested under supervision. Once enabled, it sends fill-and-kill (FAK) orders through `py_clob_client_v2` and records and reconciles actual and partial fills. |
+| `--live --i-accept-live-risk` | Sends fill-and-kill (FAK) orders through `py_clob_client_v2` and records and reconciles actual and partial fills. Also needs `--max-order-usd`. Each buy is capped by the wallet's pUSD balance. See [Live trading](docs/OPS.md#live-trading-clob-v2). |
 
 Paper and shadow modes use only public endpoints and never load a wallet key.
 

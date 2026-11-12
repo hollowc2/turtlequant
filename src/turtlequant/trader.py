@@ -61,6 +61,9 @@ PRICING_MODELS = ("legacy", "smile")
 # Vol sources that must not open positions: an over-age Deribit surface
 # (--max-iv-age-secs) or, in smile mode, no smile/forward for the market.
 NO_ENTRY_VOL_SOURCES = frozenset({"stale", "smile_unavailable"})
+# Live buys spend at most this share of the wallet's pUSD, leaving room for
+# rounding and fees so a full-wallet order is not rejected for a few cents.
+WALLET_SPEND_FRACTION = 0.98
 
 
 @dataclass(frozen=True)
@@ -169,6 +172,9 @@ class TraderConfig:
     # are priced and written to market_marks for scoring; entries in them
     # need this flag.
     trade_put_range: bool = False
+    # Hard USD cap on any single buy, after Kelly and every NAV cap (0 = off).
+    # Required for live: it bounds an order even if NAV bookkeeping is wrong.
+    max_order_usd: float = 0.0
 
     @property
     def persist(self) -> bool:
@@ -918,6 +924,8 @@ class Trader:
             if capped.size_usd < plan.size_usd and capped.size_usd < 1.0:
                 _inc(stats, "asset_capped")
             plan = capped
+        if cfg.max_order_usd and plan.size_usd > cfg.max_order_usd:
+            plan = replace(plan, size_usd=cfg.max_order_usd, fill=estimate_buy_fill(book, cfg.max_order_usd))
         if plan.size_usd < 1.0 or not plan.fill.complete:
             return None
         if not self.positions.has_expiry_headroom(params.expiry, plan.size_usd):
@@ -1007,6 +1015,10 @@ class Trader:
                 market.market_id[:16], side.outcome, plan.size_usd, plan.executable_price, model_prob, plan.edge,
             )
             return None
+        if self.live:
+            plan = self.cap_to_wallet(plan, book, market.market_id, stats)
+            if plan is None:
+                return None
         result = self._buy(market, params, side, sigma, vol_source, book, fee, plan)
         if result.success and spot is not None:
             asset = self.asset_risk.setdefault(params.asset, {"gross_usd": 0.0, "delta_usd": 0.0})
@@ -1014,6 +1026,33 @@ class Trader:
             sign = -1.0 if side.outcome == "NO" else 1.0
             asset["delta_usd"] += sign * result.filled_shares * self.dollar_delta_per_share(params, spot, pricing)
         return result
+
+    def cap_to_wallet(
+        self, plan: EntryPlan, book: OrderBook, market_id: str, stats: dict[str, object]
+    ) -> EntryPlan | None:
+        """Shrink a live buy to the wallet's spendable pUSD, or None to skip it.
+
+        NAV counts claims awaiting redemption, which cannot pay for an order;
+        an order the wallet cannot cover fails at the broker and trips the
+        breaker. An unknown balance skips the entry rather than guessing.
+        """
+        balance = self.executor.collateral_balance()
+        if balance is None:
+            _inc(stats, "wallet_balance_unknown")
+            logger.warning("[ENTRY_SKIPPED] %s wallet balance unavailable", market_id[:16])
+            return None
+        spendable = balance * WALLET_SPEND_FRACTION
+        if plan.size_usd <= spendable:
+            return plan
+        if spendable < 1.0:
+            _inc(stats, "wallet_capped")
+            logger.info("[ENTRY_SKIPPED] %s wallet $%.2f below the $1 minimum", market_id[:16], balance)
+            return None
+        _inc(stats, "wallet_capped")
+        logger.info(
+            "[WALLET_CAP] %s size $%.2f -> $%.2f (wallet $%.2f)", market_id[:16], plan.size_usd, spendable, balance
+        )
+        return replace(plan, size_usd=spendable, fill=estimate_buy_fill(book, spendable))
 
     def _buy(
         self,

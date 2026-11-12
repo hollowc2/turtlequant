@@ -387,3 +387,22 @@ def test_book_contract_on_a_real_clob_response():
     assert book.best_bid == max(float(level["price"]) for level in raw["bids"])
     assert book.best_ask == min(float(level["price"]) for level in raw["asks"])
     assert book.best_bid < book.best_ask
+
+
+def test_collateral_balance_reads_fixed_point_pusd_in_live_only():
+    fake_client = MagicMock()
+    fake_client.get_balance_allowance.return_value = {"balance": "98765432", "allowances": {}}
+
+    assert ExecutionClient(mode="live", allow_live=True, clob_client=fake_client).collateral_balance() == 98.765432
+    assert ExecutionClient(mode="shadow", clob_client=fake_client).collateral_balance() is None
+
+
+@pytest.mark.parametrize("response", [ConnectionError("down"), {"balance": None}, {"balance": "-1"}])
+def test_collateral_balance_is_unknown_rather_than_guessed(response):
+    fake_client = MagicMock()
+    if isinstance(response, Exception):
+        fake_client.get_balance_allowance.side_effect = response
+    else:
+        fake_client.get_balance_allowance.return_value = response
+
+    assert ExecutionClient(mode="live", allow_live=True, clob_client=fake_client).collateral_balance() is None

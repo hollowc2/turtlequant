@@ -8,6 +8,15 @@
 TurtleQuant uses py-clob-client-v2, which tracks pUSD balance/allowance — not raw
 USDC.e on V1 exchange contracts. Run this once before live trading.
 
+Two approvals per v2 operator (CTF Exchange, Neg Risk CTF Exchange, Neg Risk
+Adapter): pUSD ``approve`` so buys can pay, and ConditionalTokens
+``setApprovalForAll`` so sells can deliver outcome tokens and neg-risk
+positions can be redeemed. Without the second, every SELL is rejected.
+
+Signing EOAs only (SIGNATURE_TYPE=0). For a proxy wallet this script would
+build transactions from the proxy but sign them as the EOA, so they run as
+the EOA and the proxy is never wrapped or approved (docs/REDEMPTION-DESIGN.md).
+
 Usage:
     cd /opt/turtlequant-app
     set -a && source .env && set +a
@@ -32,6 +41,9 @@ load_dotenv()
 USDC_E = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 PUSD = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 ONRAMP = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
+# ConditionalTokens (CTF): the ERC-1155 outcome tokens. Matches
+# py_clob_client_v2.config for chain 137.
+CTF = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 
 V2_SPENDERS = [
     ("CTF Exchange", "0xE111180000d2663C0091e4f400237545B87B996B"),
@@ -76,6 +88,29 @@ ERC20_ABI = [
     },
 ]
 
+CTF_ABI = [
+    {
+        "name": "isApprovedForAll",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [
+            {"name": "owner", "type": "address"},
+            {"name": "operator", "type": "address"},
+        ],
+        "outputs": [{"name": "", "type": "bool"}],
+    },
+    {
+        "name": "setApprovalForAll",
+        "type": "function",
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "operator", "type": "address"},
+            {"name": "approved", "type": "bool"},
+        ],
+        "outputs": [],
+    },
+]
+
 ONRAMP_ABI = [
     {
         "name": "wrap",
@@ -111,7 +146,7 @@ def _allowance_usd(w3: Web3, token_addr: str, owner: str, spender: str) -> float
     return float(raw) / (10**dec)
 
 
-def _clob_collateral(wallet: str, private_key: str, signature_type: int, funder: str) -> dict:
+def _clob_collateral(wallet: str, private_key: str, signature_type: int) -> dict:
     from py_clob_client_v2 import ClobClient
     from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
@@ -122,8 +157,6 @@ def _clob_collateral(wallet: str, private_key: str, signature_type: int, funder:
     }
     if signature_type:
         kwargs["signature_type"] = signature_type
-    if funder:
-        kwargs["funder"] = funder
 
     client = ClobClient(**kwargs)
     creds = client.create_or_derive_api_key()
@@ -172,15 +205,17 @@ def main() -> int:
     args = parser.parse_args()
 
     private_key = os.getenv("POLYMARKET_PRIVATE_KEY") or os.getenv("PRIVATE_KEY", "")
-    funder = os.getenv("POLYMARKET_FUNDER") or os.getenv("FUNDER_ADDRESS", "")
     signature_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", os.getenv("SIGNATURE_TYPE", "0")))
-    rpc = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
+    rpc = os.getenv("POLYGON_RPC_URL", "https://polygon-bor-rpc.publicnode.com")
 
     if not private_key:
         print("ERROR: POLYMARKET_PRIVATE_KEY or PRIVATE_KEY required")
         return 1
-    if signature_type == 1 and not funder:
-        print("ERROR: POLYMARKET_FUNDER / FUNDER_ADDRESS required for SIGNATURE_TYPE=1")
+    if signature_type != 0:
+        print(
+            f"ERROR: SIGNATURE_TYPE={signature_type} is not supported: transactions would run as the"
+            " EOA, not the proxy. Use a dedicated signing EOA (SIGNATURE_TYPE=0)."
+        )
         return 1
 
     w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 30}))
@@ -189,7 +224,7 @@ def main() -> int:
         return 1
 
     account = w3.eth.account.from_key(private_key)
-    wallet = Web3.to_checksum_address(funder) if signature_type == 1 else account.address
+    wallet = account.address
 
     print(f"Wallet       : {wallet}")
     print(f"Sig type     : {signature_type}")
@@ -210,7 +245,7 @@ def main() -> int:
     print()
 
     try:
-        clob_before = _clob_collateral(wallet, private_key, signature_type, funder)
+        clob_before = _clob_collateral(wallet, private_key, signature_type)
         _print_clob_status("Before", clob_before)
     except Exception as exc:
         print(f"  Before: CLOB check failed ({exc})")
@@ -295,9 +330,29 @@ def main() -> int:
         if not args.dry_run:
             nonce += 1
 
+    ctf = w3.eth.contract(address=Web3.to_checksum_address(CTF), abi=CTF_ABI)
+    for name, operator in V2_SPENDERS:
+        approved = ctf.functions.isApprovedForAll(wallet, Web3.to_checksum_address(operator)).call()
+        print(f"CTF tokens → {name}: {'approved  ✓' if approved else 'not approved  → setApprovalForAll ...'}")
+        if approved:
+            continue
+        tx = ctf.functions.setApprovalForAll(Web3.to_checksum_address(operator), True).build_transaction(
+            {
+                "from": wallet,
+                "nonce": nonce,
+                "gas": 100_000,
+                "maxFeePerGas": w3.eth.gas_price * 2,
+                "maxPriorityFeePerGas": w3.to_wei(30, "gwei"),
+                "chainId": 137,
+            }
+        )
+        _send_tx(w3, account, tx, args.dry_run, f"setApprovalForAll CTF → {name}")
+        if not args.dry_run:
+            nonce += 1
+
     print()
     try:
-        clob_after = _clob_collateral(wallet, private_key, signature_type, funder)
+        clob_after = _clob_collateral(wallet, private_key, signature_type)
         _print_clob_status("After", clob_after)
     except Exception as exc:
         print(f"  After: CLOB check failed ({exc})")
