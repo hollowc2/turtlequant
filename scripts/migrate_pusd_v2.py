@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from web3 import Web3
@@ -209,6 +210,8 @@ def main() -> int:
     private_key = os.getenv("POLYMARKET_PRIVATE_KEY", "")
     signature_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", os.getenv("SIGNATURE_TYPE", "0")))
     rpc = os.getenv("POLYGON_RPC_URL", "https://polygon-bor-rpc.publicnode.com")
+    # Hosted RPC URLs carry their API key in the path; print only the host.
+    rpc_host = urlsplit(rpc).netloc or "(unparseable POLYGON_RPC_URL)"
 
     if not private_key:
         print("ERROR: POLYMARKET_PRIVATE_KEY required")
@@ -222,7 +225,7 @@ def main() -> int:
 
     w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 30}))
     if not w3.is_connected():
-        print(f"ERROR: cannot connect to Polygon RPC: {rpc}")
+        print(f"ERROR: cannot connect to Polygon RPC: {rpc_host}")
         return 1
 
     account = w3.eth.account.from_key(private_key)
@@ -230,7 +233,7 @@ def main() -> int:
 
     print(f"Wallet       : {wallet}")
     print(f"Sig type     : {signature_type}")
-    print(f"RPC          : {rpc}")
+    print(f"RPC          : {rpc_host}")
     print(f"Mode         : {'dry-run' if args.dry_run else 'live'}")
     print()
 
