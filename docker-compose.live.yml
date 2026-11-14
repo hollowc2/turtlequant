@@ -36,9 +36,6 @@ services:
       # Hard cap on any single buy, whatever Kelly and NAV say; also the
       # per-market cap at 10% of a $100 wallet.
       MAX_ORDER_USD: "10.0"
-      # The daily realized-loss halt is in dollars, not a share of NAV: shadow's
-      # $50 default is 5% of $1,000 but half of this wallet.
-      MAX_DAILY_LOSS: "5.0"
       # Research capture is shadow-only; shadow already collects it.
       RESEARCH_CAPTURE: "false"
       # Wallet and CLOB API secrets are passed to the live bot only, and only

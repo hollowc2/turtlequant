@@ -33,6 +33,10 @@ MAX_DRAWDOWN_PCT = 0.15
 # two evaluations.
 DRAWDOWN_RECOVERY_PCT = 0.14
 DRAWDOWN_REASON = "15% drawdown"
+# Realized loss within a UTC day that blocks new entries, as a share of the
+# high-water mark: the same base as the drawdown breaker, so one setting
+# fits a $100 wallet and a $1,000 paper NAV alike.
+DEFAULT_MAX_DAILY_LOSS_PCT = 0.05
 
 # Fields that are runtime configuration, not persisted state.
 _RUNTIME_FIELDS = ("state_dir", "persist", "max_broker_failures", "broker_cooldown_secs", "data_degraded")
@@ -102,7 +106,7 @@ class RiskControls:
         self,
         equity: float,
         *,
-        max_daily_loss: float = float("inf"),
+        max_daily_loss_pct: float = DEFAULT_MAX_DAILY_LOSS_PCT,
         market_data_at: datetime | None = None,
         max_market_data_age_secs: float = 90.0,
         unreconciled_orders: int = 0,
@@ -119,7 +123,7 @@ class RiskControls:
         )
         if self.drawdown_pct(equity) >= drawdown_limit:
             return False, DRAWDOWN_REASON
-        if self.daily_realized_loss >= max_daily_loss:
+        if self.daily_realized_loss >= max_daily_loss_pct * self.high_water:
             return False, "daily loss limit"
         if unreconciled_orders:
             # A broker action with an unknown outcome may already have filled;

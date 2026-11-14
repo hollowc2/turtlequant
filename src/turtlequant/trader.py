@@ -50,7 +50,7 @@ from turtlequant.position_manager import (
     make_position,
 )
 from turtlequant.probability_engine import compute_probability, smile_probability
-from turtlequant.risk_controls import RiskControls
+from turtlequant.risk_controls import DEFAULT_MAX_DAILY_LOSS_PCT, RiskControls
 from turtlequant.vol_surface import VolSurface
 
 logger = logging.getLogger("turtlequant_bot")
@@ -141,7 +141,7 @@ class TraderConfig:
     assets: tuple[str, ...]
     entry_threshold: float = 0.05
     calibration_rmse: float = 0.05
-    max_daily_loss: float = 50.0
+    max_daily_loss_pct: float = DEFAULT_MAX_DAILY_LOSS_PCT
     max_market_data_age_secs: float = 90.0
     dry_run: bool = False
     min_entry_price: float = 0.02  # skip near-certain markets on either side
@@ -321,7 +321,7 @@ class Trader:
         self.risk.record_equity(marked_equity)
         allowed, reason = self.risk.entries_allowed(
             marked_equity,
-            max_daily_loss=self.config.max_daily_loss,
+            max_daily_loss_pct=self.config.max_daily_loss_pct,
             market_data_at=market_data_at,
             max_market_data_age_secs=self.config.max_market_data_age_secs,
             unreconciled_orders=len(self.intents.outstanding()) if self.intents is not None else 0,

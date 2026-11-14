@@ -318,7 +318,7 @@ If you skip this, the browser silently blocks the script and the charts disappea
 > - Each buy is capped at 98% of the wallet's CLOB pUSD balance. If the balance can't be read, the entry is skipped.
 > - Resolved positions aren't redeemed on-chain automatically. Live positions stay `pending_redemption` until you redeem them by hand, and that money isn't spendable until then.
 > - The live bot (`docker-compose.live.yml`) stops after 3 failed starts instead of crash-looping.
-> - The daily loss halt (`MAX_DAILY_LOSS`) is in dollars, not a share of NAV. Live sets it to 5 (5% of $100). Change it whenever you change `STARTING_NAV`.
+> - Every limit scales with NAV, including the daily loss halt (`MAX_DAILY_LOSS_PCT`, 5% of the high-water mark by default). The exception is `MAX_ORDER_USD`, which is in dollars: change it whenever you change `STARTING_NAV`.
 > - Polymarket rejects orders under the market's minimum (5 shares on crypto price markets). A buy Kelly sizes below the minimum is rounded up to it if Kelly wants at least half of it, and skipped otherwise; every NAV cap still applies after rounding. A position under the minimum is never sold: it is held to resolution (`[EXIT_BELOW_MIN]` in the log). Shadow follows the same rules.
 
 TurtleQuant uses `py-clob-client-v2` with pUSD collateral. USDC.e in the wallet plus V1 exchange approvals is **not** enough.

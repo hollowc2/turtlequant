@@ -72,9 +72,9 @@ def test_live_sizes_from_its_own_starting_nav():
     assert re.search(r'^      STARTING_NAV: "100\.0"$', _live(), re.M)
 
 
-def test_live_daily_loss_halt_is_scaled_to_its_wallet():
-    # The halt is in dollars; shadow's $50 default is half of a $100 wallet.
-    assert re.search(r'^      MAX_DAILY_LOSS: "5\.0"$', _live(), re.M)
+def test_live_and_shadow_share_the_daily_loss_halt():
+    # It is a share of NAV, so one default fits both; a dollar value would not.
+    assert "MAX_DAILY_LOSS" not in _live()
 
 
 def test_live_exporter_leaves_shadow_port_free():

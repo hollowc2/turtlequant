@@ -53,7 +53,7 @@ from turtlequant.notifications import NotificationQueue
 from turtlequant.order_intents import OrderIntentLedger
 from turtlequant.order_reconciliation import ReconciliationError, reconcile_outstanding
 from turtlequant.position_manager import PositionManager
-from turtlequant.risk_controls import RiskControls
+from turtlequant.risk_controls import DEFAULT_MAX_DAILY_LOSS_PCT, RiskControls
 from turtlequant.trader import Trader, TraderConfig
 from turtlequant.vol_surface import VolSurface
 
@@ -264,11 +264,11 @@ def main() -> None:
         help="One-sigma model calibration error deducted before entry",
     )
     parser.add_argument(
-        "--max-daily-loss",
+        "--max-daily-loss-pct",
         type=float,
-        default=float(os.getenv("MAX_DAILY_LOSS", "50")),
-        metavar="USD",
-        help="Block new entries after this much realised UTC-day loss",
+        default=float(os.getenv("MAX_DAILY_LOSS_PCT", str(DEFAULT_MAX_DAILY_LOSS_PCT))),
+        metavar="FRACTION",
+        help="Block new entries after this much realised UTC-day loss, as a share of the high-water mark",
     )
     parser.add_argument(
         "--max-market-data-age-secs",
@@ -485,7 +485,7 @@ def main() -> None:
             assets=tuple(assets),
             entry_threshold=args.entry_threshold,
             calibration_rmse=args.calibration_rmse,
-            max_daily_loss=args.max_daily_loss,
+            max_daily_loss_pct=args.max_daily_loss_pct,
             max_market_data_age_secs=args.max_market_data_age_secs,
             dry_run=args.dry_run,
             min_entry_price=args.min_entry_price,

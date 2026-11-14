@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from turtlequant.risk_controls import DRAWDOWN_REASON, RiskControls
 
 
@@ -113,11 +115,11 @@ def test_entry_gate_persists_daily_loss_and_rejects_stale_data(tmp_path):
     restored = RiskControls.load(tmp_path, 100.0)
     assert restored.daily_realized_loss == 12.0
     assert restored.entries_allowed(
-        100.0, max_daily_loss=10.0, market_data_at=now, now=now
+        100.0, max_daily_loss_pct=0.10, market_data_at=now, now=now
     ) == (False, "daily loss limit")
     assert restored.entries_allowed(
         100.0,
-        max_daily_loss=20.0,
+        max_daily_loss_pct=0.20,
         market_data_at=now - timedelta(seconds=91),
         now=now,
     ) == (False, "stale market data")
@@ -150,3 +152,14 @@ def test_unreconciled_order_intents_halt_entries(tmp_path):
 
     assert not allowed
     assert reason == "2 unreconciled order intent(s)"
+
+
+@pytest.mark.parametrize("nav", [100.0, 1_000.0])
+def test_daily_loss_halt_is_the_same_share_of_any_nav(tmp_path, nav):
+    now = datetime(2026, 7, 15, tzinfo=UTC)
+    controls = RiskControls.load(tmp_path, nav)
+
+    controls.record_realized_pnl(-0.049 * nav, now)
+    assert controls.entries_allowed(nav, market_data_at=now, now=now) == (True, "")
+    controls.record_realized_pnl(-0.002 * nav, now)
+    assert controls.entries_allowed(nav, market_data_at=now, now=now) == (False, "daily loss limit")
