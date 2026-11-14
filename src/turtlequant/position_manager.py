@@ -184,18 +184,14 @@ class PositionManager:
 
         f = f_full * self.kelly_fraction
         raw_size = f * self.current_nav
+        return max(0.0, min(raw_size, self.entry_headroom_usd()))
 
-        # Cap by per-market limit
+    def entry_headroom_usd(self) -> float:
+        """Largest new position the per-market cap and total-exposure headroom allow."""
         max_market = self.max_per_market_pct * self.current_nav
-        size = min(raw_size, max_market)
-
-        # Cap by remaining total-exposure headroom
         current_exposure = sum(p.size_usd for p in self._open_market_risk())
-        max_total = self.max_total_exposure_pct * self.current_nav
-        headroom = max(0.0, max_total - current_exposure)
-        size = min(size, headroom)
-
-        return max(0.0, size)
+        headroom = self.max_total_exposure_pct * self.current_nav - current_exposure
+        return max(0.0, min(max_market, headroom))
 
     def expiry_exposure(self, expiry: datetime) -> float:
         """Total USD currently exposed to positions expiring on the same date."""

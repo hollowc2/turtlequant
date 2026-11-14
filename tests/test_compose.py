@@ -72,6 +72,11 @@ def test_live_sizes_from_its_own_starting_nav():
     assert re.search(r'^      STARTING_NAV: "100\.0"$', _live(), re.M)
 
 
+def test_live_daily_loss_halt_is_scaled_to_its_wallet():
+    # The halt is in dollars; shadow's $50 default is half of a $100 wallet.
+    assert re.search(r'^      MAX_DAILY_LOSS: "5\.0"$', _live(), re.M)
+
+
 def test_live_exporter_leaves_shadow_port_free():
     assert "8004:8004" not in _live()
     assert re.search(r'^      STRATEGY: "turtlequant-live"$', _live(), re.M)

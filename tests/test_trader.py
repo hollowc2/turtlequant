@@ -16,7 +16,13 @@ from turtlequant.market_scanner import ActiveMarket
 from turtlequant.order_intents import OrderIntentLedger
 from turtlequant.position_manager import PositionManager, make_position
 from turtlequant.risk_controls import RiskControls
-from turtlequant.trader import Trader, TraderConfig, plan_entry
+from turtlequant.trader import (
+    MIN_ORDER_SHARE_BUFFER,
+    Trader,
+    TraderConfig,
+    entry_limit_price,
+    plan_entry,
+)
 
 SPOTS = {"BTCUSDT": 84_000.0, "ETHUSDT": 2_600.0}
 # Same fd shape the live CLOB returns for crypto price markets (2026-09-24).
@@ -59,8 +65,9 @@ class FakeVol:
 class FakeClob:
     """YES book as given; the NO token ("no-1") mirrors it, as on the live CLOB."""
 
-    def __init__(self, bids=((0.39, 500),), asks=((0.41, 500),)):
+    def __init__(self, bids=((0.39, 500),), asks=((0.41, 500),), min_size=None):
         self.bids, self.asks = bids, asks
+        self.min_size = min_size  # the exchange's minimum order in shares; None = not reported
         self.book_calls = 0
         self.tokens_booked: list[str] = []
 
@@ -71,10 +78,13 @@ class FakeClob:
         if token_id == "no-1":
             bids = tuple((round(1 - p, 6), s) for p, s in self.asks)
             asks = tuple((round(1 - p, 6), s) for p, s in self.bids)
-        return {
+        book = {
             "bids": [{"price": str(p), "size": str(s)} for p, s in bids],
             "asks": [{"price": str(p), "size": str(s)} for p, s in asks],
         }
+        if self.min_size is not None:
+            book["min_order_size"] = str(self.min_size)
+        return book
 
     def get_clob_market_info(self, _condition_id):
         return MARKET_INFO
@@ -828,8 +838,8 @@ def test_reconciled_range_buy_without_its_upper_strike_is_refused(tmp_path):
 class FillingLiveClob(FakeClob):
     """Fills every live buy at the ask; reports ``balance`` pUSD (None = lookup fails)."""
 
-    def __init__(self, balance):
-        super().__init__()
+    def __init__(self, balance, **book):
+        super().__init__(**book)
         self.balance = balance
         self.amounts: list[float] = []
 
@@ -897,3 +907,70 @@ def test_max_order_usd_caps_every_buy(tmp_path, mode):
 
     (pos,) = trader.positions.all_positions()
     assert pos.size_usd == pytest.approx(3.0, abs=1e-4)
+
+
+def kelly_entry(tmp_path):
+    """USD size and limit price of the default market's entry when the book has no minimum."""
+    trader = make_trader(tmp_path / "kelly")
+    trader.scan()
+    (pos,) = trader.positions.all_positions()
+    evaluation = next(e for e in events(tmp_path / "kelly", DIAGNOSTICS_JSONL) if e["event"] == "signal_evaluation")
+    return pos.size_usd, entry_limit_price(evaluation["model_prob"], trader.config.entry_threshold)
+
+
+def min_size_costing(usd, limit_price):
+    """A share minimum whose smallest accepted buy costs ``usd``."""
+    return usd / (MIN_ORDER_SHARE_BUFFER * limit_price)
+
+
+def test_buy_under_the_share_minimum_rounds_up_when_kelly_wants_half_of_it(tmp_path):
+    kelly_usd, limit = kelly_entry(tmp_path)
+    min_size = min_size_costing(1.5 * kelly_usd, limit)
+    trader = make_trader(tmp_path, clob=FakeClob(min_size=min_size))
+
+    stats = trader.scan()
+
+    (pos,) = trader.positions.all_positions()
+    assert pos.size_usd == pytest.approx(1.5 * kelly_usd)
+    assert pos.token_size >= min_size  # still sellable at the ask it filled at
+    assert stats["min_order_rounded"] == 1
+
+
+def test_buy_far_under_the_share_minimum_is_skipped(tmp_path):
+    kelly_usd, limit = kelly_entry(tmp_path)
+    trader = make_trader(tmp_path, clob=FakeClob(min_size=min_size_costing(2.5 * kelly_usd, limit)))
+
+    stats = trader.scan()
+
+    assert trader.positions.all_positions() == []
+    assert stats["below_min_order"] == 1
+
+
+def test_rounding_up_never_breaks_a_cap(tmp_path):
+    kelly_usd, limit = kelly_entry(tmp_path)
+    trader = make_trader(
+        tmp_path, clob=FakeClob(min_size=min_size_costing(1.5 * kelly_usd, limit)), max_order_usd=1.2 * kelly_usd
+    )
+
+    trader.scan()
+
+    assert trader.positions.all_positions() == []
+
+
+@pytest.mark.parametrize("mode", ["shadow", "live"])
+def test_position_under_the_share_minimum_is_held_not_sold(tmp_path, mode, caplog):
+    caplog.set_level(logging.INFO)
+    # The bid is far over the model, so the bot wants out, but 4 shares is
+    # under the exchange's 5-share minimum: a sell would be refused.
+    clob = FillingLiveClob(balance=1_000.0, bids=((0.70, 500),), asks=((0.72, 500),), min_size=5)
+    trader = live_trader(tmp_path, clob) if mode == "live" else make_trader(tmp_path, mode=mode, clob=clob)
+    hold(trader, token_size=4.0)
+
+    for _ in range(3):
+        trader.reprice_positions()
+
+    assert trader.positions.has_position("m-1")
+    assert clob.amounts == []
+    assert trader.risk.consecutive_failures == 0
+    assert caplog.text.count("[EXIT_BELOW_MIN]") == 1
+    assert "order" not in kinds(tmp_path)

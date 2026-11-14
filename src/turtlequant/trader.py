@@ -64,6 +64,16 @@ NO_ENTRY_VOL_SOURCES = frozenset({"stale", "smile_unavailable"})
 # Live buys spend at most this share of the wallet's pUSD, leaving room for
 # rounding and fees so a full-wallet order is not rejected for a few cents.
 WALLET_SPEND_FRACTION = 0.98
+# Polymarket's floor on a marketable buy, in USD.
+MIN_ORDER_USD = 1.0
+# A buy Kelly sizes below the market's minimum order is rounded up to it when
+# Kelly wants at least this share of it, and skipped otherwise. At a $100 NAV
+# many entries sit just under the 5-share minimum; rounding up at most doubles
+# Kelly's bet on them, and every NAV cap still applies afterwards.
+MIN_ORDER_ROUND_UP_FRACTION = 0.5
+# Buy this much over the share minimum, so the position is still sellable
+# after fees and tick rounding.
+MIN_ORDER_SHARE_BUFFER = 1.05
 
 
 @dataclass(frozen=True)
@@ -218,6 +228,20 @@ def plan_entry(
     return EntryPlan(size_usd, executable_price, edge, estimate_buy_fill(book, size_usd), estimated_fee)
 
 
+def entry_limit_price(model_prob: float, entry_threshold: float) -> float:
+    """Worst price a buy may fill at: the model price less the entry threshold."""
+    return min(0.99, model_prob - entry_threshold)
+
+
+def min_buy_usd(book: OrderBook, limit_price: float) -> float:
+    """Smallest buy the exchange accepts: $1, and enough for ``book``'s minimum shares.
+
+    A market buy's share count is its USD amount over its limit price, not the
+    fill price, so the share minimum is priced at the limit.
+    """
+    return max(MIN_ORDER_USD, book.min_order_size * MIN_ORDER_SHARE_BUFFER * limit_price)
+
+
 def delta_headroom_usd(net_delta: float, delta_per_share: float, price: float, cap_usd: float) -> float:
     """Largest USD size whose delta keeps the asset's net delta within ``±cap_usd``.
 
@@ -264,6 +288,7 @@ class Trader:
         self.research_submit = research_submit
         self.reprice_errors = 0  # data-plane errors since the last scan summary
         self.synthetic_exits_held = 0  # exits refused on a fallback book since the last scan summary
+        self.below_min_exits_logged: set[str] = set()  # markets whose exit is held below the minimum
         self._last_marks_at = 0.0
         # Per-asset gross USD and net dollar delta of open positions, rebuilt
         # each scan and updated after entries within it.
@@ -626,6 +651,17 @@ class Trader:
             logger.info("[EXIT_BLOCKED] %s has an unreconciled order intent", pos.market_id[:16])
             return None
         shares = pos.token_size if pos.token_size > 0 else pos.size_usd / pos.entry_price
+        if shares < book.min_order_size:
+            # The exchange refuses a sell below its minimum, and a refusal is a
+            # broker failure that would trip the breaker every reprice. Hold
+            # instead: the claim pays out at resolution.
+            if pos.market_id not in self.below_min_exits_logged:
+                self.below_min_exits_logged.add(pos.market_id)
+                logger.info(
+                    "[EXIT_BELOW_MIN] %s %s: %.2f shares under the %g-share minimum; holding to resolution",
+                    pos.market_id[:16], reason, shares, book.min_order_size,
+                )
+            return None
         intent_id = (
             self.intents.pending(pos.market_id, pos.token_id, "SELL", shares)
             if self.intents is not None and self.live
@@ -919,14 +955,23 @@ class Trader:
             book, fee, model_prob, mid_edge, self.positions,
             sizing_prob=None if cfg.kelly_shrink >= 1 else sizing_prob,
         )
+        min_usd = min_buy_usd(book, entry_limit_price(model_prob, cfg.entry_threshold))
+        if plan.size_usd < min_usd:
+            if plan.size_usd < MIN_ORDER_ROUND_UP_FRACTION * min_usd:
+                if plan.size_usd > 0:  # 0 is Kelly declining the fee-inclusive edge
+                    _inc(stats, "below_min_order")
+                return None
+            size = min(min_usd, self.positions.entry_headroom_usd())
+            plan = replace(plan, size_usd=size, fill=estimate_buy_fill(book, size))
+            _inc(stats, "min_order_rounded")
         if spot is not None:
             capped = self.apply_portfolio_caps(params, spot, pricing, plan, book, side.outcome)
-            if capped.size_usd < plan.size_usd and capped.size_usd < 1.0:
+            if capped.size_usd < plan.size_usd and capped.size_usd < min_usd:
                 _inc(stats, "asset_capped")
             plan = capped
         if cfg.max_order_usd and plan.size_usd > cfg.max_order_usd:
             plan = replace(plan, size_usd=cfg.max_order_usd, fill=estimate_buy_fill(book, cfg.max_order_usd))
-        if plan.size_usd < 1.0 or not plan.fill.complete:
+        if plan.size_usd < min_usd or not plan.fill.complete:
             return None
         if not self.positions.has_expiry_headroom(params.expiry, plan.size_usd):
             logger.info("Per-expiry cap reached for %s — skip", params.expiry.strftime("%Y-%m-%d"))
@@ -1016,7 +1061,7 @@ class Trader:
             )
             return None
         if self.live:
-            plan = self.cap_to_wallet(plan, book, market.market_id, stats)
+            plan = self.cap_to_wallet(plan, book, market.market_id, stats, min_usd)
             if plan is None:
                 return None
         result = self._buy(market, params, side, sigma, vol_source, book, fee, plan)
@@ -1028,7 +1073,8 @@ class Trader:
         return result
 
     def cap_to_wallet(
-        self, plan: EntryPlan, book: OrderBook, market_id: str, stats: dict[str, object]
+        self, plan: EntryPlan, book: OrderBook, market_id: str, stats: dict[str, object],
+        min_usd: float = MIN_ORDER_USD,
     ) -> EntryPlan | None:
         """Shrink a live buy to the wallet's spendable pUSD, or None to skip it.
 
@@ -1044,9 +1090,11 @@ class Trader:
         spendable = balance * WALLET_SPEND_FRACTION
         if plan.size_usd <= spendable:
             return plan
-        if spendable < 1.0:
+        if spendable < min_usd:
             _inc(stats, "wallet_capped")
-            logger.info("[ENTRY_SKIPPED] %s wallet $%.2f below the $1 minimum", market_id[:16], balance)
+            logger.info(
+                "[ENTRY_SKIPPED] %s wallet $%.2f below the $%.2f minimum order", market_id[:16], balance, min_usd
+            )
             return None
         _inc(stats, "wallet_capped")
         logger.info(
@@ -1085,7 +1133,7 @@ class Trader:
             side.token_id,
             plan.size_usd,
             book,
-            max_price=min(0.99, model_prob - self.config.entry_threshold),
+            max_price=entry_limit_price(model_prob, self.config.entry_threshold),
             fee=fee,
         )
         self.journal_result(intent_id, result)

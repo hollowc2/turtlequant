@@ -95,6 +95,9 @@ class OrderBook:
     asks: list[BookLevel] = field(default_factory=list)
     observed_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     source: str = "clob"
+    # The exchange's smallest order, in shares (0 = unknown). Polymarket's
+    # crypto price markets report 5.
+    min_order_size: float = 0.0
 
     @property
     def best_bid(self) -> float:
@@ -567,7 +570,13 @@ def _failed_result(
 def _parse_clob_book(token_id: str, raw: Any) -> OrderBook:
     bids = _parse_levels(_dict_get(raw, "bids", []), reverse=True)
     asks = _parse_levels(_dict_get(raw, "asks", []), reverse=False)
-    return OrderBook(token_id=token_id, bids=bids, asks=asks, source="clob")
+    try:
+        min_order_size = float(_dict_get(raw, "min_order_size", 0) or 0)
+    except (TypeError, ValueError):
+        min_order_size = 0.0
+    if not math.isfinite(min_order_size) or min_order_size < 0:
+        min_order_size = 0.0
+    return OrderBook(token_id=token_id, bids=bids, asks=asks, source="clob", min_order_size=min_order_size)
 
 
 def _parse_levels(raw_levels: Any, *, reverse: bool) -> list[BookLevel]:

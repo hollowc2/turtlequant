@@ -88,6 +88,26 @@ def test_get_order_book_retries_before_synthetic_fallback():
     assert book.source == "clob"
 
 
+class _BookClient:
+    def __init__(self, min_order_size):
+        self.min_order_size = min_order_size
+
+    def get_order_book(self, _token_id):
+        book = {"bids": [{"price": "0.40", "size": "10"}], "asks": [{"price": "0.42", "size": "20"}]}
+        if self.min_order_size is not None:
+            book["min_order_size"] = self.min_order_size
+        return book
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"), [("5", 5.0), (15, 15.0), (None, 0.0), ("n/a", 0.0), ("-1", 0.0), ("nan", 0.0)]
+)
+def test_get_order_book_reads_the_minimum_order_size(raw, expected):
+    client = ExecutionClient(mode="paper", clob_client=_BookClient(raw))
+
+    assert client.get_order_book("yes").min_order_size == expected
+
+
 def test_get_order_book_marks_synthetic_fallback_source():
     client = ExecutionClient(mode="paper", clob_client=None)
 
