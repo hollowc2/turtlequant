@@ -43,19 +43,43 @@ Most recent 50 closed trades (labeled strategy, idx; 0 = most recent):
   turtlequant_closed_position_pnl_usd
   turtlequant_closed_position_holding_hours
 
+Live vs shadow (the comparison row):
+  turtlequant_scan_outcomes_total       — running scan_summary counts (labeled by outcome, a fixed set)
+  turtlequant_entries_total             — open events (filled entries)
+  turtlequant_pending_redemption_usd    — resolved claims awaiting redemption, at their payout
+  turtlequant_wallet_collateral_usd     — CLOB pUSD the live bot last read (from *-risk.json)
+  turtlequant_wallet_balance_age_sec    — seconds since that read
+  turtlequant_outstanding_order_intents — order intents not yet reconciled, failed or cancelled
+
+Live fills paired with shadow's (only with PAIR_STATE_DIR; labeled strategy,
+idx, market_id, outcome; 0 = most recent live fill; per-fill gauges also by
+fill="live"|"shadow"):
+  turtlequant_paired_fill_ts            — when the live fill happened (epoch seconds)
+  turtlequant_paired_fill_entry_price
+  turtlequant_paired_fill_slippage      — fill price minus that bot's signal mid
+  turtlequant_paired_fill_size_pct_nav  — fill size over realized NAV at entry
+  turtlequant_paired_fill_price_gap     — live entry price minus shadow's
+  turtlequant_paired_fill_slippage_gap  — live slippage minus shadow's
+  turtlequant_paired_fill_time_gap_sec  — shadow fill time minus live's
+
 Labels: strategy ("turtlequant" for shadow; $STRATEGY, e.g. "turtlequant-live")
 
+Every state file is opened read-only, including the order-intent SQLite
+journal; the exporter never reads wallet secrets or calls the wallet.
+
 Usage:
-    python grafana_exporter.py [--state-dir DIR] [--port PORT]
+    python grafana_exporter.py [--state-dir DIR] [--port PORT] [--pair-state-dir DIR]
 """
 
 import argparse
 import json
 import logging
 import os
+import sqlite3
 import statistics
 import time
 from collections import deque
+from contextlib import closing
 from datetime import datetime, timezone
 from http.server import HTTPServer
 from pathlib import Path
@@ -71,6 +95,7 @@ from turtlequant.history import (
     effective_close_pnl,
     read_legacy_events,
 )
+from turtlequant.order_intents import TERMINAL_STATUSES
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -83,6 +108,10 @@ STRATEGY = os.environ.get("STRATEGY", "turtlequant")
 POSITIONS_FILE = "turtlequant-positions.json"
 RISK_FILE = "turtlequant-risk.json"
 BOT_LOG_FILE = "turtlequant-bot.log"
+INTENTS_FILE = "turtlequant-order-intents.sqlite3"
+# The other bot's state dir, read-only: the live exporter pairs each live fill
+# with shadow's fill on the same market. Unset, nothing is paired.
+PAIR_STATE_DIR = os.environ.get("PAIR_STATE_DIR", "")
 
 # Entry-gate reasons map to a fixed label set; the raw text carries error
 # messages and counts that would otherwise mint a new series per failure.
@@ -98,6 +127,28 @@ _HALT_CATEGORIES = (
 
 QUALITY_WINDOW_SEC = 15 * 60
 RECENT_TRADES = 50  # bounded idx series for the recent-trade gauges
+RECENT_FILLS = 20  # live fills shown paired with shadow's
+PAIR_WINDOW_SEC = 24 * 3600  # a shadow fill further from the live one is not its pair
+
+# scan_summary counters exported as turtlequant_scan_outcomes_total{outcome}.
+# A fixed set keeps the label bounded; each is exported (0 if never seen) so
+# a strategy that never hits one plots a flat zero, not a gap.
+SCAN_OUTCOMES = (
+    "tenor_skipped",
+    "consensus_blocked",
+    "mid_edge_candidates",
+    "no_side_candidates",
+    "score_only_blocked",
+    "vol_blocked",
+    "below_min_order",
+    "min_order_rounded",
+    "asset_capped",
+    "ask_erased_edge",
+    "executable_edge_candidates",
+    "synthetic_book_skipped",
+    "wallet_capped",
+    "wallet_balance_unknown",
+)
 
 
 def _load_json(path: str) -> object:
@@ -344,6 +395,73 @@ def _inc(counts: dict, key: object, amount: int = 1) -> None:
     counts[key] = counts.get(key, 0) + amount
 
 
+def _fill_record(event: dict, realized_before: float) -> dict | None:
+    """The parts of an open event the live/shadow pairing needs."""
+    ts = _parse_ts(event.get("ts"))
+    if ts is None:
+        return None
+    return {
+        "ts": ts,
+        "market_id": str(event.get("market_id", "")),
+        "outcome": str(event.get("outcome") or "YES"),
+        "price": _safe_float(event.get("yes_price")),
+        "slippage": None if event.get("slippage") is None else _safe_float(event.get("slippage")),
+        "size_usd": _safe_float(event.get("size_usd")),
+        "nav": None if event.get("nav") is None else _safe_float(event.get("nav")),
+        # Realized P&L booked before this fill: older open events carry no
+        # nav, so NAV at entry is rebuilt as starting NAV plus this.
+        "realized_before": realized_before,
+    }
+
+
+def _fill_pct_nav(fill: dict, start_nav: float | None) -> float | None:
+    nav = fill["nav"] if fill["nav"] is not None else (
+        start_nav + fill["realized_before"] if start_nav is not None else None
+    )
+    return fill["size_usd"] / nav if nav and nav > 0 else None
+
+
+def pair_fills(
+    live: list[dict], shadow_by_key: dict[tuple[str, str], list[dict]], window_sec: float = PAIR_WINDOW_SEC
+) -> list[tuple[dict, dict | None]]:
+    """Each live fill (most recent first) with shadow's nearest fill on the same market and side."""
+    pairs = []
+    for fill in reversed(live):
+        candidates = [
+            s for s in shadow_by_key.get((fill["market_id"], fill["outcome"]), ())
+            if abs(s["ts"] - fill["ts"]) <= window_sec
+        ]
+        pairs.append((fill, min(candidates, key=lambda s: abs(s["ts"] - fill["ts"]), default=None)))
+    return pairs
+
+
+def _start_nav(positions: object) -> float | None:
+    """Starting NAV: NAV and total P&L both move only by realized P&L."""
+    if not isinstance(positions, dict) or positions.get("nav") is None:
+        return None
+    return _safe_float(positions.get("nav")) - _safe_float(positions.get("total_pnl"))
+
+
+def outstanding_intents(path: Path) -> int | None:
+    """Order intents still pending or submitted; None if there is no journal or it can't be read.
+
+    Opened with mode=ro, so the exporter never writes, migrates or locks the
+    bot's journal for writing.
+    """
+    if not path.exists():
+        return None
+    marks = ", ".join("?" for _ in TERMINAL_STATUSES)
+    try:
+        with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)) as db:
+            row = db.execute(
+                f"SELECT COUNT(*) FROM order_intent WHERE status NOT IN ({marks})", TERMINAL_STATUSES
+            ).fetchone()
+    except sqlite3.Error as exc:
+        log.warning("could not read order intents %s: %s", path, exc)
+        return None
+    return int(row[0])
+
+
 class HistoryStats:
     """Running aggregates over history and diagnostics events.
 
@@ -374,6 +492,11 @@ class HistoryStats:
         self.slippage_count = 0
         self.edge_sum = 0.0
         self.edge_count = 0
+        self.scan_outcomes: dict[str, int] = dict.fromkeys(SCAN_OUTCOMES, 0)
+        self.entries = 0
+        self.realized_pnl = 0.0  # running close + partial_close P&L, for NAV at each fill
+        self.recent_fills: deque[dict] = deque(maxlen=RECENT_FILLS)
+        self.fills_by_key: dict[tuple[str, str], list[dict]] = {}
         self._recent_shadow: deque[tuple[float, bool]] = deque()
         self._recent_scans: deque[tuple[float, int, int]] = deque()
 
@@ -390,6 +513,11 @@ class HistoryStats:
 
         if kind == "open":
             self._open_queues.setdefault(str(event.get("market_id", "")), []).append(event)
+            self.entries += 1
+            fill = _fill_record(event, self.realized_pnl)
+            if fill is not None:
+                self.recent_fills.append(fill)
+                self.fills_by_key.setdefault((fill["market_id"], fill["outcome"]), []).append(fill)
             if event.get("slippage") is not None:
                 self.slippage_sum += _safe_float(event.get("slippage"))
                 self.slippage_count += 1
@@ -399,8 +527,10 @@ class HistoryStats:
         elif kind == "partial_close":
             market_id = str(event.get("market_id", ""))
             self._partial_pnl[market_id] = self._partial_pnl.get(market_id, 0.0) + _safe_float(event.get("pnl"))
+            self.realized_pnl += _safe_float(event.get("pnl"))
         elif kind == "close":
             self._add_close(event)
+            self.realized_pnl += _safe_float(event.get("pnl"))
         elif kind == "order":
             side = str(event.get("side", "unknown"))
             _inc(self.order_counts, (side, str(event.get("status", "unknown"))))
@@ -430,6 +560,8 @@ class HistoryStats:
             self.parse_attempted += attempted
             self.parsed_markets += parsed
             self.mid_edge_candidates += int(_safe_float(event.get("mid_edge_candidates")))
+            for outcome in SCAN_OUTCOMES:
+                self.scan_outcomes[outcome] += int(_safe_float(event.get(outcome)))
             for key, counts in (("book_sources", self.book_source_counts), ("vol_sources", self.vol_source_counts)):
                 sources = event.get(key)
                 if isinstance(sources, dict):
@@ -502,6 +634,9 @@ class HistoryStats:
             "parse_attempted": self.parse_attempted,
             "parsed_markets": self.parsed_markets,
             "mid_edge_candidates": self.mid_edge_candidates,
+            "scan_outcomes": self.scan_outcomes,
+            "entries": self.entries,
+            "recent_fills": list(self.recent_fills),
             "avg_fill_ratio": self.fill_ratio_sum / self.fill_ratio_count if self.fill_ratio_count else None,
             "avg_slippage": self.slippage_sum / self.slippage_count if self.slippage_count else None,
             "avg_edge": self.edge_sum / self.edge_count if self.edge_count else None,
@@ -513,9 +648,35 @@ class HistoryStats:
         }
 
 
+class PairedFills:
+    """The other bot's fills, read incrementally from its history (read-only)."""
+
+    def __init__(self, state_dir: str) -> None:
+        self.state_dir = Path(state_dir)
+        self._reset()
+
+    def _reset(self) -> None:
+        self._stats = HistoryStats()
+        self._tail = JsonlTail(self.state_dir / HISTORY_JSONL)
+
+    def fills_by_key(self) -> dict[tuple[str, str], list[dict]]:
+        events, reset = self._tail.read_new()
+        if reset:
+            log.info("paired history %s was truncated or replaced; rebuilding", self._tail.path)
+            self._reset()
+            events, _ = self._tail.read_new()
+        for event in events:
+            self._stats.add(event)
+        return self._stats.fills_by_key
+
+    def start_nav(self) -> float | None:
+        return _start_nav(_load_json(str(self.state_dir / POSITIONS_FILE)))
+
+
 class TurtleQuantCollector:
-    def __init__(self, state_dir: str):
+    def __init__(self, state_dir: str, pair_state_dir: str = ""):
         self.state_dir = state_dir
+        self._paired = PairedFills(pair_state_dir) if pair_state_dir else None
         self._reset()
 
     def _reset(self) -> None:
@@ -911,6 +1072,74 @@ class TurtleQuantCollector:
             labels=["strategy"],
         )
 
+        # --- Live vs shadow ---
+        scan_outcomes_g = GaugeMetricFamily(
+            "turtlequant_scan_outcomes_total",
+            "Cumulative scan_summary counts per outcome over retained diagnostics",
+            labels=["strategy", "outcome"],
+        )
+        entries_g = GaugeMetricFamily(
+            "turtlequant_entries_total",
+            "Count of open events (filled entries)",
+            labels=["strategy"],
+        )
+        pending_redemption_g = GaugeMetricFamily(
+            "turtlequant_pending_redemption_usd",
+            "Resolved positions awaiting on-chain redemption, valued at their payout",
+            labels=["strategy"],
+        )
+        wallet_g = GaugeMetricFamily(
+            "turtlequant_wallet_collateral_usd",
+            "CLOB pUSD balance the live bot last read",
+            labels=["strategy"],
+        )
+        wallet_age_g = GaugeMetricFamily(
+            "turtlequant_wallet_balance_age_sec",
+            "Seconds since the live bot last read the wallet balance",
+            labels=["strategy"],
+        )
+        intents_g = GaugeMetricFamily(
+            "turtlequant_outstanding_order_intents",
+            "Order intents still pending or submitted (entries halt while any are outstanding)",
+            labels=["strategy"],
+        )
+        pair_labels = ["strategy", "idx", "market_id", "outcome"]
+        paired_ts_g = GaugeMetricFamily(
+            "turtlequant_paired_fill_ts",
+            "Epoch seconds of the idx-th most recent live fill (0 = most recent)",
+            labels=pair_labels,
+        )
+        paired_price_g = GaugeMetricFamily(
+            "turtlequant_paired_fill_entry_price",
+            "Entry price per token of a paired live or shadow fill",
+            labels=pair_labels + ["fill"],
+        )
+        paired_slippage_g = GaugeMetricFamily(
+            "turtlequant_paired_fill_slippage",
+            "Fill price minus that bot's signal mid for a paired fill",
+            labels=pair_labels + ["fill"],
+        )
+        paired_size_g = GaugeMetricFamily(
+            "turtlequant_paired_fill_size_pct_nav",
+            "Fill size as a fraction of that bot's realized NAV at entry",
+            labels=pair_labels + ["fill"],
+        )
+        paired_price_gap_g = GaugeMetricFamily(
+            "turtlequant_paired_fill_price_gap",
+            "Live entry price minus shadow's on the same market and side",
+            labels=pair_labels,
+        )
+        paired_slippage_gap_g = GaugeMetricFamily(
+            "turtlequant_paired_fill_slippage_gap",
+            "Live fill slippage minus shadow's on the same market and side",
+            labels=pair_labels,
+        )
+        paired_time_gap_g = GaugeMetricFamily(
+            "turtlequant_paired_fill_time_gap_sec",
+            "Shadow fill time minus live fill time in seconds (negative = shadow filled first)",
+            labels=pair_labels,
+        )
+
         strategy, pos_file = STRATEGY, POSITIONS_FILE
         pos_path = os.path.join(self.state_dir, pos_file)
         hist_path = active_history_path(Path(self.state_dir))
@@ -939,6 +1168,7 @@ class TurtleQuantCollector:
             unrealized_by_asset: dict[str, float] = {}
             unrealized_total = 0.0
             marked_pnl_total = 0.0
+            pending_redemption = 0.0
             marks: list[tuple[float, float]] = []  # (mark, unrealized) per position
             for pos in positions:
                 asset = str(pos.get("asset", "unknown"))
@@ -955,6 +1185,8 @@ class TurtleQuantCollector:
                     else _safe_float(pos.get("last_bid")) or _safe_float(pos.get("last_yes_price")) or entry
                 )
                 marked_pnl_total += (mark - entry) * tokens
+                if pos.get("status") == "pending_redemption" and pos.get("resolution_price") is not None:
+                    pending_redemption += mark * tokens
                 # Discount the bid mark by the taker fee a sale would pay (r * p(1-p)).
                 exit_fee = DEFAULT_CRYPTO_FEE.fee(tokens, mark) if 0.0 < mark <= 1.0 else 0.0
                 unrealized = (mark - entry) * tokens - exit_fee
@@ -964,6 +1196,7 @@ class TurtleQuantCollector:
             for asset, value in by_asset.items():
                 exposure_by_asset_g.add_metric([strategy, asset], value)
             open_unrealized_pnl_g.add_metric([strategy], unrealized_total)
+            pending_redemption_g.add_metric([strategy], pending_redemption)
             for asset, value in unrealized_by_asset.items():
                 open_unrealized_pnl_by_asset_g.add_metric([strategy, asset], value)
             if nav is not None:
@@ -1029,6 +1262,15 @@ class TurtleQuantCollector:
                 for asset, values in asset_risk.items():
                     if isinstance(values, dict):
                         asset_delta_g.add_metric([strategy, str(asset)], _safe_float(values.get("delta_usd")))
+            if risk.get("wallet_collateral_usd") is not None:
+                wallet_g.add_metric([strategy], _safe_float(risk.get("wallet_collateral_usd")))
+                read_at = _parse_ts(risk.get("wallet_balance_at"))
+                if read_at is not None:
+                    wallet_age_g.add_metric([strategy], max(0.0, time.time() - read_at))
+
+        intents = outstanding_intents(Path(self.state_dir) / INTENTS_FILE)
+        if intents is not None:
+            intents_g.add_metric([strategy], float(intents))
 
         log_age = _file_age_sec(os.path.join(self.state_dir, BOT_LOG_FILE))
         if log_age is not None:
@@ -1138,6 +1380,33 @@ class TurtleQuantCollector:
             mid_edge_candidates_g.add_metric(
                 [strategy], float(history_groups["mid_edge_candidates"])
             )
+            for outcome, count in history_groups["scan_outcomes"].items():
+                scan_outcomes_g.add_metric([strategy, outcome], float(count))
+            entries_g.add_metric([strategy], float(history_groups["entries"]))
+            if self._paired is not None:
+                start_nav = _start_nav(pos_data)
+                shadow_start_nav = self._paired.start_nav()
+                pairs = pair_fills(history_groups["recent_fills"], self._paired.fills_by_key())
+                for idx, (live_fill, shadow_fill) in enumerate(pairs):
+                    labels = [strategy, str(idx), live_fill["market_id"], live_fill["outcome"]]
+                    paired_ts_g.add_metric(labels, live_fill["ts"])
+                    for name, fill, fill_start in (
+                        ("live", live_fill, start_nav), ("shadow", shadow_fill, shadow_start_nav),
+                    ):
+                        if fill is None:
+                            continue
+                        paired_price_g.add_metric(labels + [name], fill["price"])
+                        if fill["slippage"] is not None:
+                            paired_slippage_g.add_metric(labels + [name], fill["slippage"])
+                        pct = _fill_pct_nav(fill, fill_start)
+                        if pct is not None:
+                            paired_size_g.add_metric(labels + [name], pct)
+                    if shadow_fill is None:
+                        continue
+                    paired_price_gap_g.add_metric(labels, live_fill["price"] - shadow_fill["price"])
+                    if live_fill["slippage"] is not None and shadow_fill["slippage"] is not None:
+                        paired_slippage_gap_g.add_metric(labels, live_fill["slippage"] - shadow_fill["slippage"])
+                    paired_time_gap_g.add_metric(labels, shadow_fill["ts"] - live_fill["ts"])
             for source, count in history_groups["signal_book_counts"].items():
                 signal_book_source_g.add_metric([strategy, source], float(count))
             for source, count in history_groups["signal_vol_counts"].items():
@@ -1230,19 +1499,35 @@ class TurtleQuantCollector:
         yield asset_delta_g
         yield bot_log_age_g
         yield scrape_success_g
+        yield scan_outcomes_g
+        yield entries_g
+        yield pending_redemption_g
+        yield wallet_g
+        yield wallet_age_g
+        yield intents_g
+        yield paired_ts_g
+        yield paired_price_g
+        yield paired_slippage_g
+        yield paired_size_g
+        yield paired_price_gap_g
+        yield paired_slippage_gap_g
+        yield paired_time_gap_g
 
 
 def main():
     parser = argparse.ArgumentParser(description="TurtleQuant Prometheus metrics exporter")
     parser.add_argument("--state-dir", default=STATE_DIR)
     parser.add_argument("--port", type=int, default=PORT)
+    parser.add_argument("--pair-state-dir", default=PAIR_STATE_DIR)
     args = parser.parse_args()
 
-    REGISTRY.register(TurtleQuantCollector(args.state_dir))
+    REGISTRY.register(TurtleQuantCollector(args.state_dir, args.pair_state_dir))
 
     server = HTTPServer(("0.0.0.0", args.port), MetricsHandler)
     log.info("TurtleQuant Prometheus exporter listening on :%d", args.port)
     log.info("State dir: %s", args.state_dir)
+    if args.pair_state_dir:
+        log.info("Pairing fills with: %s", args.pair_state_dir)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

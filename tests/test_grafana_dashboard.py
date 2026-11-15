@@ -44,3 +44,38 @@ def test_panel_ids_are_unique_and_rows_do_not_overlap():
             for y in range(pos["y"], pos["y"] + pos["h"]):
                 assert (x, y) not in cells, panel["title"]
                 cells.add((x, y))
+
+
+def _row(title: str) -> list[dict]:
+    """Panels under a top-level row, in dashboard order."""
+    panels = DASHBOARD["panels"]
+    start = next(i for i, panel in enumerate(panels) if panel["type"] == "row" and panel["title"] == title)
+    end = next((i for i in range(start + 1, len(panels)) if panels[i]["type"] == "row"), len(panels))
+    return panels[start + 1:end]
+
+
+def test_live_vs_shadow_row_follows_account_and_ignores_the_strategy_selector():
+    rows = [panel["title"] for panel in DASHBOARD["panels"] if panel["type"] == "row"]
+    assert rows[rows.index("Account") + 1] == "Live vs Shadow"
+    panels = _row("Live vs Shadow")
+    assert {panel["title"] for panel in panels} == {
+        "Return Since Start",
+        "Wallet vs Books (Live)",
+        "Decision Funnel per Hour",
+        "Size-Floor Outcomes per Hour",
+        "Order Integrity",
+        "Live Fills vs Shadow",
+    }
+    for panel in panels:
+        exprs = [target["expr"] for target in panel["targets"]]
+        assert not any("$strategy" in expr for expr in exprs), panel["title"]
+        # Each panel compares the bots, or is explicitly about live (wallet, fills).
+        both = all('strategy=~"turtlequant|turtlequant-live"' in expr for expr in exprs)
+        live = all('strategy="turtlequant-live"' in expr for expr in exprs)
+        assert both or (live and "Live" in panel["title"]), panel["title"]
+
+
+def test_live_vs_shadow_panels_use_the_dashboard_datasource():
+    for panel in _row("Live vs Shadow"):
+        assert panel["datasource"] == {"type": "prometheus", "uid": "prometheus"}
+        assert all(target["datasource"] == panel["datasource"] for target in panel["targets"])

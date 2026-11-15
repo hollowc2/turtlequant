@@ -42,6 +42,14 @@ DEFAULT_MAX_DAILY_LOSS_PCT = 0.05
 _RUNTIME_FIELDS = ("state_dir", "persist", "max_broker_failures", "broker_cooldown_secs", "data_degraded")
 
 
+def _optional_float(value: object) -> float | None:
+    """A display-only field: a bad value is dropped, never a reason to refuse to start."""
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class RiskControls:
     state_dir: Path
@@ -55,6 +63,10 @@ class RiskControls:
     entry_halt_since: str = ""
     # Per-asset {"gross_usd", "delta_usd"} of open positions, for the exporter.
     asset_risk: dict[str, dict[str, float]] = field(default_factory=dict)
+    # Live only: last CLOB pUSD balance read and when, for the exporter.
+    # Shadow and paper never read the wallet, so these stay unset there.
+    wallet_collateral_usd: float | None = None
+    wallet_balance_at: str = ""
     persist: bool = True  # False (dry-run) never writes the risk file
     max_broker_failures: int = DEFAULT_MAX_BROKER_FAILURES
     broker_cooldown_secs: float = DEFAULT_BROKER_COOLDOWN_SECS
@@ -97,6 +109,8 @@ class RiskControls:
                 str(raw.get("entry_halt", "")),
                 str(raw.get("entry_halt_since", "")),
                 dict(raw.get("asset_risk") or {}),
+                _optional_float(raw.get("wallet_collateral_usd")),
+                str(raw.get("wallet_balance_at", "")),
                 **config,
             )
         except (OSError, ValueError, TypeError, KeyError) as exc:
@@ -200,6 +214,17 @@ class RiskControls:
     def record_asset_risk(self, asset_risk: dict[str, dict[str, float]]) -> None:
         self.asset_risk = {asset: dict(values) for asset, values in asset_risk.items()}
         self.save()
+
+    def record_wallet_balance(self, balance: float | None, now: datetime | None = None) -> None:
+        """Note a wallet read; saved with the scan's other risk state.
+
+        A failed read (None) keeps the last good balance and its timestamp, so
+        the exporter shows how stale it is instead of a gap.
+        """
+        if balance is None:
+            return
+        self.wallet_collateral_usd = balance
+        self.wallet_balance_at = (now or datetime.now(UTC)).isoformat()
 
     def record_realized_pnl(self, pnl: float, now: datetime | None = None) -> None:
         """Accumulate realised losses for the UTC day; exits are never gated."""

@@ -414,3 +414,162 @@ def test_strategy_label_comes_from_the_environment(monkeypatch):
     spec.loader.exec_module(module)
     assert module.STRATEGY == "turtlequant-live"
     assert grafana_exporter.STRATEGY == "turtlequant"
+
+
+def _families(collector):
+    return {family.name: family for family in collector.collect()}
+
+
+def test_scan_outcomes_sum_every_listed_counter_and_zero_fill_the_rest(tmp_path):
+    (tmp_path / "turtlequant-diagnostics.jsonl").write_text(
+        '{"event":"scan_summary","mid_edge_candidates":3,"consensus_blocked":2,"ask_erased_edge":1,'
+        '"executable_edge_candidates":2,"min_order_rounded":1,"brand_new_counter":9}\n'
+        '{"event":"scan_summary","mid_edge_candidates":1,"below_min_order":4,"wallet_capped":1}\n'
+    )
+
+    outcomes = _families(TurtleQuantCollector(str(tmp_path)))["turtlequant_scan_outcomes_total"]
+
+    values = {sample.labels["outcome"]: sample.value for sample in outcomes.samples}
+    assert set(values) == set(grafana_exporter.SCAN_OUTCOMES)  # bounded: unknown counters are not exported
+    assert values["mid_edge_candidates"] == 4
+    assert values["consensus_blocked"] == 2
+    assert values["below_min_order"] == 4
+    assert values["wallet_balance_unknown"] == 0
+
+
+def test_entries_count_open_events(tmp_path):
+    (tmp_path / "turtlequant-history.jsonl").write_text(
+        '{"event":"open","market_id":"a","ts":"2026-11-01T00:00:00+00:00"}\n'
+        '{"event":"order","side":"BUY","status":"matched"}\n'
+        '{"event":"open","market_id":"b","ts":"2026-11-02T00:00:00+00:00"}\n'
+    )
+
+    assert _sample_value(_families(TurtleQuantCollector(str(tmp_path)))["turtlequant_entries_total"]) == 2
+
+
+def test_pending_redemption_is_valued_at_the_payout(tmp_path):
+    (tmp_path / "turtlequant-positions.json").write_text(
+        '{"nav":100,"total_pnl":0,"positions":['
+        '{"market_id":"won","asset":"btc","size_usd":4,"entry_price":0.4,"token_size":10,'
+        '"status":"pending_redemption","resolution_price":1.0},'
+        '{"market_id":"open","asset":"btc","size_usd":4,"entry_price":0.4,"token_size":10,"last_bid":0.5}]}'
+    )
+
+    families = _families(TurtleQuantCollector(str(tmp_path)))
+
+    assert _sample_value(families["turtlequant_pending_redemption_usd"]) == 10.0
+
+
+def test_wallet_balance_and_its_age_come_from_the_risk_file(tmp_path):
+    (tmp_path / "turtlequant-risk.json").write_text(
+        '{"high_water":100,"wallet_collateral_usd":61.25,"wallet_balance_at":"2026-11-01T00:00:00+00:00"}'
+    )
+
+    families = _families(TurtleQuantCollector(str(tmp_path)))
+
+    assert _sample_value(families["turtlequant_wallet_collateral_usd"]) == 61.25
+    assert _sample_value(families["turtlequant_wallet_balance_age_sec"]) > 0
+
+
+def test_shadow_exports_no_wallet_balance(tmp_path):
+    (tmp_path / "turtlequant-risk.json").write_text(
+        '{"high_water":1000,"wallet_collateral_usd":null,"wallet_balance_at":""}'
+    )
+
+    families = _families(TurtleQuantCollector(str(tmp_path)))
+
+    assert families["turtlequant_wallet_collateral_usd"].samples == []
+    assert families["turtlequant_wallet_balance_age_sec"].samples == []
+
+
+def test_outstanding_intents_are_read_without_writing_the_state_dir(tmp_path):
+    from turtlequant.order_intents import OrderIntentLedger
+
+    ledger = OrderIntentLedger(tmp_path / "turtlequant-order-intents.sqlite3")
+    ledger.pending("m-1", "t-1", "BUY", 5.0)
+    done = ledger.pending("m-2", "t-2", "BUY", 5.0)
+    ledger.reconcile(done)
+    ledger.db.close()
+    before = sorted(p.name for p in tmp_path.iterdir())
+    tmp_path.chmod(0o555)  # as the exporter's read-only mount
+    try:
+        families = _families(TurtleQuantCollector(str(tmp_path)))
+    finally:
+        tmp_path.chmod(0o755)
+
+    assert _sample_value(families["turtlequant_outstanding_order_intents"]) == 1
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+def test_missing_or_unreadable_intent_journal_exports_nothing(tmp_path):
+    assert _families(TurtleQuantCollector(str(tmp_path)))["turtlequant_outstanding_order_intents"].samples == []
+
+    (tmp_path / "turtlequant-order-intents.sqlite3").write_text("not a database")
+
+    families = _families(TurtleQuantCollector(str(tmp_path)))
+    assert families["turtlequant_outstanding_order_intents"].samples == []
+    assert families["turtlequant_exporter_scrape_success"].samples  # the scrape still completes
+
+
+def _pairing_state(tmp_path):
+    live, shadow = tmp_path / "live", tmp_path / "shadow"
+    live.mkdir()
+    shadow.mkdir()
+    (live / "turtlequant-positions.json").write_text('{"nav":102,"total_pnl":2,"positions":[]}')
+    (shadow / "turtlequant-positions.json").write_text('{"nav":1000,"total_pnl":0,"positions":[]}')
+    (live / "turtlequant-history.jsonl").write_text(
+        # An older fill without nav: NAV at entry is rebuilt as $100 start plus the $2 closed before it.
+        '{"event":"close","market_id":"old","pnl":2.0,"ts":"2026-11-01T00:00:00+00:00"}\n'
+        '{"event":"open","market_id":"m-1","outcome":"NO","yes_price":0.42,"slippage":0.02,'
+        '"size_usd":2.1,"ts":"2026-11-02T12:00:00+00:00"}\n'
+        '{"event":"open","market_id":"m-2","yes_price":0.30,"slippage":0.01,"size_usd":1.5,"nav":102,'
+        '"ts":"2026-11-03T00:00:00+00:00"}\n'
+    )
+    (shadow / "turtlequant-history.jsonl").write_text(
+        '{"event":"open","market_id":"m-1","outcome":"NO","yes_price":0.40,"slippage":0.005,'
+        '"size_usd":30,"nav":1000,"ts":"2026-11-02T11:00:00+00:00"}\n'
+        # Same market, other side: not a pair.
+        '{"event":"open","market_id":"m-2","outcome":"NO","yes_price":0.70,"size_usd":30,'
+        '"nav":1000,"ts":"2026-11-03T00:00:00+00:00"}\n'
+    )
+    return live, shadow
+
+
+def test_live_fills_pair_with_shadows_on_the_same_market_and_side(tmp_path):
+    live, shadow = _pairing_state(tmp_path)
+
+    families = _families(TurtleQuantCollector(str(live), str(shadow)))
+
+    price = families["turtlequant_paired_fill_entry_price"]
+    assert _sample_value(price, idx="1", market_id="m-1", outcome="NO", fill="live") == 0.42
+    assert _sample_value(price, idx="1", fill="shadow") == 0.40
+    assert _sample_value(families["turtlequant_paired_fill_price_gap"], idx="1") == pytest.approx(0.02)
+    assert _sample_value(families["turtlequant_paired_fill_slippage_gap"], idx="1") == pytest.approx(0.015)
+    assert _sample_value(families["turtlequant_paired_fill_time_gap_sec"], idx="1") == -3600.0
+    size = families["turtlequant_paired_fill_size_pct_nav"]
+    assert _sample_value(size, idx="1", fill="live") == pytest.approx(2.1 / 102)
+    assert _sample_value(size, idx="1", fill="shadow") == pytest.approx(0.03)
+    # The most recent live fill has no shadow fill on its side: live columns only.
+    assert _sample_value(price, idx="0", market_id="m-2", fill="live") == 0.30
+    assert {s.labels["fill"] for s in price.samples if s.labels["idx"] == "0"} == {"live"}
+    assert [s for s in families["turtlequant_paired_fill_price_gap"].samples if s.labels["idx"] == "0"] == []
+    assert _sample_value(families["turtlequant_paired_fill_ts"], idx="0") == grafana_exporter._parse_ts(
+        "2026-11-03T00:00:00+00:00"
+    )
+
+
+def test_shadow_fill_outside_the_window_is_not_a_pair():
+    live = [{"market_id": "m", "outcome": "YES", "ts": 0.0}]
+    far = {"market_id": "m", "outcome": "YES", "ts": grafana_exporter.PAIR_WINDOW_SEC + 1.0}
+    near = {"market_id": "m", "outcome": "YES", "ts": -60.0}
+
+    assert grafana_exporter.pair_fills(live, {("m", "YES"): [far]}) == [(live[0], None)]
+    assert grafana_exporter.pair_fills(live, {("m", "YES"): [far, near]}) == [(live[0], near)]
+
+
+def test_pairing_is_off_without_a_pair_state_dir(tmp_path):
+    live, _ = _pairing_state(tmp_path)
+
+    families = _families(TurtleQuantCollector(str(live)))
+
+    assert families["turtlequant_paired_fill_entry_price"].samples == []

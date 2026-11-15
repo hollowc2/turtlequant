@@ -71,6 +71,21 @@ The exporter is built from the same lockfile as the bot. It mounts only `src/` a
 | Alert rules | `/opt/monitoring/prometheus-alerts/turtlequant.yml` (repo copy: `monitoring/prometheus-alerts.yml`) |
 | Notifications | Alertmanager in `/opt/monitoring` sends operational alerts to Discord. Shadow-soak alerts appear only in Prometheus and Grafana |
 
+### Live vs Shadow row
+
+Below **Account**, this row always shows both bots and ignores the **Strategy** selector. Live is an execution test, so the question is whether live's decisions and fills match shadow's, not whether it makes money.
+
+| Panel | Watch for |
+|-------|-----------|
+| Return Since Start | The two lines drifting apart. Both are marked equity over starting capital, so $100 and $1,000 compare directly |
+| Wallet vs Books (Live) | The wallet (`turtlequant_wallet_collateral_usd`, read by the live bot each scan) tracking NAV minus open cost. Value awaiting redemption isn't spendable until redeemed by hand |
+| Decision Funnel per Hour | Shadow solid, live dashed, one color per stage. Up to *executable* the two should agree; a gap means live decided differently |
+| Size-Floor Outcomes per Hour | Why live skipped or resized entries shadow took: rounded up to the 5-share minimum, below it, or capped by asset or wallet |
+| Order Integrity | Anything above zero: outstanding order intents, failed orders, broker failures |
+| Live Fills vs Shadow | Each recent live fill beside shadow's fill on the same market and side within 24h: entry prices, price and slippage gaps, and size as a share of each bot's NAV |
+
+The funnel counts come from `scan_summary` (`turtlequant_scan_outcomes_total{outcome}`, a fixed set of counters). They're per scan, so a market that stays a candidate counts on every scan.
+
 To validate the alert rules:
 ```bash
 docker compose -f /opt/monitoring/docker-compose.yml exec prometheus \
@@ -186,7 +201,7 @@ All of these are in the state directory.
 | File | Contents | Growth |
 |------|----------|--------|
 | `turtlequant-positions.json` | NAV, open positions, re-entry cooldowns | Bounded |
-| `turtlequant-risk.json` | High-water mark, breaker, entry-gate state | Bounded |
+| `turtlequant-risk.json` | High-water mark, breaker, entry-gate state; live adds the last CLOB pUSD balance it read (`wallet_collateral_usd`, `wallet_balance_at`) | Bounded |
 | `turtlequant-history.jsonl` | Trade and ops events (`open`, `close`, `order`, `failed_order`, `entry_gate`, …), fsynced | One line per trade action |
 | `turtlequant-diagnostics.jsonl[.1-.3]` | Per-scan `scan_summary`, `signal_evaluation`, `shadow_quote` | Rotated at 64 MiB, 3 backups (`DIAGNOSTICS_MAX_BYTES`, `DIAGNOSTICS_BACKUP_COUNT`) |
 | `turtlequant-marks.jsonl[.1-.4]` | Every 15 min: each priced market's bid/ask plus legacy and smile probabilities (`market_marks`), used by `evaluate_models.py` | Rotated at 64 MiB, 4 backups, about 70 days at ~4.5 MB/day (`MARKS_MAX_BYTES`, `MARKS_BACKUP_COUNT`) |
@@ -387,9 +402,11 @@ docker compose -f docker-compose.live.yml up -d --build
 | Container | Reads | Metrics |
 |-----------|-------|---------|
 | `turtlequant-bot-live` | `/opt/turtlequant/state/live-state` | — |
-| `turtlequant-grafana-exporter-live` | `live-state`, read-only | `strategy="turtlequant-live"`, host port 8005 |
+| `turtlequant-grafana-exporter-live` | `live-state`, and shadow's state at `/opt/turtlequant/shadow-state`, both read-only | `strategy="turtlequant-live"`, host port 8005 |
 
 Both extend their shadow services, so they share the image, init, logging and healthchecks. Live changes only its state, wallet secrets, `STARTING_NAV` (100) and metrics label. `STARTING_NAV` applies only while `live-state` has no positions file.
+
+The live exporter reads shadow's history (`PAIR_STATE_DIR`) only to pair each live fill with shadow's for the **Live vs Shadow** row. It gets no wallet secrets and never calls the wallet. The wallet balance it exports is the one the live bot reads once per scan and saves in `turtlequant-risk.json`. If a read fails, the last good balance stays and `turtlequant_wallet_balance_age_sec` grows.
 
 Then add a scrape job to `/opt/monitoring/prometheus.yml` and reload Prometheus:
 
@@ -399,7 +416,7 @@ Then add a scrape job to `/opt/monitoring/prometheus.yml` and reload Prometheus:
       - targets: ["turtlequant-grafana-exporter-live:8004"]
 ```
 
-Add it only when live is deployed: the operational alerts cover both jobs, so a job with no exporter fires TurtleQuantExporterUnreachable. Shadow-soak quality alerts watch shadow only. In Grafana, the **Strategy** selector switches the dashboard between Shadow and Live.
+Add it only when live is deployed: the operational alerts cover both jobs, so a job with no exporter fires TurtleQuantExporterUnreachable. Shadow-soak quality alerts watch shadow only. In Grafana, the **Strategy** selector switches the dashboard between Shadow and Live, except for the [Live vs Shadow row](#live-vs-shadow-row), which always shows both.
 
 To stop live without touching shadow:
 

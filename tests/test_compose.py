@@ -86,3 +86,12 @@ def test_live_takes_no_legacy_wallet_aliases():
     # The shared helios .env holds another bot's PRIVATE_KEY.
     for alias in ("PRIVATE_KEY:", "CLOB_API_KEY:", "FUNDER_ADDRESS:", "SIGNATURE_TYPE:"):
         assert not re.search(rf"^      {alias}", _live(), re.M), alias
+
+
+def test_live_exporter_reads_shadow_state_read_only_for_fill_pairing():
+    exporter = re.search(r"^  turtlequant-grafana-exporter-live:\n((?:    .*\n|\s*\n)*)", _live(), re.M).group(1)
+    assert re.search(r"^      - /opt/turtlequant/state:/opt/turtlequant/shadow-state:ro$", exporter, re.M)
+    assert re.search(r'^      PAIR_STATE_DIR: "/opt/turtlequant/shadow-state"$', exporter, re.M)
+    # Every state mount on the exporter is read-only.
+    for mount in re.findall(r"^      - (/opt/turtlequant/\S+)$", exporter, re.M):
+        assert mount.endswith(":ro"), mount

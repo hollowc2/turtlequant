@@ -896,6 +896,67 @@ def test_live_buy_skipped_when_wallet_is_below_the_minimum(tmp_path):
     assert clob.amounts == [] and not trader.positions.has_position("m-1")
 
 
+def test_live_scan_records_the_wallet_balance_for_the_exporter(tmp_path):
+    clob = FillingLiveClob(balance=42.5)
+    trader = live_trader(tmp_path, clob, scanner=FakeScanner([]))
+
+    trader.scan()
+
+    risk = json.loads((tmp_path / "turtlequant-risk.json").read_text())
+    assert risk["wallet_collateral_usd"] == pytest.approx(42.5)
+    assert datetime.fromisoformat(risk["wallet_balance_at"]) > datetime.now(UTC) - timedelta(minutes=1)
+    reloaded = RiskControls.load(tmp_path, 1000.0)
+    assert reloaded.wallet_collateral_usd == pytest.approx(42.5)
+    assert reloaded.wallet_balance_at == risk["wallet_balance_at"]
+
+
+def test_bad_wallet_balance_in_risk_state_does_not_block_startup(tmp_path):
+    (tmp_path / "turtlequant-risk.json").write_text('{"high_water":100,"wallet_collateral_usd":"oops"}')
+
+    risk = RiskControls.load(tmp_path, 100.0)
+
+    assert risk.wallet_collateral_usd is None and risk.high_water == 100.0
+
+
+def test_failed_wallet_read_keeps_the_last_balance_and_trades_on(tmp_path):
+    clob = FillingLiveClob(balance=42.5)
+    trader = live_trader(tmp_path, clob, scanner=FakeScanner([]))
+    trader.scan()
+    read_at = trader.risk.wallet_balance_at
+
+    clob.balance = None
+    trader.scan()
+
+    risk = json.loads((tmp_path / "turtlequant-risk.json").read_text())
+    assert risk["wallet_collateral_usd"] == pytest.approx(42.5)
+    assert risk["wallet_balance_at"] == read_at  # its age shows the read is stale
+    assert trader.risk.consecutive_failures == 0
+    assert trader.check_entry_gate(trader.scanner.markets_fetched_at)
+
+
+def test_shadow_scan_never_reads_the_wallet(tmp_path):
+    class NoWalletClob(FakeClob):
+        def get_balance_allowance(self, _params):
+            raise AssertionError("shadow must not read the wallet")
+
+    trader = make_trader(tmp_path, clob=NoWalletClob())
+
+    trader.scan()
+
+    assert trader.positions.has_position("m-1")
+    risk = json.loads((tmp_path / "turtlequant-risk.json").read_text())
+    assert risk["wallet_collateral_usd"] is None and risk["wallet_balance_at"] == ""
+
+
+def test_open_event_records_nav_at_entry(tmp_path):
+    trader = make_trader(tmp_path)
+
+    trader.scan()
+
+    (opened,) = [e for e in events(tmp_path) if e["event"] == "open"]
+    assert opened["nav"] == pytest.approx(1000.0)
+
+
 @pytest.mark.parametrize("mode", ["shadow", "live"])
 def test_max_order_usd_caps_every_buy(tmp_path, mode):
     clob = FillingLiveClob(balance=1_000.0)

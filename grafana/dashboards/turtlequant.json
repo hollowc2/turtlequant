@@ -1392,13 +1392,1303 @@
       ]
     },
     {
+      "id": 66,
+      "type": "row",
+      "title": "Live vs Shadow",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 67,
+      "type": "timeseries",
+      "title": "Return Since Start",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 12,
+        "h": 8
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 6,
+            "spanNulls": 600000,
+            "lineInterpolation": "linear",
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 2
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Shadow"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3987e5"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Live"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#fab219"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(turtlequant_marked_equity_usd{strategy=~\"turtlequant|turtlequant-live\"} - (turtlequant_nav_usd{strategy=~\"turtlequant|turtlequant-live\"} - turtlequant_total_pnl_usd{strategy=~\"turtlequant|turtlequant-live\"})) / (turtlequant_nav_usd{strategy=~\"turtlequant|turtlequant-live\"} - turtlequant_total_pnl_usd{strategy=~\"turtlequant|turtlequant-live\"})",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{strategy}}"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^turtlequant-live(.*)$",
+            "renamePattern": "Live$1"
+          }
+        },
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^turtlequant(.*)$",
+            "renamePattern": "Shadow$1"
+          }
+        }
+      ],
+      "description": "Marked equity over starting capital (NAV minus realized P&L), so the $100 wallet and the $1,000 paper NAV compare directly. Live is an execution test: watch for the lines drifting apart, not for the level."
+    },
+    {
+      "id": 68,
+      "type": "timeseries",
+      "title": "Wallet vs Books (Live)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 13,
+        "w": 12,
+        "h": 8
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 6,
+            "spanNulls": 600000,
+            "lineInterpolation": "linear",
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 2
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Wallet pUSD"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3987e5"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Bookkeeping NAV"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#c3c2b7"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "NAV - open cost"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#0ca30c"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Awaiting redemption"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#fab219"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_wallet_collateral_usd{strategy=\"turtlequant-live\"}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "Wallet pUSD"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_nav_usd{strategy=\"turtlequant-live\"}",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "legendFormat": "Bookkeeping NAV"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_nav_usd{strategy=\"turtlequant-live\"} - turtlequant_total_exposure_usd{strategy=\"turtlequant-live\"}",
+          "refId": "C",
+          "range": true,
+          "instant": false,
+          "legendFormat": "NAV - open cost"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_pending_redemption_usd{strategy=\"turtlequant-live\"}",
+          "refId": "D",
+          "range": true,
+          "instant": false,
+          "legendFormat": "Awaiting redemption"
+        }
+      ],
+      "description": "Live only: shadow has no wallet. The wallet is the CLOB pUSD balance the live bot reads each scan (turtlequant_wallet_balance_age_sec says how fresh). NAV still counts what open positions cost, so NAV minus open cost is what the wallet should hold if the books are right. Awaiting redemption is resolved claims, at their payout, that are not spendable until redeemed by hand. A gap beyond 5% of NAV needs scripts/reconcile_nav.py."
+    },
+    {
+      "id": 69,
+      "type": "timeseries",
+      "title": "Decision Funnel per Hour",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 24,
+        "h": 8
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 6,
+            "spanNulls": 600000,
+            "lineInterpolation": "linear",
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* mid-edge$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3987e5"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* consensus blocked$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#c3c2b7"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* ask erased$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5a5a57"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* executable$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#0ca30c"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* entered$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#fab219"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^Live .*"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (strategy) (increase(turtlequant_scan_outcomes_total{strategy=~\"turtlequant|turtlequant-live\", outcome=\"mid_edge_candidates\"}[1h]))",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{strategy}} mid-edge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (strategy) (increase(turtlequant_scan_outcomes_total{strategy=~\"turtlequant|turtlequant-live\", outcome=\"consensus_blocked\"}[1h]))",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{strategy}} consensus blocked"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (strategy) (increase(turtlequant_scan_outcomes_total{strategy=~\"turtlequant|turtlequant-live\", outcome=\"ask_erased_edge\"}[1h]))",
+          "refId": "C",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{strategy}} ask erased"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (strategy) (increase(turtlequant_scan_outcomes_total{strategy=~\"turtlequant|turtlequant-live\", outcome=\"executable_edge_candidates\"}[1h]))",
+          "refId": "D",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{strategy}} executable"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (strategy) (increase(turtlequant_entries_total{strategy=~\"turtlequant|turtlequant-live\"}[1h]))",
+          "refId": "E",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{strategy}} entered"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^turtlequant-live(.*)$",
+            "renamePattern": "Live$1"
+          }
+        },
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^turtlequant(.*)$",
+            "renamePattern": "Shadow$1"
+          }
+        }
+      ],
+      "description": "Per-scan counts summed per hour, so a market that stays a candidate counts on every scan. Shadow is solid, live dashed, one color per stage: a gap between a pair is a decision divergence. Consensus blocked are mid-edge hits the legacy model did not confirm; mid-edge counts those that passed. Ask erased and executable split the mid-edge candidates that got a quote; size-floor skips (next panel) happen before the quote. Entered counts filled entries."
+    },
+    {
+      "id": 70,
+      "type": "timeseries",
+      "title": "Size-Floor Outcomes per Hour",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 29,
+        "w": 12,
+        "h": 7
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 6,
+            "spanNulls": 600000,
+            "lineInterpolation": "linear",
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* rounded up$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3987e5"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* below minimum$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#d03b3b"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* asset capped$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#fab219"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* wallet capped$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#c3c2b7"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* wallet unknown$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5a5a57"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^Live .*"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (strategy) (increase(turtlequant_scan_outcomes_total{strategy=~\"turtlequant|turtlequant-live\", outcome=\"min_order_rounded\"}[1h]))",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{strategy}} rounded up"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (strategy) (increase(turtlequant_scan_outcomes_total{strategy=~\"turtlequant|turtlequant-live\", outcome=\"below_min_order\"}[1h]))",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{strategy}} below minimum"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (strategy) (increase(turtlequant_scan_outcomes_total{strategy=~\"turtlequant|turtlequant-live\", outcome=\"asset_capped\"}[1h]))",
+          "refId": "C",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{strategy}} asset capped"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (strategy) (increase(turtlequant_scan_outcomes_total{strategy=~\"turtlequant|turtlequant-live\", outcome=\"wallet_capped\"}[1h]))",
+          "refId": "D",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{strategy}} wallet capped"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (strategy) (increase(turtlequant_scan_outcomes_total{strategy=~\"turtlequant|turtlequant-live\", outcome=\"wallet_balance_unknown\"}[1h]))",
+          "refId": "E",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{strategy}} wallet unknown"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^turtlequant-live(.*)$",
+            "renamePattern": "Live$1"
+          }
+        },
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^turtlequant(.*)$",
+            "renamePattern": "Shadow$1"
+          }
+        }
+      ],
+      "description": "Polymarket's 5-share minimum against Kelly's size. Rounded up: Kelly wanted at least half the minimum and the buy was raised to it. Below minimum: skipped. Asset capped: a portfolio cap cut the buy under the minimum. Wallet capped and wallet unknown are live only. Shadow follows the same rules but at $1,000 rarely meets them, so a solid line here is itself a signal."
+    },
+    {
+      "id": 71,
+      "type": "timeseries",
+      "title": "Order Integrity",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 29,
+        "w": 12,
+        "h": 7
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 6,
+            "spanNulls": 600000,
+            "lineInterpolation": "linear",
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#0ca30c",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 1
+              },
+              {
+                "color": "#d03b3b",
+                "value": 3
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* outstanding intents$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#d03b3b"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* failed orders / h$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#fab219"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* broker failures$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3987e5"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^Live .*"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_outstanding_order_intents{strategy=~\"turtlequant|turtlequant-live\"}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{strategy}} outstanding intents"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (strategy) (increase(turtlequant_failed_orders_total{strategy=~\"turtlequant|turtlequant-live\"}[1h]))",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{strategy}} failed orders / h"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "turtlequant_consecutive_broker_failures{strategy=~\"turtlequant|turtlequant-live\"}",
+          "refId": "C",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{strategy}} broker failures"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^turtlequant-live(.*)$",
+            "renamePattern": "Live$1"
+          }
+        },
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "^turtlequant(.*)$",
+            "renamePattern": "Shadow$1"
+          }
+        }
+      ],
+      "description": "Should sit at zero. Outstanding intents are live orders with an unknown outcome: entries halt until each is reconciled or resolved with scripts/order_intents.py (shadow keeps no journal). Three consecutive broker failures trip the breaker for 30 minutes."
+    },
+    {
+      "id": 72,
+      "type": "table",
+      "title": "Live Fills vs Shadow",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 24,
+        "h": 8
+      },
+      "description": "The 20 most recent live fills, each beside shadow's fill on the same market and side within 24h (blank shadow columns: shadow has no such fill). Prices are in the bought token's terms. Price gap is live entry minus shadow's; slippage gap is live's fill-minus-mid minus shadow's, which leaves out market moves between the two fills. Positive gaps mean live paid more. Size is over each bot's realized NAV at entry.",
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Live fill",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "fields": "",
+          "countRows": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Live fill"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Live entry"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Shadow entry"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Price gap"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "#0ca30c",
+                      "value": null
+                    },
+                    {
+                      "color": "#d03b3b",
+                      "value": 0.01
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Slippage gap"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "#0ca30c",
+                      "value": null
+                    },
+                    {
+                      "color": "#d03b3b",
+                      "value": 0.01
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Live size % NAV"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Shadow size % NAV"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Shadow - live time"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (idx, market_id, outcome) (turtlequant_paired_fill_ts{strategy=\"turtlequant-live\"}) * 1000",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (idx, market_id, outcome) (turtlequant_paired_fill_entry_price{strategy=\"turtlequant-live\", fill=\"live\"})",
+          "refId": "B",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (idx, market_id, outcome) (turtlequant_paired_fill_entry_price{strategy=\"turtlequant-live\", fill=\"shadow\"})",
+          "refId": "C",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (idx, market_id, outcome) (turtlequant_paired_fill_price_gap{strategy=\"turtlequant-live\"})",
+          "refId": "D",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (idx, market_id, outcome) (turtlequant_paired_fill_slippage_gap{strategy=\"turtlequant-live\"})",
+          "refId": "E",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (idx, market_id, outcome) (turtlequant_paired_fill_size_pct_nav{strategy=\"turtlequant-live\", fill=\"live\"})",
+          "refId": "F",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (idx, market_id, outcome) (turtlequant_paired_fill_size_pct_nav{strategy=\"turtlequant-live\", fill=\"shadow\"})",
+          "refId": "G",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (idx, market_id, outcome) (turtlequant_paired_fill_time_gap_sec{strategy=\"turtlequant-live\"})",
+          "refId": "H",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "idx": true
+            },
+            "indexByName": {
+              "Value #A": 0,
+              "market_id": 1,
+              "outcome": 2,
+              "Value #B": 3,
+              "Value #C": 4,
+              "Value #D": 5,
+              "Value #E": 6,
+              "Value #F": 7,
+              "Value #G": 8,
+              "Value #H": 9
+            },
+            "renameByName": {
+              "market_id": "Market",
+              "outcome": "Side",
+              "Value #A": "Live fill",
+              "Value #B": "Live entry",
+              "Value #C": "Shadow entry",
+              "Value #D": "Price gap",
+              "Value #E": "Slippage gap",
+              "Value #F": "Live size % NAV",
+              "Value #G": "Shadow size % NAV",
+              "Value #H": "Shadow - live time"
+            }
+          }
+        }
+      ]
+    },
+    {
       "id": 21,
       "type": "row",
       "title": "Equity",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 12,
+        "y": 44,
         "w": 24,
         "h": 1
       },
@@ -1414,7 +2704,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 13,
+        "y": 45,
         "w": 24,
         "h": 9
       },
@@ -1583,7 +2873,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 54,
         "w": 24,
         "h": 5
       },
@@ -1716,7 +3006,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 27,
+        "y": 59,
         "w": 24,
         "h": 1
       },
@@ -1732,7 +3022,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 28,
+        "y": 60,
         "w": 24,
         "h": 8
       },
@@ -2183,7 +3473,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 36,
+        "y": 68,
         "w": 8,
         "h": 7
       },
@@ -2309,7 +3599,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 36,
+        "y": 68,
         "w": 8,
         "h": 7
       },
@@ -2401,7 +3691,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 36,
+        "y": 68,
         "w": 8,
         "h": 7
       },
@@ -2545,7 +3835,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 43,
+        "y": 75,
         "w": 8,
         "h": 7
       },
@@ -2722,7 +4012,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 50,
+        "y": 82,
         "w": 24,
         "h": 1
       },
@@ -2738,7 +4028,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 51,
+        "y": 83,
         "w": 4,
         "h": 3
       },
@@ -2801,7 +4091,7 @@
       },
       "gridPos": {
         "x": 4,
-        "y": 51,
+        "y": 83,
         "w": 4,
         "h": 3
       },
@@ -2871,7 +4161,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 51,
+        "y": 83,
         "w": 4,
         "h": 3
       },
@@ -2941,7 +4231,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 51,
+        "y": 83,
         "w": 4,
         "h": 3
       },
@@ -3007,7 +4297,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 51,
+        "y": 83,
         "w": 4,
         "h": 3
       },
@@ -3070,7 +4360,7 @@
       },
       "gridPos": {
         "x": 20,
-        "y": 51,
+        "y": 83,
         "w": 4,
         "h": 3
       },
@@ -3133,7 +4423,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 54,
+        "y": 86,
         "w": 4,
         "h": 3
       },
@@ -3199,7 +4489,7 @@
       },
       "gridPos": {
         "x": 4,
-        "y": 54,
+        "y": 86,
         "w": 4,
         "h": 3
       },
@@ -3265,7 +4555,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 54,
+        "y": 86,
         "w": 4,
         "h": 3
       },
@@ -3331,7 +4621,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 54,
+        "y": 86,
         "w": 4,
         "h": 3
       },
@@ -3394,7 +4684,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 54,
+        "y": 86,
         "w": 4,
         "h": 3
       },
@@ -3457,7 +4747,7 @@
       },
       "gridPos": {
         "x": 20,
-        "y": 54,
+        "y": 86,
         "w": 4,
         "h": 3
       },
@@ -3520,7 +4810,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 57,
+        "y": 89,
         "w": 12,
         "h": 8
       },
@@ -3653,7 +4943,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 57,
+        "y": 89,
         "w": 6,
         "h": 8
       },
@@ -3748,7 +5038,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 57,
+        "y": 89,
         "w": 6,
         "h": 8
       },
@@ -3814,7 +5104,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 65,
+        "y": 97,
         "w": 12,
         "h": 6
       },
@@ -3921,7 +5211,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 65,
+        "y": 97,
         "w": 12,
         "h": 6
       },
@@ -4046,7 +5336,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 71,
+        "y": 103,
         "w": 24,
         "h": 1
       },
@@ -4062,7 +5352,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 72,
+        "y": 104,
         "w": 4,
         "h": 3
       },
@@ -4125,7 +5415,7 @@
       },
       "gridPos": {
         "x": 4,
-        "y": 72,
+        "y": 104,
         "w": 4,
         "h": 3
       },
@@ -4189,7 +5479,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 72,
+        "y": 104,
         "w": 4,
         "h": 3
       },
@@ -4257,7 +5547,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 72,
+        "y": 104,
         "w": 4,
         "h": 3
       },
@@ -4324,7 +5614,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 72,
+        "y": 104,
         "w": 4,
         "h": 3
       },
@@ -4392,7 +5682,7 @@
       },
       "gridPos": {
         "x": 20,
-        "y": 72,
+        "y": 104,
         "w": 4,
         "h": 3
       },
@@ -4460,7 +5750,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 75,
+        "y": 107,
         "w": 12,
         "h": 7
       },
@@ -4569,7 +5859,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 75,
+        "y": 107,
         "w": 12,
         "h": 7
       },
@@ -4711,7 +6001,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 82,
+        "y": 114,
         "w": 24,
         "h": 1
       },
@@ -4727,7 +6017,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 83,
+        "y": 115,
         "w": 6,
         "h": 3
       },
@@ -4798,7 +6088,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 83,
+        "y": 115,
         "w": 6,
         "h": 3
       },
@@ -4868,7 +6158,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 83,
+        "y": 115,
         "w": 6,
         "h": 3
       },
@@ -4938,7 +6228,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 83,
+        "y": 115,
         "w": 6,
         "h": 3
       },
@@ -5001,7 +6291,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 86,
+        "y": 118,
         "w": 24,
         "h": 6
       },
@@ -5068,7 +6358,7 @@
       "collapsed": true,
       "gridPos": {
         "x": 0,
-        "y": 92,
+        "y": 124,
         "w": 24,
         "h": 1
       },
@@ -5083,7 +6373,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 93,
+            "y": 125,
             "w": 12,
             "h": 7
           },
@@ -5209,7 +6499,7 @@
           },
           "gridPos": {
             "x": 12,
-            "y": 93,
+            "y": 125,
             "w": 12,
             "h": 7
           },

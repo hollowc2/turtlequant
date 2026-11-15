@@ -60,8 +60,13 @@ services:
       - "127.0.0.1:8005:8004"
     volumes:
       - /opt/turtlequant/state/live-state:/opt/turtlequant/state:ro
+      # Shadow's state, read-only, to pair each live fill with shadow's fill
+      # on the same market (the dashboard's Live vs Shadow row). It holds no
+      # secrets, and the exporter never writes either state dir.
+      - /opt/turtlequant/state:/opt/turtlequant/shadow-state:ro
     environment:
       STRATEGY: "turtlequant-live"
+      PAIR_STATE_DIR: "/opt/turtlequant/shadow-state"
 
 networks:
   monitoring_net:

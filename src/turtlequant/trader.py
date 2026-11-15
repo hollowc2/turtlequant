@@ -826,7 +826,11 @@ class Trader:
                     logger.warning("Research capture submit failed: %s", exc)
                     _inc(stats, "research_submit_errors")
         self._marks = None
-        self.risk.record_asset_risk(self.asset_risk)
+        if self.live:
+            # After this scan's buys, so the recorded balance is current. Live
+            # only: shadow and paper never touch the wallet.
+            self.risk.record_wallet_balance(self.executor.collateral_balance())
+        self.risk.record_asset_risk(self.asset_risk)  # saves the wallet balance too
         stats["reprice_errors"] = self.reprice_errors
         self.reprice_errors = 0
         stats["synthetic_book_exits_held"] = self.synthetic_exits_held
@@ -1205,6 +1209,7 @@ class Trader:
                 "edge": plan.edge,
                 "size_usd": result.filled_usd,
                 "requested_size_usd": plan.size_usd,
+                "nav": self.positions.current_nav,  # realized NAV at entry, for size as % of NAV
                 "filled_shares": result.filled_shares,
                 "complete": result.complete,
                 "slippage": result.avg_price - side.mid,
