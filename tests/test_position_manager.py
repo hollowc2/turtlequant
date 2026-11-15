@@ -453,3 +453,29 @@ def test_ev_exit_rule_sells_only_when_the_net_bid_beats_the_model(tmp_path):
     assert (decision.should_exit, decision.reason) == (True, "ev_exit")
     # No bid: never an ev exit.
     assert not manager.exit_decision("m1", 0.0001, 0.0, rule="ev").should_exit
+
+
+def test_save_if_missing_writes_a_fresh_book_for_the_exporter(tmp_path):
+    positions_file = tmp_path / "positions.json"
+    PositionManager(starting_nav=100.0, positions_file=positions_file).save_if_missing()
+
+    data = json.loads(positions_file.read_text())
+    assert data["nav"] == 100.0 and data["total_pnl"] == 0.0 and data["positions"] == []
+
+
+def test_save_if_missing_never_touches_an_existing_book(tmp_path):
+    positions_file = tmp_path / "positions.json"
+    positions_file.write_text('{"nav": 123.0, "total_pnl": 23.0, "positions": []}')
+    before = positions_file.stat().st_mtime_ns
+
+    mgr = PositionManager(starting_nav=100.0, positions_file=positions_file)
+    mgr.save_if_missing()
+
+    assert positions_file.stat().st_mtime_ns == before
+    assert mgr.current_nav == 123.0
+
+
+def test_save_if_missing_writes_nothing_in_dry_run(tmp_path):
+    PositionManager(positions_file=tmp_path / "positions.json", persist=False).save_if_missing()
+
+    assert not (tmp_path / "positions.json").exists()

@@ -31,7 +31,8 @@ services:
       - /opt/turtlequant/state/live-state:/app/state
     environment:
       # Size from the wallet's funding, not shadow's $1,000 paper NAV. Used
-      # only when live-state has no positions file yet.
+      # only on the first start in an empty live-state, which writes the
+      # positions file.
       STARTING_NAV: "100.0"
       # Hard cap on any single buy, whatever Kelly and NAV say; also the
       # per-market cap at 10% of a $100 wallet.

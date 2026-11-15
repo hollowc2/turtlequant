@@ -383,7 +383,7 @@ docker compose -f docker-compose.live.yml build
 docker compose -f docker-compose.live.yml run --rm -e MAX_ORDER_USD=2 turtlequant-bot-live
 ```
 
-The live state starts at `STARTING_NAV` (100) when it has no positions file. Entries are rare (a few a week in shadow), so leave it running until one fills, then press Ctrl-C. Then confirm:
+The live state starts at `STARTING_NAV` (100) when it has no positions file, and the bot writes that file at startup so the exporter can read it before the first fill. Entries are rare (a few a week in shadow), so leave it running until one fills, then press Ctrl-C. Then confirm:
 - `[WALLET_CAP]` or `[ENTRY` lines show the wallet balance was read.
 - The `order` event in `turtlequant-history.jsonl` has `status: matched`, an `order_id` and fill amounts.
 - `uv run python scripts/order_intents.py --state-dir /opt/turtlequant/state/live-state list` shows nothing outstanding.
@@ -404,7 +404,7 @@ docker compose -f docker-compose.live.yml up -d --build
 | `turtlequant-bot-live` | `/opt/turtlequant/state/live-state` | — |
 | `turtlequant-grafana-exporter-live` | `live-state`, and shadow's state at `/opt/turtlequant/shadow-state`, both read-only | `strategy="turtlequant-live"`, host port 8005 |
 
-Both extend their shadow services, so they share the image, init, logging and healthchecks. Live changes only its state, wallet secrets, `STARTING_NAV` (100) and metrics label. `STARTING_NAV` applies only while `live-state` has no positions file.
+Both extend their shadow services, so they share the image, init, logging and healthchecks. Live changes only its state, wallet secrets, `STARTING_NAV` (100) and metrics label. `STARTING_NAV` applies only at the first start in an empty `live-state`: the bot then writes the positions file, and NAV comes from it afterwards.
 
 The live exporter reads shadow's history (`PAIR_STATE_DIR`) only to pair each live fill with shadow's for the **Live vs Shadow** row. It gets no wallet secrets and never calls the wallet. The wallet balance it exports is the one the live bot reads once per scan and saves in `turtlequant-risk.json`. If a read fails, the last good balance stays and `turtlequant_wallet_balance_age_sec` grows.
 

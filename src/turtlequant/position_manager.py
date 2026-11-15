@@ -431,6 +431,15 @@ class PositionManager:
     # Persistence
     # ------------------------------------------------------------------
 
+    def save_if_missing(self) -> None:
+        """Write a fresh book at startup, so the NAV is on disk before the first fill.
+
+        Without it a new bot has no positions file until it trades, and the
+        exporter reports it as unreadable state.
+        """
+        if not self.positions_file.exists():
+            self._save()
+
     def _load(self) -> None:
         if not self.positions_file.exists():
             return

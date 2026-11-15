@@ -451,6 +451,7 @@ def main() -> None:
         positions_file=state_dir / "turtlequant-positions.json",
         persist=persist,
     )
+    pos_mgr.save_if_missing()  # a no-op in dry-run, which never writes state
     risk_controls = RiskControls.load(state_dir, pos_mgr.current_nav, persist=persist)
     executor = ExecutionClient.from_env(
         mode=execution_mode, allow_live=args.i_accept_live_risk
