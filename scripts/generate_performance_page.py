@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Generate the public TurtleQuant performance page on billybitcoin.cloud.
+"""Generate the public TurtleQuant pages on billybitcoin.cloud.
 
-Reads the bot's state files and writes a static page. Run hourly from host cron
-(see scripts/performance_page.cron).
+Reads the bots' state files and writes two static pages. Run hourly from host
+cron (see scripts/performance_page.cron).
 
-The page shows only the current run. A state reset moves the old files into
-<state-dir>/archive/<YYYYmmddTHHMMSSZ>/, and those archived runs are not published.
+- <output>: the live bot's portfolio (when <live-state-dir> has a positions
+  file) above the shadow run's track record.
+- <strategy-dir>/index.html and strategy.js: the strategy explainer, with rules
+  from the live bot's startup banner and a lab seeded from the last scan.
+
+The track record shows only the current shadow run. A state reset moves the old
+files into <state-dir>/archive/<YYYYmmddTHHMMSSZ>/, and those runs are not published.
 
 Usage:
     uv run python scripts/generate_performance_page.py
@@ -24,27 +29,62 @@ from pathlib import Path
 from turtlequant.history import load_history
 from turtlequant.performance_page import (
     MODE_LABELS,
+    LivePortfolio,
     RunSummary,
     build_closed_trades,
     open_positions_from_state,
     parse_ts,
     render_page,
 )
+from turtlequant.strategy_page import (
+    STRATEGY_JS,
+    latest_marks,
+    load_bot_rules,
+    render_strategy_page,
+)
 
 POSITIONS_FILE = "turtlequant-positions.json"
+RISK_FILE = "turtlequant-risk.json"
+LIVE_SUBDIR = "live-state"
 DEFAULT_STATE_DIR = Path("/opt/turtlequant/state")
 DEFAULT_OUTPUT = Path("/var/www/billybitcoin.cloud/html/turtlequant/index.html")
 DEFAULT_STARTING_NAV = 1000.0
 
 
-def load_positions(state_dir: Path) -> dict:
-    path = state_dir / POSITIONS_FILE
+def _load_object(path: Path) -> dict:
     if not path.exists():
         return {}
     data = json.loads(path.read_text())
     if not isinstance(data, dict):
-        raise ValueError(f"positions file must be a JSON object: {path}")
+        raise ValueError(f"state file must be a JSON object: {path}")
     return data
+
+
+def load_positions(state_dir: Path) -> dict:
+    return _load_object(state_dir / POSITIONS_FILE)
+
+
+def load_live(live_dir: Path) -> LivePortfolio | None:
+    """The live bot's book, or None before it has ever started."""
+    state = load_positions(live_dir)
+    if not state:
+        return None
+    risk = _load_object(live_dir / RISK_FILE)
+    trades = build_closed_trades(load_history(live_dir))
+    try:
+        wallet = float(risk["wallet_collateral_usd"])
+    except (KeyError, TypeError, ValueError):
+        wallet = None
+    halt = str(risk.get("halt_reason") or risk.get("entry_halt") or "")
+    return LivePortfolio(
+        starting_nav=starting_nav(state, None),
+        nav=float(state.get("nav", 0.0)),
+        trades=trades,
+        open_positions=open_positions_from_state(state),
+        wallet_usd=wallet,
+        wallet_at=parse_ts(risk.get("wallet_balance_at")),
+        halt=halt,
+    )
 
 
 def starting_nav(state: dict, override: float | None) -> float:
@@ -64,10 +104,20 @@ def write_atomic(path: Path, content: str) -> None:
     tmp_path.replace(path)
 
 
-def generate(*, state_dir: Path, output: Path, mode: str, nav_override: float | None) -> int:
+def generate(
+    *,
+    state_dir: Path,
+    output: Path,
+    mode: str,
+    nav_override: float | None,
+    live_dir: Path | None = None,
+    strategy_dir: Path | None = None,
+) -> int:
     state = load_positions(state_dir)
     events = load_history(state_dir)
     trades = build_closed_trades(events)
+    live = load_live(live_dir) if live_dir is not None else None
+    generated_at = datetime.now(UTC)
     stamps = [ts for ts in (parse_ts(e.get("ts")) for e in events) if ts is not None]
     current = RunSummary(
         run_id="current",
@@ -82,11 +132,24 @@ def generate(*, state_dir: Path, output: Path, mode: str, nav_override: float | 
         trades=trades,
         open_positions=open_positions_from_state(state),
         starting_nav=starting_nav(state, nav_override),
-        generated_at=datetime.now(UTC),
+        generated_at=generated_at,
         mode=mode,
         runs=[current],
         active_run=current.run_id,
+        live=live,
     ))
+    if strategy_dir is not None:
+        # Rules from the bot that trades real money; marks from shadow, which
+        # prices the same board every scan.
+        rules_dir = live_dir if live is not None and live_dir is not None else state_dir
+        write_atomic(strategy_dir / "strategy.js", STRATEGY_JS)
+        write_atomic(strategy_dir / "index.html", render_strategy_page(
+            rules=load_bot_rules(rules_dir),
+            marks=latest_marks(state_dir) or (latest_marks(live_dir) if live_dir else None),
+            shadow_trades=trades,
+            live_nav=live.nav if live is not None else None,
+            generated_at=generated_at,
+        ))
     return len(trades)
 
 
@@ -101,6 +164,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Labels the page; must match the state dir (shadow: /opt/turtlequant/state)",
     )
     parser.add_argument("--starting-nav", type=float, default=None, help="Override the derived starting NAV")
+    parser.add_argument(
+        "--live-state-dir",
+        type=Path,
+        default=None,
+        help=f"Live bot state shown above the track record (default: <state-dir>/{LIVE_SUBDIR}; skipped if it has no positions file)",
+    )
+    parser.add_argument("--no-live", action="store_true", help="Leave the live portfolio off the page")
+    parser.add_argument(
+        "--strategy-dir",
+        type=Path,
+        default=None,
+        help="Where the strategy explainer goes (default: <output dir>/strategy)",
+    )
     return parser.parse_args(argv)
 
 
@@ -112,6 +188,8 @@ def main(argv: list[str] | None = None) -> int:
             output=args.output,
             mode=args.mode,
             nav_override=args.starting_nav,
+            live_dir=None if args.no_live else (args.live_state_dir or args.state_dir / LIVE_SUBDIR),
+            strategy_dir=args.strategy_dir or args.output.parent / "strategy",
         )
     except Exception as exc:
         print(f"generate_performance_page failed: {exc}", file=sys.stderr)

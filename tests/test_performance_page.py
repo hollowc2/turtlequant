@@ -252,3 +252,69 @@ def test_side_column_shows_the_held_token():
     assert page.count("<th class=\"l\">Side</th>") == 2
     assert page.count("<td class='l'>NO</td>") == 2
     assert build_closed_trades(_history())[0].outcome == "YES"  # legacy rows default to YES
+
+
+def _write_live(live_dir, *, nav=100.0, risk=None):
+    live_dir.mkdir(parents=True, exist_ok=True)
+    (live_dir / "turtlequant-positions.json").write_text(
+        json.dumps({"nav": nav, "total_pnl": nav - 100.0, "positions": []})
+    )
+    (live_dir / "turtlequant-risk.json").write_text(json.dumps(risk or {
+        "wallet_collateral_usd": 101.61,
+        "wallet_balance_at": "2026-11-16T23:52:00+00:00",
+        "halt_reason": "",
+        "entry_halt": "",
+    }))
+
+
+def test_live_portfolio_leads_the_page(tmp_path):
+    module = _load_generator()
+    state_dir = tmp_path / "state"
+    for event in _history():
+        append_history(state_dir, event)
+    (state_dir / "turtlequant-positions.json").write_text(json.dumps({"nav": 1035.0, "total_pnl": 35.0, "positions": []}))
+    _write_live(state_dir / "live-state")
+    output = tmp_path / "site" / "index.html"
+
+    assert module.main(["--state-dir", str(state_dir), "--output", str(output)]) == 0
+
+    page = output.read_text()
+    assert page.index('id="h-live"') < page.index("Shadow track record")
+    assert "$101.61" in page and "No open live positions" in page
+    assert 'href="strategy/"' in page
+    # The live table must not pick up the shadow log's outcome filter.
+    live_part = page[page.index('id="h-live"'):page.index('id="h-record"')]
+    assert "data-outcome" not in live_part
+
+
+def test_live_section_is_omitted_without_live_state(tmp_path):
+    module = _load_generator()
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    output = tmp_path / "site" / "index.html"
+
+    assert module.main(["--state-dir", str(state_dir), "--output", str(output)]) == 0
+
+    page = output.read_text()
+    assert 'id="h-live"' not in page and "Track record" in page
+
+
+def test_live_halt_is_shown(tmp_path):
+    module = _load_generator()
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    _write_live(state_dir / "live-state", risk={"halt_reason": "daily_loss"})
+    output = tmp_path / "site" / "index.html"
+
+    assert module.main(["--state-dir", str(state_dir), "--output", str(output)]) == 0
+    assert "Entries paused" in output.read_text()
+
+
+def test_inline_script_unchanged_by_live_section():
+    from turtlequant.performance_page import LivePortfolio
+
+    live = LivePortfolio(starting_nav=100.0, nav=100.0, trades=build_closed_trades(_history()),
+                         open_positions=[], wallet_usd=None, wallet_at=None, halt="")
+    plain = render_page(trades=[], open_positions=[], starting_nav=1000.0, generated_at=NOW)
+    with_live = render_page(trades=[], open_positions=[], starting_nav=1000.0, generated_at=NOW, live=live)
+    assert _inline_scripts(plain) == _inline_scripts(with_live)

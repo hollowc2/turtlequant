@@ -102,6 +102,36 @@ class OpenPosition:
 
 
 @dataclass(frozen=True)
+class LivePortfolio:
+    """The real-money bot's book, shown above the shadow record.
+
+    nav is the bot's realized book (starting capital plus closed-trade P&L);
+    wallet_usd is the CLOB pUSD cash the bot last read, which is what is
+    actually in the account outside open positions.
+    """
+
+    starting_nav: float
+    nav: float
+    trades: list[ClosedTrade]
+    open_positions: list[OpenPosition]
+    wallet_usd: float | None
+    wallet_at: dt.datetime | None
+    halt: str  # "" while entries are allowed
+
+    @property
+    def realized_pnl(self) -> float:
+        return sum(t.pnl for t in self.trades)
+
+    @property
+    def unrealized_pnl(self) -> float:
+        return sum(p.unrealized_pnl for p in self.open_positions)
+
+    @property
+    def exposure(self) -> float:
+        return sum(p.size_usd for p in self.open_positions)
+
+
+@dataclass(frozen=True)
 class Stats:
     starting_nav: float
     ending_nav: float
@@ -487,13 +517,16 @@ def _cohort_tiles(trades: list[ClosedTrade], key: str) -> str:
     return "".join(tiles) or "<div class='muted-note'>No closed trades yet.</div>"
 
 
-def _trade_rows(trades: list[ClosedTrade]) -> str:
+def _trade_rows(trades: list[ClosedTrade], *, filterable: bool = True) -> str:
+    """Trade log rows. Only the shadow log is filterable: the page script hides
+    every tr[data-outcome], so the live table leaves the attribute off."""
     rows = []
     for number, trade in reversed(list(enumerate(trades, start=1))):
         outcome = "win" if trade.pnl > 0 else "loss" if trade.pnl < 0 else "flat"
         question = html.escape(trade.question)
+        row_open = f"<tr data-outcome='{outcome}'>" if filterable else "<tr>"
         rows.append(
-            f"<tr data-outcome='{outcome}'>"
+            f"{row_open}"
             f"<td>{number}</td>"
             f"<td class='l'>{_date(trade.opened_at, '%Y-%m-%d %H:%M')}</td>"
             f"<td class='l'>{_date(trade.closed_at, '%Y-%m-%d %H:%M')}</td>"
@@ -601,6 +634,87 @@ def _runs_nav(runs: Sequence[RunSummary], active_run: str, root_href: str) -> st
     return f'<nav class="runs" aria-label="Trading runs">{"".join(links)}</nav>'
 
 
+_OPEN_HEAD = """<tr>
+          <th class="l">Opened (UTC)</th><th class="l">Asset</th><th class="l">Market</th><th class="l">Type</th>
+          <th class="l">Side</th><th>Strike</th><th>Expiry</th><th>Edge</th><th>Entry</th><th>Mark</th><th>Size</th>
+          <th class="l">Status</th><th>Unrealized</th>
+        </tr>"""
+
+_TRADE_HEAD = """<tr>
+            <th>#</th><th class="l">Opened (UTC)</th><th class="l">Closed (UTC)</th><th>Hold</th>
+            <th class="l">Asset</th><th class="l">Market</th><th class="l">Type</th><th class="l">Side</th>
+            <th>Strike</th><th>Expiry</th>
+            <th>Model P</th><th>Edge</th><th>Entry</th><th>Exit</th><th>Size</th>
+            <th class="l">Exit Reason</th><th>Return</th><th>P&amp;L</th>
+          </tr>"""
+
+
+def _live_section(live: LivePortfolio) -> str:
+    realized = live.realized_pnl
+    unrealized = live.unrealized_pnl
+    marked = live.nav + unrealized
+    marked_pnl = marked - live.starting_nav
+    wins = sum(1 for t in live.trades if t.pnl > 0)
+    wallet_sub = (
+        f"pUSD on Polymarket · read {_date(live.wallet_at, '%H:%M UTC')}"
+        if live.wallet_at else "pUSD on Polymarket"
+    )
+    status = (
+        ("Entries paused", "neg", html.escape(live.halt.replace("_", " ")))
+        if live.halt else ("Trading", "pos", "scanning every 60s")
+    )
+    tiles = "".join([
+        _tile("Marked NAV", _usd(marked), sub=f"{_usd(live.starting_nav, dp=0)} start · open marked to bid"),
+        _tile("P&L Since Start", _usd(marked_pnl, signed=True), tone=_tone(marked_pnl),
+              sub=_pct(marked_pnl / live.starting_nav * 100 if live.starting_nav > 0 else None, signed=True)),
+        _tile("Realized", _usd(realized, signed=True), tone=_tone(realized),
+              sub=f"{len(live.trades)} closed · {wins}W · {len(live.trades) - wins}L" if live.trades else "no closed trades yet"),
+        _tile("Open", str(len(live.open_positions)),
+              sub=f"{_usd(live.exposure)} at cost · <span class='{_tone(unrealized)}'>{_usd(unrealized, signed=True)}</span>"),
+        _tile("Wallet Cash", _usd(live.wallet_usd), sub=wallet_sub),
+        _tile("Status", status[0], tone=status[1], sub=status[2]),
+    ])
+    if live.trades:
+        trades_html = f"""
+  <details class="panel trade-log-panel live-log" open>
+    <summary class="section-summary">
+      <span>Live Trades</span>
+      <span class="summary-meta">{len(live.trades)} trades · newest first</span>
+    </summary>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          {_TRADE_HEAD}
+        </thead>
+        <tbody>{_trade_rows(live.trades, filterable=False)}</tbody>
+      </table>
+    </div>
+  </details>"""
+    else:
+        trades_html = ""
+    return f"""
+  <section class="live" aria-labelledby="h-live">
+    <div class="section-head">
+      <h2 id="h-live">Live portfolio</h2>
+      <span class="badge badge-live">Real money</span>
+    </div>
+    <p class="section-lede">
+      The same strategy, trading a small real account on the Polymarket order book.
+      Every order is capped in dollars while live trading earns trust.
+    </p>
+    <div class="stats">{tiles}</div>
+    <section class="panel table-panel">
+      <table>
+        <thead>
+          {_OPEN_HEAD}
+        </thead>
+        <tbody>{_open_rows(live.open_positions) if live.open_positions else "<tr><td colspan='13' class='empty-cell'>No open live positions. The bot buys only when a market clears its edge threshold, so quiet stretches are normal.</td></tr>"}</tbody>
+      </table>
+    </section>{trades_html}
+  </section>
+"""
+
+
 # ---------------------------------------------------------------------------
 # Page
 # ---------------------------------------------------------------------------
@@ -616,8 +730,13 @@ def render_page(
     runs: Sequence[RunSummary] = (),
     active_run: str = "current",
     root_href: str = "",
+    live: LivePortfolio | None = None,
 ) -> str:
-    """Render one run's page. root_href points from this page back to the main page ("" on it)."""
+    """Render one run's page. root_href points from this page back to the main page ("" on it).
+
+    With live, the real-money book leads the page and this run becomes the
+    shadow track record beneath it.
+    """
     badge, mode_note = MODE_LABELS[mode]
     run = next((r for r in runs if r.run_id == active_run), None)
     archived = run is not None and run.ended_at is not None
@@ -671,8 +790,8 @@ def render_page(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TurtleQuant — {"Polymarket Performance" if not root_href or run is None else html.escape(run.label)}</title>
-  <meta name="description" content="TurtleQuant prices Polymarket crypto markets as digital options and trades the edge. Equity curve, drawdown, return distribution and every trade.">
+  <title>TurtleQuant — {"Portfolio" if not root_href or run is None else html.escape(run.label)}</title>
+  <meta name="description" content="TurtleQuant prices Polymarket crypto markets as digital options and trades the edge. Live portfolio, shadow equity curve, drawdown and every trade.">
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/assets/fonts/inter-var-latin.woff2">
   <link rel="stylesheet" href="/assets/fonts.css">
   <script src="/assets/vendor/chart.umd.min.js"></script>
@@ -682,20 +801,29 @@ def render_page(
 <main>
   <nav class="top-links">
     <a class="site-link" href="{html.escape(root_href or "/")}"><span aria-hidden="true">←</span>{"all runs" if root_href else "billybitcoin.cloud"}</a>
+    <a class="site-link" href="{html.escape(root_href)}strategy/">how the strategy works<span aria-hidden="true">→</span></a>
     <a class="site-link" href="{GITHUB_URL}" target="_blank" rel="noopener noreferrer">source on GitHub<span aria-hidden="true">↗</span></a>
   </nav>
 
   <header class="hero">
-    <h1>TurtleQuant — Polymarket Performance</h1>
+    <div class="kicker">TurtleQuant · Polymarket crypto</div>
+    <h1>Pricing crypto bets like options</h1>
     <p class="about">
-      Prices Polymarket crypto markets ("Will BTC be above $X by date?") as digital and barrier
-      options — Black-Scholes with Deribit implied volatility — and buys when the model probability
-      clears the executable ask by a margin. Sized with fractional Kelly under per-market and total
-      exposure caps.
+      A market like "Will Bitcoin reach $100k by September?" is a digital option. TurtleQuant prices
+      each one with Black-Scholes and Deribit's implied volatility, and buys whichever side the model
+      says the crowd has underpriced by at least a few cents. Positions are sized with a quarter of
+      Kelly and held until the market resolves or the bid pays more than the model thinks the claim is worth.
     </p>
-    <div class="sub">
+    <div class="sub">Regenerated hourly · last built {html.escape(stamp)}</div>
+  </header>
+{_live_section(live) if live is not None else ""}
+  <header class="record-head">
+    <div class="section-head">
+      <h2 id="h-record">{"Shadow track record" if live is not None else "Track record"}</h2>
       <span class="badge">{html.escape(badge)}</span>{'<span class="badge badge-archived">Archived</span>' if archived else ""}
-      {run_note}{html.escape(mode_note)} · {stats.trade_count} closed trades{through} · {"Frozen snapshot" if archived else "Regenerated hourly"}, last built {html.escape(stamp)}
+    </div>
+    <div class="sub">
+      {run_note}{html.escape(mode_note)} · {stats.trade_count} closed trades{through}{" · Frozen snapshot" if archived else ""}
     </div>
     {_runs_nav(runs, active_run, root_href)}
   </header>
@@ -745,11 +873,7 @@ def render_page(
   <section class="panel table-panel">
     <table>
       <thead>
-        <tr>
-          <th class="l">Opened (UTC)</th><th class="l">Asset</th><th class="l">Market</th><th class="l">Type</th>
-          <th class="l">Side</th><th>Strike</th><th>Expiry</th><th>Edge</th><th>Entry</th><th>Mark</th><th>Size</th>
-          <th class="l">Status</th><th>Unrealized</th>
-        </tr>
+        {_OPEN_HEAD}
       </thead>
       <tbody>{_open_rows(open_positions)}</tbody>
     </table>
@@ -770,13 +894,7 @@ def render_page(
     <div class="table-scroll">
       <table>
         <thead>
-          <tr>
-            <th>#</th><th class="l">Opened (UTC)</th><th class="l">Closed (UTC)</th><th>Hold</th>
-            <th class="l">Asset</th><th class="l">Market</th><th class="l">Type</th><th class="l">Side</th>
-            <th>Strike</th><th>Expiry</th>
-            <th>Model P</th><th>Edge</th><th>Entry</th><th>Exit</th><th>Size</th>
-            <th class="l">Exit Reason</th><th>Return</th><th>P&amp;L</th>
-          </tr>
+          {_TRADE_HEAD}
         </thead>
         <tbody>{_trade_rows(trades)}</tbody>
       </table>
@@ -790,6 +908,7 @@ def render_page(
       <li>Sharpe and Sortino are annualized (√365) from daily returns on realized NAV. Days with no closed trades count as 0%.</li>
       <li>Edge is model probability minus the executable ask at entry. Open-position marks use the last observed best bid, before exit fees; resolved markets use the resolution price.</li>
       <li>Profit factor is gross winning P&amp;L over gross losing P&amp;L. Payoff ratio is average win over average loss.</li>
+      <li>Live marked NAV is the bot's realized book plus open positions marked to the best bid. Wallet cash is the pUSD balance the live bot last read from Polymarket; it can differ from the book by deposits and by fills not yet settled.</li>
     </ul>
   </section>
 </main>
@@ -1213,6 +1332,16 @@ td.empty-cell { text-align: center; color: var(--muted); padding: 28px; }
 .chart-note b { color: var(--text); font-weight: 500; }
 .methodology ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px; line-height: 1.6; max-width: 90ch; }
 .badge-archived { color: var(--muted); background: transparent; border-color: var(--border); }
+.badge-live { color: var(--up); background: rgba(106, 170, 120, 0.12); border-color: rgba(106, 170, 120, 0.4); }
+.kicker { color: var(--accent); font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 8px; }
+.section-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 36px 0 8px; }
+.section-head h2 { margin: 0; color: var(--text); font-size: 17px; }
+.section-lede { max-width: 78ch; margin: 0 0 4px; color: var(--muted); font-size: 14px; line-height: 1.55; }
+.live { border-top: 1px solid var(--border); margin-top: 28px; }
+.live .stats { margin-top: 14px; }
+.live-log { margin-top: 10px; }
+.record-head { border-top: 1px solid var(--border); margin-top: 40px; }
+.record-head .sub { margin-bottom: 4px; }
 .runs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
 .run-link {
   display: flex; flex-direction: column; gap: 3px;

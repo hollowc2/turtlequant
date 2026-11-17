@@ -293,12 +293,13 @@ Check two things:
 
 ## Public Performance Page
 
-`scripts/generate_performance_page.py` builds <https://billybitcoin.cloud/turtlequant/> from the shadow state and writes it straight into the site's web root. The page shows:
-- Equity curve and drawdown
-- Return distribution and trade metrics
-- Open positions and the trade log
+`scripts/generate_performance_page.py` builds two pages and writes them straight into the site's web root.
 
-It covers the current run only. Runs archived by a state reset are not published.
+<https://billybitcoin.cloud/turtlequant/> shows:
+- **Live portfolio** (when `<state-dir>/live-state` has a positions file): marked NAV, realized and unrealized P&L, wallet cash from `turtlequant-risk.json`, entry-halt status, open positions and live trades. `--live-state-dir` points elsewhere; `--no-live` leaves it off.
+- **Shadow track record**: equity curve, drawdown, return distribution, trade metrics, open positions and the trade log. It covers the current run only. Runs archived by a state reset are not published.
+
+<https://billybitcoin.cloud/turtlequant/strategy/> (`--strategy-dir`, default `<output dir>/strategy`) explains the strategy and has a pricing lab. Its rules come from the newest startup banner in the live bot's log (rotations included; the bot's defaults if none is found). The lab's markets come from the last `market_marks` record in shadow's `turtlequant-marks.jsonl`. All its behavior is in `strategy/strategy.js`, an external file, so editing it needs no CSP change.
 
 It runs hourly from `billy`'s crontab, out of `/opt/turtlequant-app`.
 
@@ -315,7 +316,7 @@ uv run python scripts/generate_performance_page.py --output /tmp/turtlequant/ind
 
 **`--mode`** changes only the page badge (`shadow`, `paper` or `live`), and it must match `--state-dir`. To publish live results, use `--state-dir /opt/turtlequant/state/live-state --mode live`.
 
-**CSP hash.** The page's one inline script is allowed by its sha256 hash in the site's CSP, which lives in `deploy/nginx/snippets/security-headers.conf` in the billybitcoin.cloud repo. Data changes don't affect the hash, but **any edit to `_PAGE_SCRIPT` in `src/turtlequant/performance_page.py` does.** After such an edit:
+**CSP hash.** The main page's one inline script is allowed by its sha256 hash in the site's CSP, which lives in `deploy/nginx/snippets/security-headers.conf` in the billybitcoin.cloud repo. Data changes don't affect the hash, but **any edit to `_PAGE_SCRIPT` in `src/turtlequant/performance_page.py` does.** After such an edit:
 
 1. Regenerate the page from an empty `--state-dir`, so no numbers get committed.
 2. Copy it into the site repo as `turtlequant/index.html`.
