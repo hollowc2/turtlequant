@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from turtlequant.clob_execution import ExecutionClient
+from turtlequant.clob_execution import ExecutionClient, OrderBook
 from turtlequant.history import DIAGNOSTICS_JSONL, HISTORY_JSONL, MARKS_JSONL
 from turtlequant.market_scanner import ActiveMarket
 from turtlequant.order_intents import OrderIntentLedger
@@ -544,6 +545,19 @@ def test_stale_iv_blocks_entries_but_not_exits(tmp_path):
     hold(trader)
     trader.reprice_positions()  # model ~0.52 < 0.70 bid: exits still run
     assert not trader.positions.has_position("m-1")
+
+
+def test_default_delta_cap_fits_a_minimum_order_on_a_100_dollar_nav():
+    # The 2026-11-18 BTC $65k YES: ~16.5 dollars of delta per dollar staked, a
+    # 5-share minimum at a 0.549 limit. A 20% cap left $1.21, below the ~$2.88
+    # minimum; the shipped cap must leave room for it.
+    from turtlequant.trader import delta_headroom_usd, min_buy_usd
+
+    cap_pct = float(re.search(r'MAX_ASSET_DELTA_PCT: "([\d.]+)"', (Path(__file__).resolve().parent.parent / "docker-compose.yml").read_text()).group(1))
+    book = OrderBook(token_id="t", min_order_size=5.0)
+    headroom = delta_headroom_usd(0.0, 16.5 * 0.53, 0.53, cap_pct * 100.0)
+    assert headroom >= min_buy_usd(book, 0.549)
+    assert delta_headroom_usd(0.0, 16.5 * 0.53, 0.53, 0.20 * 100.0) < min_buy_usd(book, 0.549)
 
 
 def test_delta_headroom_limits_adding_and_allows_reducing():

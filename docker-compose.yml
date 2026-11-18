@@ -44,7 +44,13 @@ services:
       # books and fees. They are passed by docker-compose.live.yml alone.
       DISCORD_TRADES: "${DISCORD_TRADES:-all}"
       DISCORD_CHART_INTERVAL: "${DISCORD_CHART_INTERVAL:-1h}"
-      MAX_ASSET_DELTA_PCT: "0.20"
+      # A share of NAV, shared by shadow and live. Polymarket's 5-share minimum
+      # does not shrink with NAV, so at $100 a 20% cap ($20 of delta) left
+      # only ~$1.20 on a near-the-money BTC barrier, below the ~$2.90 minimum
+      # order: the live bot skipped 4 of the shadow's 12 entries. A long-only
+      # buy loses at most its stake, which MAX_ORDER_USD and the per-market cap
+      # already bound.
+      MAX_ASSET_DELTA_PCT: "0.60"
       # The legacy model prices <3-day barrier markets 5-7pp above the market
       # mid (marks 2026-09-25/26), so enter nothing resolving within a week.
       # Those markets are still marked for scripts/evaluate_models.py.
