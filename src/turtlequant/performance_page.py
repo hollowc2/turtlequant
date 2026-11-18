@@ -801,8 +801,8 @@ def render_page(
 <main>
   <nav class="top-links">
     <a class="site-link" href="{html.escape(root_href or "/")}"><span aria-hidden="true">←</span>{"all runs" if root_href else "billybitcoin.cloud"}</a>
-    <a class="site-link" href="{html.escape(root_href)}strategy/">how the strategy works<span aria-hidden="true">→</span></a>
     <a class="site-link" href="{GITHUB_URL}" target="_blank" rel="noopener noreferrer">source on GitHub<span aria-hidden="true">↗</span></a>
+    <a class="site-link" href="{html.escape(root_href)}strategy/">how the strategy works<span aria-hidden="true">→</span></a>
   </nav>
 
   <header class="hero">
