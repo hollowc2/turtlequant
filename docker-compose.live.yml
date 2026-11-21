@@ -20,8 +20,10 @@ services:
   # (it never falls back to helios's Paris address). The bot shares this
   # container's network namespace, so it reaches Polymarket, Deribit and the RPC
   # from the VPN's exit.
+  # v3.41.3, not v3.40.0: the older release dials PIA ports (1197/501) that PIA's
+  # servers no longer answer on, so the tunnel never came up from helios.
   turtlequant-vpn:
-    image: qmcgaw/gluetun:v3.40.0
+    image: qmcgaw/gluetun:v3.41.3
     container_name: turtlequant-vpn
     restart: unless-stopped
     cap_add:

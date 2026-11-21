@@ -482,7 +482,7 @@ Plaintext Deribit keys were once committed to the monorepo in `crypto_up_or_down
 
 Polymarket rejects order placement from helios's own address (Paris, FR) with a
 403 "Trading restricted in your region"; reads still work. The live bot's
-traffic, and only its, goes through the `turtlequant-vpn` container (gluetun,
+traffic, and only its, goes through the `turtlequant-vpn` container (gluetun v3.41.3,
 Private Internet Access over OpenVPN, region `PIA_REGION`, default Portugal).
 `turtlequant-bot-live` shares that container's network and waits for it to be
 healthy; gluetun's firewall blocks everything outside the tunnel, so a dropped
