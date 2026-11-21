@@ -31,6 +31,8 @@ def test_every_service_inherits_the_shared_config():
     names = re.findall(r"^  ([\w-]+):$", services, re.M)
     assert names
     for name in names:
+        if name == "turtlequant-vpn":  # a third-party image, not a copy of a shadow service
+            continue
         body = re.search(rf"^  {name}:\n((?:    .*\n|\s*\n|  #.*\n)*)", services, re.M).group(1)
         assert "<<: *bot-common" in body, f"{name} does not merge *bot-common, so has no init"
 
@@ -47,6 +49,13 @@ def _live() -> str:
     return (ROOT / "docker-compose.live.yml").read_text()
 
 
+def _live_service(name: str) -> str:
+    """The text of one service under ``services:`` in the live compose file."""
+    match = re.search(rf"^  {re.escape(name)}:\n((?:    .*\n|\s*\n|  #.*\n)*)", _live(), re.M)
+    assert match, f"{name} not found"
+    return match.group(1)
+
+
 def test_live_is_its_own_project():
     # A shared project name would let `up` on either file recreate the other's
     # containers, so live would replace shadow instead of running beside it.
@@ -59,6 +68,8 @@ def test_live_services_extend_shadow_and_rename_containers():
     shadow = set(re.findall(r"^    container_name: (\S+)$", (ROOT / "docker-compose.yml").read_text(), re.M))
     assert names
     for name in names:
+        if name == "turtlequant-vpn":  # a third-party image, not a copy of a shadow service
+            continue
         body = re.search(rf"^  {name}:\n((?:    .*\n|\s*\n|  #.*\n)*)", services, re.M).group(1)
         # extends carries over init: true from *bot-common.
         assert re.search(r"^      file: docker-compose\.yml$", body, re.M), f"{name} does not extend shadow"
@@ -95,3 +106,19 @@ def test_live_exporter_reads_shadow_state_read_only_for_fill_pairing():
     # Every state mount on the exporter is read-only.
     for mount in re.findall(r"^      - (/opt/turtlequant/\S+)$", exporter, re.M):
         assert mount.endswith(":ro"), mount
+
+
+def test_live_bot_trades_only_through_the_vpn():
+    # Polymarket rejects orders from helios's own address. The bot must share
+    # the VPN container's network, wait for it to be healthy, and publish no
+    # ports of its own (a shared namespace cannot).
+    bot = _live_service("turtlequant-bot-live")
+    assert re.search(r'^    network_mode: "service:turtlequant-vpn"$', bot, re.M)
+    assert re.search(r"^      turtlequant-vpn:\n        condition: service_healthy$", bot, re.M)
+    assert "ports:" not in bot
+
+
+def test_vpn_credentials_come_from_the_env_file_not_the_repo():
+    vpn = _live_service("turtlequant-vpn")
+    assert '"${PIA_USERNAME:-}"' in vpn and '"${PIA_PASSWORD:-}"' in vpn
+    assert re.search(r"image: qmcgaw/gluetun:v\d+\.\d+\.\d+$", vpn, re.M)  # pinned, never :latest

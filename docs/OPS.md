@@ -477,3 +477,22 @@ Plaintext Deribit keys were once committed to the monorepo in `crypto_up_or_down
 - Forks or clones made before the rewrite may still hold the real keys.
 
 **Rotating the keys in the Deribit console is the only real fix,** since anyone may have copied them. The bot doesn't need them, because public IV data works without authentication. If you keep the keys, they are only ever sent in a POST body.
+
+## Live bot VPN
+
+Polymarket rejects order placement from helios's own address (Paris, FR) with a
+403 "Trading restricted in your region"; reads still work. The live bot's
+traffic, and only its, goes through the `turtlequant-vpn` container (gluetun,
+Private Internet Access over OpenVPN, region `PIA_REGION`, default Portugal).
+`turtlequant-bot-live` shares that container's network and waits for it to be
+healthy; gluetun's firewall blocks everything outside the tunnel, so a dropped
+VPN leaves the bot offline, never on the Paris address. Shadow and the other
+bots on helios are unaffected. The host's own PIA client (`piavpn.service`) is
+unrelated and stays disconnected.
+
+- `/opt/turtlequant-app/.env` needs `PIA_USERNAME` and `PIA_PASSWORD`.
+- Check the exit: `docker exec turtlequant-vpn wget -qO- https://polymarket.com/api/geoblock`
+  must say `"blocked":false`. If it says true, the exit region is not permitted:
+  stop the live bot, do not trade.
+- A 403 on `POST /order` is the one that leaves an order intent unreconciled
+  (`[ORDER_AMBIGUOUS]`); it never reached the book, so resolve it as rejected.

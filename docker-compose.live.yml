@@ -7,9 +7,36 @@
 # shadow keeps running as the comparison for live fills. Each service extends
 # its shadow counterpart (init, logging, healthcheck) and changes only what
 # live needs: its own state, the wallet secrets and its own metrics label.
+#
+# The live bot's traffic, and only its, leaves through a Portugal VPN (the
+# turtlequant-vpn container below). Polymarket rejects order placement from
+# helios's own address (Paris, FR); reads such as books and balances still work.
+# Shadow and the other bots on helios keep the host's connection.
 name: turtlequant-live
 
 services:
+  # Private Internet Access over OpenVPN. Gluetun's firewall allows nothing out
+  # except through the tunnel, so if the VPN drops the bot has no network at all
+  # (it never falls back to helios's Paris address). The bot shares this
+  # container's network namespace, so it reaches Polymarket, Deribit and the RPC
+  # from the VPN's exit.
+  turtlequant-vpn:
+    image: qmcgaw/gluetun:v3.40.0
+    container_name: turtlequant-vpn
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      VPN_SERVICE_PROVIDER: "private internet access"
+      VPN_TYPE: "openvpn"
+      # PIA account (not a Polymarket secret), set in /opt/turtlequant-app/.env.
+      OPENVPN_USER: "${PIA_USERNAME:-}"
+      OPENVPN_PASSWORD: "${PIA_PASSWORD:-}"
+      SERVER_REGIONS: "${PIA_REGION:-Portugal}"
+      TZ: "UTC"
+
   turtlequant-bot-live:
     extends:
       file: docker-compose.yml
@@ -19,6 +46,11 @@ services:
     # MAX_ORDER_USD, or an unreconciled order intent). Retry a few times for
     # transient faults, then stay down for an operator instead of crash-looping.
     restart: "on-failure:3"
+    # Share the VPN container's network: no own interface, no published ports.
+    network_mode: "service:turtlequant-vpn"
+    depends_on:
+      turtlequant-vpn:
+        condition: service_healthy
     command:
       - "python"
       - "scripts/turtlequant_bot.py"
